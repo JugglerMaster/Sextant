@@ -1,0 +1,12 @@
+{
+  "name": "runner-control-ui-tests",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Headless DOM smoke test for the Runner Control dashboard",
+  "scripts": {
+    "test": "node ui-smoke.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}

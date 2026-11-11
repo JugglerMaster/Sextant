@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "runner-control"
+version = "0.2.0"
+description = "Self-hosted remote operations console with cross-platform runner agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Runner Control" }]
+dependencies = [
+  "fastapi>=0.162,<0.163",
+  "starlette>=1.10,<2",
+  "uvicorn>=0.30,<1",
+]
+
+[project.optional-dependencies]
+ldap = [
+  "ldap3>=2.9,<3",
+]
+dev = [
+  "pytest>=8,<10",
+  "httpx>=0.27,<0.28",
+  "pyflakes>=3,<5",
+  "pip-audit>=2,<3",
+  "ldap3>=2.9,<3",
+]
+
+[project.scripts]
+runner-control = "runner_control.cli:main"
+runner-agent = "runner_agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["runner_control*", "runner_agent*"]
+
+[tool.setuptools.package-data]
+runner_control = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

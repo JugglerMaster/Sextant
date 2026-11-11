@@ -1,0 +1,25 @@
+[Unit]
+Description=Runner Control server
+Documentation=file:/opt/runner-control/docs/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=runner-control
+Group=runner-control
+WorkingDirectory=/opt/runner-control
+EnvironmentFile=/etc/runner-control.env
+ExecStart=/opt/runner-control/.venv/bin/runner-control serve --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/runner-control
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

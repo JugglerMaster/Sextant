@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements-dev.lock
+          pip install --no-deps -e .
+          pip check
+      - name: Tests
+        run: python -m pytest
+      - name: Static checks
+        run: |
+          python -m compileall -q runner_control runner_agent
+          python -m pyflakes runner_control runner_agent tests
+      - name: Dependency audit
+        run: pip-audit
+
+  node:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui-tests/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm test
+      - name: Dashboard syntax
+        working-directory: .
+        run: node --check runner_control/static/app.js

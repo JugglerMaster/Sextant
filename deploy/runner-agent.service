@@ -1,0 +1,23 @@
+[Unit]
+Description=Runner Control agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+NoNewPrivileges=true
+UMask=0077
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+ExecStart=/opt/runner-agent/current/bin/runner-agent run --config /etc/runner-agent/config.json
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=2
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,102 @@
+# Testing
+
+This page covers the automated checks in the repository, how to run them, and what is intentionally not covered yet. The suite is deterministic: API tests use a temporary data directory and an in-process `TestClient`; WoL sends are monkeypatched, and directory authentication uses a fake LDAP module instead of a live domain controller.
+
+## Setup
+
+Requirements:
+
+- Python 3.11+.
+- A development install with the `dev` extra: `.venv/bin/pip install -e '.[dev]'`, or the reproducible path: `.venv/bin/pip install --require-hashes -r requirements-dev.lock && .venv/bin/pip install --no-deps -e .`.
+- Node.js 18+ for the jsdom dashboard smoke test.
+
+The production deployment venv intentionally omits pytest and other test dependencies. Run the tests from a development checkout.
+
+## Python tests
+
+Run the whole suite:
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+`make test` runs the same command. For a single file or test:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_api.py
+.venv/bin/python -m pytest -q tests/test_contracts.py
+.venv/bin/python -m pytest -q tests/test_contracts.py::test_csrf_required_for_mutations_but_not_gets_or_agent_routes
+.venv/bin/python -m pytest -q -k "rbac or session"
+```
+
+| File | Focus |
+| --- | --- |
+| `tests/test_api.py` | Public routes, login/logout, CSRF, enrollment, heartbeat, command dispatch/results, WoL, audit, user administration, agent rotation/deletion |
+| `tests/test_contracts.py` | API contract edge cases: RBAC matrix, unauthenticated 401s, CSRF, body limits, agent bearer auth, session revocation/disable, expired enrollment, command argument validation, unknown agent/command handling |
+| `tests/test_remediation.py` | Regression coverage for the code-review fixes: Host-header/CSRF, trusted hosts, chunked bodies, session/UID binding, weak secrets and bootstrap passwords, service-name option injection, enrollment TTL, one-command dispatch, late results, bounded agent output, redirect refusal |
+| `tests/test_store.py` | Tier 0 package store: publish/upload SHA-256, duplicate/bad-hash rejection, yank, agent download, RBAC, per-file quota |
+| `tests/test_updates.py` | Version comparison, GitHub/static update check, endpoint cache/force, admin-only access |
+| `tests/test_selfupdate.py` | Agent update endpoint/heartbeat directive, check/apply flow, hash mismatch, local disable, staging switch |
+| `tests/test_packages.py` | Package command builders, inventory parsers, policy intersection, executor routing, inventory API, desired-state sync |
+| `tests/test_inventory.py` | Revisioned package inventory (full/delta, hash, stale-base fallback), agent payload cache, profile cadence application |
+| `tests/test_profiles.py` | Built-in/custom profiles, RBAC, create/update/reset/delete, enrollment profile selection, admin reassignment, tag assignment, heartbeat sync |
+| `tests/test_remote_install.py` | SSH host-key options, install script steps, token redaction, API job lifecycle, RBAC, missing key, one-at-a-time guard |
+| `tests/test_exports.py` | Agents and package inventory CSV exports |
+| `tests/test_hardening.py` | Failed-login audit, session registry and revocation, user disable/reset, command cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication |
+| `tests/test_security.py` | Password hashing/policy, session signing/tampering/expiry, token hashing, magic packets, LDAP escaping and role mapping, fake LDAP bind flow |
+| `tests/test_agent.py` | Linux/metric parsers, collector normalization, config persistence, executor builders and policy intersection, agent runner smoke test |
+| `tests/test_ad_login.py` | AD login provisioning, role mapping, bad credentials, directory outage, local-account precedence |
+| `tests/test_db.py` | Schema initialization and migration of one legacy schema fixture |
+
+Fixtures live in `tests/conftest.py`. `settings` points at a fresh `tmp_path`, `app` builds the FastAPI application, `client` wraps it in a `TestClient`, and `admin` signs in the bootstrap administrator. Helpers in `tests/helpers.py` create enrollment tokens, enroll agents, send heartbeats, and build headers.
+
+The contract tests also exercise the request body guard. They set an explicit `Content-Length` header where needed, because the `TestClient` normally recomputes a correct length for a request body.
+
+## Compile and static checks
+
+```bash
+.venv/bin/python -m compileall -q runner_control runner_agent
+.venv/bin/python -m pyflakes runner_control runner_agent tests
+node --check runner_control/static/app.js
+```
+
+`make check` runs all three. These checks do not execute the application; they catch syntax and basic unused-name errors.
+
+## Dependency and supply-chain checks
+
+```bash
+.venv/bin/pip check
+.venv/bin/pip-audit
+cd ui-tests && npm audit --audit-level=high
+```
+
+`make audit` runs the Python and npm audits. `make lock` regenerates `requirements.lock` and `requirements-dev.lock` with hashes from `pyproject.toml`. The committed CI workflow (`.github/workflows/ci.yml`) installs from `requirements-dev.lock`, runs the suite and static checks, and runs `pip-audit` and `npm audit`.
+
+## jsdom dashboard test
+
+```bash
+cd ui-tests
+npm ci
+npm test
+```
+
+`npm test` runs `ui-tests/ui-smoke.js`. It loads the real `runner_control/static/index.html` and `app.js` in jsdom, replaces `window.fetch` with mocked API responses, signs in, and checks the fleet view, update banner, drawer tabs, package inventory and rule editor, service list, GPU process list, command history, remote terminal, profiles page, remote install page, and the policy/user/session dialogs. It is a DOM smoke test, not a browser end-to-end test.
+
+`ui-tests/node_modules` is not committed. `npm ci` needs network access to fetch jsdom; if the directory is absent and the environment is offline, skip the UI test rather than vendoring dependencies.
+
+## Coverage gaps
+
+The following are explicitly not exercised by the automated suite today:
+
+- **Real Windows CI.** Parser and command-builder unit tests run on Linux. There is no Windows runner that executes the real PowerShell metrics/inventory scripts, service or power commands, scheduled task, config ACLs, or the Windows installer. See the roadmap item for a `windows-latest` runner.
+- **Real Active Directory / Samba AD.** LDAP tests use a fake `ldap3` module and a monkeypatched `authenticate_ldap`; there is no live domain controller, LDAPS certificate/CA validation, group provisioning, or lockout test. A Samba AD container integration test remains on the roadmap.
+- **Real browser / Playwright.** The jsdom smoke test does not cover a real browser engine, network stack, cookie behavior, CSP enforcement, responsive layout, or accessibility. Playwright tests remain on the roadmap.
+- **Load and concurrency.** There is no load test for 100–500 agents, no sustained heartbeat/command throughput test, and no SQLite multi-writer stress test beyond normal request coverage.
+- **Migration matrix.** `tests/test_db.py` migrates one legacy schema fixture to the current schema. There is no multi-version migration matrix, rollback test, or automated backup/restore verification.
+- **Deployment integration.** systemd, nginx/TLS, UFW, certificate renewal, and the Linux/Windows installers are not exercised by tests. The deployment guide describes manual validation instead.
+- **WoL on the wire.** `send_magic_packet` is mocked or tested with a fake socket; no test sends a real UDP broadcast or verifies wake-up on hardware.
+- **Automated end-to-end server/agent run.** The full uvicorn server plus real agent smoke test in [DEPLOYMENT.md](DEPLOYMENT.md#validation) is manual. The automated suite simulates the agent through the API.
+- **API fuzzing and malformed-input campaigns.** Individual validation cases are covered, but there is no fuzzing or property-based test suite for oversized/malformed payloads or role-bypass attempts.
+- **Coverage threshold.** The committed CI workflow runs tests, static checks, and dependency audits, but there is no coverage measurement or minimum threshold yet.
+
+When adding tests, prefer the existing style: API flows through the shared helpers, temporary SQLite databases, monkeypatched external effects, and no fixed sleeps. Update this file when a gap above is closed.
