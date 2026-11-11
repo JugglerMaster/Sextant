@@ -211,7 +211,7 @@ The app server binds loopback by default in the provided unit. nginx terminates 
 - No pixel-level remote desktop.
 - No persistent interactive PTY; the remote shell is a queued command console.
 - No multi-server HA, job queue, or external metrics store.
-- No built-in charts; downsampled history is available from `GET /api/agents/{id}/history`.
+- Inline SVG charts cover 24-hour sparklines and 24h/7d detail charts; downsampled history remains available from `GET /api/agents/{id}/history`.
 - No command approval workflow yet (queue guardrails and expiry only).
 - No nested AD group resolution.
 - No MFA in the app itself (deferred; see the roadmap).

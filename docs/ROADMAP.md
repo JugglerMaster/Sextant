@@ -31,8 +31,8 @@ Related plans: [Discovery](DISCOVERY.md) (proposed, not implemented), [Package m
 - [x] Read-only package inventory and per-device apt/dnf/winget/choco desired-state sync (API + device Packages tab; rule editor pending).
 - [x] Server-managed agent profiles (`workstation`/`server`/custom) with installer selection, heartbeat sync, module flags, cadence, dashboard editor, admin reassignment, tag assignment, true package inventory delta, and weekly full reconciliation.
 - [x] Linux remote install over key-based SSH with prerequisite checks, one-time enrollment, job log, and one-at-a-time jobs.
-- [x] Package desired-state rule editor, inventory filter, heartbeat/inventory freshness labels, interactive tables, fleet filters, 24h sparklines, and drawer focus trap.
-- [ ] Remaining UI refinements: Services/History/Users table controls, cadence-aware stale badges, alert center, detail charts, bulk actions/saved views/export, accessibility polish, and SSE/WebSocket ([UI plan](UI.md)).
+- [x] Package desired-state rule editor, inventory filter, heartbeat/inventory freshness labels, interactive tables, fleet filters and saved views, alert center with acknowledge/snooze, cadence-aware stale badges, 24h/7d detail charts and timeline, bulk fleet actions, light/dark theme, command palette, and SSE dashboard/command events ([UI plan](UI.md)).
+- [ ] Remaining UI refinements: History table export, profile badges, offline-gap markers, high-contrast audit, and incremental command stdout streaming.
 
 ### Explicitly deferred
 
@@ -153,9 +153,9 @@ Effort: small–medium.
 
 ### 6. Live updates and interactive shell
 
-- SSE or WebSocket dashboard updates instead of 10-second polling.
+- Dashboard updates use SSE (`/api/events`) with 10-second polling as fallback; command status/result events use `/api/commands/{id}/events`.
 - WebSocket PTY for Linux; ConPTY/PowerShell streaming for Windows.
-- Command output streaming, resize events, and session termination.
+- Incremental command output streaming, resize events, and session termination.
 - Explicit “remote control session active” banner with audit start/end.
 
 **Risk:** a PTY is a much larger security boundary than one-shot commands. Add approval, idle timeout, and per-session audit before exposing it.

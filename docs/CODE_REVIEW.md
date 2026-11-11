@@ -81,7 +81,7 @@
 - Dashboard is XSS-resistant by construction (`textContent`, no `innerHTML`) and has a strict CSP.
 - Server unit is genuinely hardened; agent execution is bounded at the server (length/timeout/policy/queue caps).
 - The agent is stdlib-only.
-- 152 tests, clean `pyflakes`/`compileall`/`node --check`, clean `npm audit`.
+- 156 tests, clean `pyflakes`/`compileall`/`node --check`, clean `npm audit`.
 
 ---
 
@@ -111,9 +111,9 @@ Deferred / accepted:
 
 ## 6. Verification
 
-- `pytest`: **152 passed** (98 baseline + 14 remediation regressions + 21 feature tests + 10 profile/inventory/tag/delta tests + 6 remote-install tests + 1 freshness test + 2 export tests).
+- `pytest`: **156 passed** (98 baseline + 14 remediation regressions + 21 feature tests + 10 profile/inventory/tag/delta tests + 6 remote-install tests + 1 freshness test + 2 export tests + 1 alert-state test + 3 SSE tests).
 - `pip check`: no broken requirements.
 - `pip-audit`: no known vulnerabilities.
 - `npm audit`: 0 vulnerabilities.
-- `pip install --require-hashes -r requirements-dev.lock` + `pip install --no-deps -e .` in a fresh venv: **152 passed**.
+- `pip install --require-hashes -r requirements-dev.lock` + `pip install --no-deps -e .` in a fresh venv: **156 passed**.
 - `pyflakes`, `compileall`, `node --check`, and the jsdom smoke test pass.

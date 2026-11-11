@@ -65,9 +65,12 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 - 24-hour CPU/memory/disk/GPU sparklines in the drawer.
 - Drawer focus trap, focus return to the trigger, and sortable-header `aria-sort` markers.
 - Cadence-aware stale badges for heartbeat and inventory age.
-- Alert center listing every current health alert with a link to the machine.
-- Bulk selection with refresh-telemetry and wake actions.
+- Alert center with acknowledge, snooze, and clear actions for every current health alert.
+- Bulk selection with refresh-telemetry, wake, reboot, shutdown, service, and profile actions.
 - CSV export for the fleet and per-agent package inventory.
+- Trends tab with 24h/7d detail charts and a merged command/alert timeline.
+- Light/dark theme toggle and a Ctrl/Cmd+K command palette.
+- Live dashboard updates over SSE with polling fallback.
 
 ---
 
@@ -93,19 +96,21 @@ Priority: History export next.
 ### 3. Fleet UX
 
 - Status/profile/tag filters, persistence, and named saved views are implemented.
-- Bulk select with refresh-telemetry and wake is implemented.
-- Alert center lists current alerts and links to the machine.
-- Remaining: profile badges, alert acknowledge/snooze, and bulk power/service/profile actions.
+- Bulk select with refresh-telemetry, wake, reboot, shutdown, service, and profile actions is implemented.
+- Alert center lists current alerts with acknowledge/snooze/clear and links to the machine.
+- Remaining: profile badges.
 
 ### 4. History and charts
 
 - 24-hour CPU/memory/disk/GPU sparklines are implemented.
-- Remaining: larger detail charts, explicit gaps for offline periods, incident timeline, and “what changed” view.
+- The Trends tab adds 24h/7d detail charts for CPU, memory, disk, GPU utilization, and GPU temperature, plus a merged command/alert timeline.
+- Remaining: explicit gaps for offline periods and a “what changed” view.
 
 ### 5. Accessibility
 
 - Drawer focus trap, focus return, and sortable-header `aria-sort` are implemented.
-- Remaining: `aria-live` for fresh metrics/alerts, keyboard shortcuts/command palette, light/high-contrast theme, and a contrast pass.
+- `aria-live` status regions, a light/dark theme toggle, and a Ctrl/Cmd+K command palette are implemented.
+- Remaining: a full high-contrast theme and a formal contrast audit.
 
 ### 6. Live behavior
 
@@ -125,9 +130,9 @@ Priority: History export next.
 | Freshness on cards/drawer | Implemented with cadence + stale badges |
 | Fleet status/profile/tag filters | Implemented and persisted; named saved views in local storage |
 | Table sort/pagination | Implemented for Packages, Startup, Audit; Services bounded show-more; Users search/count; History search/count |
-| Charts/sparklines | 24h sparklines implemented; detail charts pending |
-| Accessibility pass | Partial (focus trap/return, aria-sort); remaining items listed |
-| Alert center | Implemented (acknowledge/snooze pending) |
-| Bulk actions | Implemented (refresh/wake); power/service/profile bulk pending |
-| Saved views/export | CSV export implemented; named fleet views stored in local storage |
-| SSE/WebSocket | Pending |
+| Charts/sparklines | 24h sparklines plus 24h/7d detail charts and a command/alert timeline |
+| Accessibility pass | Implemented: focus trap/return, aria-sort, live regions, theme toggle, command palette; formal contrast audit pending |
+| Alert center | Implemented with acknowledge/snooze/clear |
+| Bulk actions | Implemented: refresh, wake, reboot, shutdown, service, profile |
+| Saved views/export | CSV export and named fleet views stored in local storage |
+| SSE/WebSocket | Dashboard SSE with polling fallback; command status/result SSE; stdout streaming pending |
