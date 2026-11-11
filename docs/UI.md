@@ -115,8 +115,8 @@ Priority: History export next.
 ### 6. Live behavior
 
 - The dashboard streams `GET /api/events` over `EventSource` and falls back to the previous 10-second dashboard polling if SSE is unavailable or fails. The stream closes while the document is hidden and reconnects on visibility.
-- Command result waits use `GET /api/commands/{id}/events` when available, with the existing poll as fallback.
-- Remaining: incremental command stdout (agents still upload one final result) and virtualization for very large tables (100+ agents).
+- Command waits use `GET /api/commands/{id}/events` when available, with the existing poll as fallback. The terminal appends `output` events live, styling stdout and stderr separately. On reconnect the server replays stored chunks (bounded); the UI de-duplicates by `(stream, seq)`. When the terminal `command` event arrives, the canonical final stdout/stderr is rendered without repeating text already streamed. Chunk delivery is best-effort and the final result remains authoritative.
+- Remaining: virtualization for very large tables (100+ agents).
 
 ---
 
@@ -135,4 +135,4 @@ Priority: History export next.
 | Alert center | Implemented with acknowledge/snooze/clear |
 | Bulk actions | Implemented: refresh, wake, reboot, shutdown, service, profile |
 | Saved views/export | CSV export and named fleet views stored in local storage |
-| SSE/WebSocket | Dashboard SSE with polling fallback; command status/result SSE; stdout streaming pending |
+| SSE/WebSocket | Dashboard SSE with polling fallback; command status/result SSE with live stdout/stderr chunks, replay, and poll fallback |

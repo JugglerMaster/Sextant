@@ -36,6 +36,7 @@ from .models import (
     AgentWakeIn,
     AlertSnoozeIn,
     CommandIn,
+    CommandOutputIn,
     CommandResultIn,
     EnrollmentTokenIn,
     HeartbeatIn,
@@ -86,6 +87,9 @@ SSE_HEARTBEAT_SECONDS = 15
 DASHBOARD_STREAM_SECONDS = 5
 COMMAND_STREAM_SECONDS = 1
 COMMAND_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+COMMAND_OUTPUT_CHUNK_BYTES = 64 * 1024
+COMMAND_OUTPUT_REPLAY_LIMIT = 2000
+COMMAND_OUTPUT_POLL_LIMIT = 500
 
 
 def _sse_event(event: str, payload: Any) -> str:
@@ -1287,13 +1291,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         user: dict[str, Any] = Depends(require_operator),
         database: Database = Depends(get_db),
     ) -> StreamingResponse:
-        """Live status/result delivery for one command.
+        """Live status, result, and incremental output delivery for one command.
 
-        The agent still uploads a single final result, so stdout/stderr are not
-        streamed incrementally: this endpoint polls the command row once per
-        second and emits it whenever its status or output changes. It closes
-        after the command reaches a terminal state. Operators only, matching the
-        command-execution workflow in the UI.
+        The first event is the current command snapshot. Stored output chunks
+        are then replayed (bounded) so a reconnecting browser catches up. While
+        the command is active this polls once per second, emitting new output
+        chunks as ``output`` events and row changes as ``command`` events. It
+        closes after the terminal command event and any final output. Operators
+        only, matching the command-execution workflow in the UI.
         """
         del user
         with database.connection() as conn:
@@ -1304,6 +1309,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             loop = asyncio.get_running_loop()
             last_heartbeat = loop.time()
             last_signature: str | None = None
+            last_output_id = 0
+            first = True
             while True:
                 with database.connection() as conn:
                     row = conn.execute("SELECT * FROM commands WHERE id = ?", (command_id,)).fetchone()
@@ -1311,11 +1318,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     return
                 payload = {"command": command_to_dict(row)}
                 signature = dumps(payload)
-                if signature != last_signature:
+                terminal = payload["command"]["status"] in COMMAND_TERMINAL_STATUSES
+                if first:
                     yield _sse_event("command", payload)
                     last_signature = signature
-                    if payload["command"]["status"] in COMMAND_TERMINAL_STATUSES:
-                        return
+                    chunks = await asyncio.to_thread(
+                        database.replay_command_output,
+                        command_id,
+                        COMMAND_OUTPUT_REPLAY_LIMIT,
+                    )
+                    first = False
+                else:
+                    chunks = await asyncio.to_thread(
+                        database.command_output_since,
+                        command_id,
+                        last_output_id,
+                        COMMAND_OUTPUT_POLL_LIMIT,
+                    )
+                for chunk in chunks:
+                    last_output_id = int(chunk["id"])
+                    yield _sse_event(
+                        "output",
+                        {
+                            "command_id": command_id,
+                            "stream": chunk["stream"],
+                            "seq": int(chunk["seq"]),
+                            "text": chunk["text"],
+                        },
+                    )
+                if not first and signature != last_signature:
+                    # New output above is sent before the status update so a
+                    # live UI can append it before rendering the canonical result.
+                    yield _sse_event("command", payload)
+                    last_signature = signature
+                if terminal:
+                    return
                 if loop.time() - last_heartbeat >= SSE_HEARTBEAT_SECONDS:
                     yield _sse_comment()
                     last_heartbeat = loop.time()
@@ -2101,6 +2138,66 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "package_inventory_revision": new_revision,
             "commands": dispatch,
             "agent_update": agent_update_info,
+        }
+
+    @app.post("/api/agent/{agent_id}/commands/{command_id}/output")
+    def agent_command_output(
+        agent_id: str,
+        command_id: str,
+        payload: CommandOutputIn,
+        agent: dict[str, Any] = Depends(agent_auth),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        del agent
+        encoded = payload.text.encode("utf-8")
+        if len(encoded) > COMMAND_OUTPUT_CHUNK_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Output chunk exceeds the {COMMAND_OUTPUT_CHUNK_BYTES}-byte limit.",
+            )
+        with database.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM commands WHERE id = ? AND agent_id = ?",
+                (command_id, agent_id),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Command not found.")
+            if row["status"] in COMMAND_TERMINAL_STATUSES:
+                raise HTTPException(status_code=409, detail="Command has already finished.")
+            if row["status"] == "queued":
+                raise HTTPException(status_code=409, detail="Command has not been dispatched yet.")
+            result = database.add_command_output(
+                command_id,
+                payload.stream,
+                payload.seq,
+                payload.text,
+                config.command_output_limit,
+                conn=conn,
+            )
+            state = result["state"]
+            if state == "conflict":
+                raise HTTPException(
+                    status_code=409,
+                    detail="That output sequence already exists with different text.",
+                )
+            if state == "out_of_order":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Output sequence is behind the last accepted sequence ({result['last_seq']}).",
+                )
+            if state == "over_limit":
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Command output exceeds the {result['limit']}-character limit.",
+                )
+            chunk = result["chunk"]
+        return {
+            "command_id": command_id,
+            "stream": chunk["stream"],
+            "seq": int(chunk["seq"]),
+            "bytes": len(encoded),
+            "idempotent": state == "duplicate",
         }
 
     @app.post("/api/agent/{agent_id}/commands/{command_id}/result")

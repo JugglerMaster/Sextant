@@ -2281,9 +2281,19 @@ function renderRemote(body) {
 
 function terminalState(agentId) {
   if (!state.terminals[agentId]) {
-    state.terminals[agentId] = { lines: [], pending: null, shell: "", status: "" };
+    state.terminals[agentId] = {
+      lines: [],
+      pending: null,
+      shell: "",
+      status: "",
+      outputSeen: {},
+      streamed: { stdout: "", stderr: "" },
+    };
   }
-  return state.terminals[agentId];
+  const term = state.terminals[agentId];
+  if (!term.outputSeen) term.outputSeen = {};
+  if (!term.streamed) term.streamed = { stdout: "", stderr: "" };
+  return term;
 }
 
 function renderTerminalDom(agent) {
@@ -2312,6 +2322,8 @@ async function runRemoteCommand(agent, shell, command) {
   const term = terminalState(agent.id);
   if (term.pending) return toast("Wait for the current command to finish.", "warn");
   term.shell = shell;
+  term.outputSeen = {};
+  term.streamed = { stdout: "", stderr: "" };
   try {
     const created = await api(`/api/agents/${agent.id}/commands`, {
       method: "POST",
@@ -2334,17 +2346,56 @@ function commandIsTerminal(command) {
   return ["succeeded", "failed", "cancelled"].includes(command.status);
 }
 
+function appendLiveOutput(term, stream, seq, text) {
+  if (!text || (stream !== "stdout" && stream !== "stderr")) return;
+  const key = `${stream}:${seq}`;
+  if (term.outputSeen[key]) return;
+  term.outputSeen[key] = true;
+  term.streamed[stream] = (term.streamed[stream] || "") + text;
+  const type = stream === "stderr" ? "err" : "out";
+  const last = term.lines[term.lines.length - 1];
+  if (last && last.type === type && last.streaming) {
+    last.text += text;
+  } else {
+    term.lines.push({ type, text, streaming: true });
+  }
+}
+
+function appendFinalOutput(term, stream, text) {
+  if (!text) return;
+  const streamed = term.streamed[stream] || "";
+  let shared = 0;
+  const limit = Math.min(streamed.length, text.length);
+  while (shared < limit && streamed[shared] === text[shared]) shared += 1;
+  const remaining = text.slice(shared);
+  if (remaining) {
+    const type = stream === "stderr" ? "err" : "out";
+    const last = term.lines[term.lines.length - 1];
+    if (last && last.type === type && last.streaming) {
+      last.text += remaining;
+    } else {
+      term.lines.push({ type, text: remaining });
+    }
+  }
+  term.streamed[stream] = text;
+}
+
 function applyCommandUpdate(agentId, commandId, command) {
   const term = terminalState(agentId);
   if (term.pending !== commandId || !command) return;
   if (commandIsTerminal(command)) {
-    if (command.stdout) term.lines.push({ type: "out", text: command.stdout });
-    if (command.stderr) term.lines.push({ type: "err", text: command.stderr });
+    const hadStreamed = Boolean(term.streamed.stdout || term.streamed.stderr);
+    if (command.stdout) appendFinalOutput(term, "stdout", command.stdout);
+    if (command.stderr) appendFinalOutput(term, "stderr", command.stderr);
     if (command.error) term.lines.push({ type: "err", text: command.error });
-    if (!command.stdout && !command.stderr && !command.error) term.lines.push({ type: "note", text: "(no output)" });
+    if (!command.stdout && !command.stderr && !command.error && !hadStreamed) {
+      term.lines.push({ type: "note", text: "(no output)" });
+    }
     term.lines.push({ type: "note", text: `${command.status} · exit ${command.exit_code ?? "n/a"}` });
     term.pending = null;
     term.status = "Ready";
+    term.streamed = { stdout: "", stderr: "" };
+    term.outputSeen = {};
     if (state.detailAgent?.id === agentId && state.detailTab === "remote") renderTerminalDom(state.detailAgent);
     loadDashboard(true);
     loadAgentDetail(agentId);
@@ -2355,8 +2406,8 @@ function applyCommandUpdate(agentId, commandId, command) {
 }
 
 function streamCommand(agentId, commandId) {
-  // The agent posts one final result, so this stream updates the status/result
-  // row only; it does not receive incremental stdout.
+  // Command SSE carries both status snapshots and incremental output chunks.
+  // A reconnect replays stored chunks; the terminal snapshot is canonical.
   return new Promise((resolve) => {
     const term = terminalState(agentId);
     let source = null;
@@ -2397,6 +2448,19 @@ function streamCommand(agentId, commandId) {
       }
       applyCommandUpdate(agentId, commandId, data.command);
       if (commandIsTerminal(data.command)) finish(true);
+    });
+    source.addEventListener("output", (event) => {
+      if (term.pending !== commandId) return;
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (_error) {
+        return;
+      }
+      appendLiveOutput(term, data?.stream, Number(data?.seq), String(data?.text ?? ""));
+      if (state.detailAgent?.id === agentId && state.detailTab === "remote") {
+        renderTerminalDom(state.detailAgent);
+      }
     });
     source.addEventListener("error", () => finish(false));
     timeout = setTimeout(() => {

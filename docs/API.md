@@ -115,7 +115,7 @@ The path agent ID and token must belong together. Enrollment uses a one-time enr
 | `POST` | `/api/agents/{id}/commands` | operator | Queue a command |
 | `GET` | `/api/agents/{id}/commands?limit=50` | any | Command history preview (1–200) |
 | `GET` | `/api/commands/{id}` | any | One command with full output |
-| `GET` | `/api/commands/{id}/events` | operator | SSE stream: command status/result changes until terminal |
+| `GET` | `/api/commands/{id}/events` | operator | SSE stream: command status/result plus incremental output until terminal |
 | `POST` | `/api/commands/{id}/cancel` | operator | Cancel a still-queued command |
 | `POST` | `/api/commands/{id}/retry` | operator | Retry a failed/cancelled command as a new row |
 | `POST` | `/api/agents/{id}/wake` | operator | Send WoL to the agent's MAC |
@@ -143,22 +143,36 @@ data: {"server_time":"…","stats":{…},"agents":[…]}
 : keep-alive
 ```
 
-`GET /api/commands/{id}/events` requires operator access. It emits a `command`
-event with the same `{"command": {...}}` shape as `GET /api/commands/{id}`
-whenever the row changes, polls once per second, and closes after a terminal
-status (`succeeded`, `failed`, or `cancelled`).
+`GET /api/commands/{id}/events` requires operator access. The first event is
+always the current `command` snapshot. Stored output chunks are then replayed
+(bounded to the newest 2,000 chunks) so a reconnecting browser catches up.
+While the command is active the stream polls once per second and emits:
+
+- `output` for each new chunk: `{"command_id","stream","seq","text"}` where
+  `stream` is `stdout` or `stderr` and `seq` is per-stream and starts at 1.
+- `command` with the same `{"command": {...}}` shape as `GET /api/commands/{id}`
+  whenever the row changes. New output is sent before the matching status
+  change, so the terminal command event is the last event before the stream
+  closes (`succeeded`, `failed`, or `cancelled`).
 
 ```text
 event: command
 data: {"command":{"id":"cmd_123","status":"dispatched",…}}
 
+event: output
+data: {"command_id":"cmd_123","stream":"stdout","seq":1,"text":"line one\n"}
+
+event: output
+data: {"command_id":"cmd_123","stream":"stderr","seq":1,"text":"warning\n"}
+
 event: command
 data: {"command":{"id":"cmd_123","status":"succeeded","stdout":"…",…}}
 ```
 
-**Limitation:** agents post one final result, so neither endpoint streams raw
-stdout/stderr incrementally. Output appears when the agent uploads the terminal
-result. The command stream provides live status and final-result delivery only.
+Chunk delivery is best-effort. The final `command` result remains authoritative:
+it is what is stored for history and what the UI uses after the terminal event.
+If the stream is unavailable, the UI falls back to polling
+`GET /api/commands/{id}`.
 
 ### Queue a command
 
@@ -484,7 +498,8 @@ These paths bypass browser CSRF and use the agent bearer token.
 | --- | --- | --- | --- |
 | `POST` | `/api/agent/enroll` | enrollment token in body | Exchange one-time token for agent credentials |
 | `POST` | `/api/agent/{id}/heartbeat` | Bearer | Upload telemetry, fetch queued commands |
-| `POST` | `/api/agent/{id}/commands/{command_id}/result` | Bearer | Upload command result |
+| `POST` | `/api/agent/{id}/commands/{command_id}/output` | Bearer | Upload an incremental stdout/stderr chunk |
+| `POST` | `/api/agent/{id}/commands/{command_id}/result` | Bearer | Upload the authoritative final command result |
 
 ### Enroll
 
@@ -628,6 +643,29 @@ The agent applies `policy` before executing any commands in that heartbeat. Loca
 
 The server marks returned commands `dispatched` before sending. An agent that crashes after receiving but before reporting leaves the command `dispatched`; create a new command or inspect history. There is no automatic redelivery.
 
+### Command output chunk
+
+```http
+POST /api/agent/agt_123/commands/cmd_123/output
+Authorization: Bearer rc_agent_...
+Content-Type: application/json
+
+{"stream":"stdout","seq":1,"text":"line one\n"}
+```
+
+The command must belong to the authenticated agent (`404` otherwise), must be
+`dispatched` or `running` (`409` for `queued` or terminal states), and `seq`
+must increase strictly within each stream. Re-posting the same
+`(command_id, stream, seq)` and text is idempotent; using the same sequence with
+different text returns `409`. A chunk is limited to 64 KiB and the per-command
+stored total (stdout + stderr) is capped by `RC_COMMAND_OUTPUT_LIMIT`
+(200,000 characters by default, `413` when exceeded). Output chunks leave the
+command status unchanged; the final result sets the terminal state.
+
+The agent batches/throttles chunks (about 150 ms or 16 KiB) on a background
+thread. Chunk uploads are best-effort and never block the final result upload;
+the result below remains authoritative.
+
 ### Command result
 
 ```http
@@ -638,7 +676,7 @@ Content-Type: application/json
 {"status":"succeeded","exit_code":0,"stdout":"...","stderr":"","error":""}
 ```
 
-`status` is `succeeded` or `failed`. The server force-fails a “succeeded” result with a non-zero exit code. Output is truncated to `RC_COMMAND_OUTPUT_LIMIT` (200,000 chars). Re-posting a terminal command returns the stored result with `"idempotent": true`.
+`status` is `succeeded` or `failed`. The server force-fails a “succeeded” result with a non-zero exit code. Output is truncated to `RC_COMMAND_OUTPUT_LIMIT` (200,000 chars). Re-posting a terminal command returns the stored result with `"idempotent": true`. The final result is stored on the command row; streamed chunks are supplemental and are pruned with the command retention window.
 
 ## Status codes
 
@@ -650,8 +688,8 @@ Content-Type: application/json
 | `401` | Missing/expired session, bad login, bad agent/enrollment token |
 | `403` | Role or CSRF failure |
 | `404` | Unknown agent/command/target/user |
-| `409` | Duplicate username, result for an undispatched command, queue full, offline-policy rejection, cancel after dispatch, revoking an already-used enrollment token |
-| `413` | Body over `RC_MAX_BODY_BYTES` |
+| `409` | Duplicate username, result/output for an undispatched or finished command, output sequence conflict, queue full, offline-policy rejection, cancel after dispatch, revoking an already-used enrollment token |
+| `413` | Body over `RC_MAX_BODY_BYTES`, output chunk over 64 KiB, or per-command output over `RC_COMMAND_OUTPUT_LIMIT` |
 | `422` | Pydantic shape/field validation |
 | `429` | Login rate limit |
 | `502` | Wake packet send failure |

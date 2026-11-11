@@ -240,6 +240,16 @@ The file contains a bearer token. Keep it mode 0600 (Linux) and ACL-restricted (
 
 Linux power commands use `shutdown -h +N` / `shutdown -r +N` for a delay (minimum one minute due to the tool), and `now` for zero. Windows uses `shutdown.exe /s|/r /t N`.
 
+The executor reads stdout and stderr in parallel and emits chunks while the
+process is still running. Chunks are batched on a background thread (about
+150 ms or 16 KiB) and posted to
+`POST /api/agent/{id}/commands/{command_id}/output` with a per-stream sequence
+number. Streaming is best-effort: chunk upload failures are logged and dropped,
+and they never prevent the final result from being posted. The final result at
+`/result` is authoritative and is what command history uses. The local
+`max_output_bytes` cap still applies, so streaming never emits more than the
+agent captured.
+
 For a zero-delay shutdown, the machine may go down before the result is posted; the command stays `dispatched` in history. Use the default 30-second delay in the UI when you need a reliable result.
 
 Queue behavior:

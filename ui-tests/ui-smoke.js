@@ -611,6 +611,50 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   await sleep(10);
   if (!window.document.querySelector(".terminal")) throw new Error("remote terminal did not render");
 
+  const remoteForm = window.document.querySelector(".remote-form");
+  const remoteInput = window.document.querySelector(".remote-controls textarea");
+  remoteInput.value = "echo live";
+  remoteForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(30);
+  const commandSource = [...window.__eventSources]
+    .reverse()
+    .find((source) => source.url.includes("/api/commands/cmd_bulk/events"));
+  if (!commandSource) throw new Error("command output SSE stream did not open");
+  commandSource.emit("command", {
+    command: { id: "cmd_bulk", agent_id: "agt_demo", kind: "shell", args: {}, status: "dispatched", stdout: "", stderr: "", error: "" },
+  });
+  commandSource.emit("output", { stream: "stdout", seq: 1, text: "alpha\n" });
+  commandSource.emit("output", { stream: "stderr", seq: 1, text: "beta\n" });
+  await sleep(20);
+  let terminalOutput = window.document.querySelector("[data-terminal-output]");
+  if (!terminalOutput.querySelector(".terminal-line-out")?.textContent.includes("alpha")) {
+    throw new Error("live stdout chunk was not appended");
+  }
+  if (!terminalOutput.querySelector(".terminal-line-err")?.textContent.includes("beta")) {
+    throw new Error("live stderr chunk was not appended");
+  }
+  commandSource.emit("command", {
+    command: {
+      id: "cmd_bulk",
+      agent_id: "agt_demo",
+      kind: "shell",
+      args: {},
+      status: "succeeded",
+      exit_code: 0,
+      stdout: "alpha\ngamma\n",
+      stderr: "beta\n",
+      error: "",
+    },
+  });
+  await sleep(30);
+  terminalOutput = window.document.querySelector("[data-terminal-output]");
+  const terminalText = terminalOutput.textContent;
+  if ((terminalText.match(/alpha/g) || []).length !== 1) throw new Error("streamed stdout was duplicated");
+  if ((terminalText.match(/beta/g) || []).length !== 1) throw new Error("streamed stderr was duplicated");
+  if (!terminalText.includes("gamma")) throw new Error("final canonical stdout remainder was not rendered");
+  if (!terminalText.includes("succeeded")) throw new Error("terminal command status was not rendered");
+  if (!commandSource.closed) throw new Error("command SSE stream stayed open after the terminal event");
+
   const historyTab = window.document.querySelector('[data-tab="history"]');
   historyTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(20);

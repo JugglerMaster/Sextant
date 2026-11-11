@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from runner_agent.executor import (
     build_power_command,
     build_service_command,
     execute_command,
+    run_capture,
     run_shell,
     truncate_output,
 )
@@ -140,6 +142,54 @@ def test_run_shell_and_timeout():
     timed = run_shell("bash", "sleep 3", 1, 1000)
     assert timed["status"] == "failed"
     assert "timed out" in timed["error"].lower()
+
+
+def test_executor_chunk_callback_streams_stdout_and_stderr_before_completion():
+    config = AgentConfig(server_url="https://x", agent_id="a", agent_token="b", allow_shell=True)
+    chunks: list[tuple[str, str]] = []
+    completed = threading.Event()
+
+    def on_chunk(stream: str, text: str) -> None:
+        assert not completed.is_set(), "chunk was emitted only after the command finished"
+        chunks.append((stream, text))
+
+    result = execute_command(
+        {
+            "kind": "shell",
+            "args": {
+                "shell": "bash",
+                "command": "printf 'first\\n'; printf 'err\\n' >&2; sleep 0.2; printf 'last\\n'",
+                "timeout": 5,
+            },
+        },
+        config,
+        on_chunk=on_chunk,
+    )
+    completed.set()
+
+    assert result["status"] == "succeeded"
+    stdout = "".join(text for stream, text in chunks if stream == "stdout")
+    stderr = "".join(text for stream, text in chunks if stream == "stderr")
+    assert "first" in stdout and "last" in stdout
+    assert "err" in stderr
+    assert stdout == result["stdout"]
+    assert stderr == result["stderr"]
+
+
+def test_executor_chunk_callback_respects_max_output_bytes():
+    chunks: list[tuple[str, str]] = []
+    result = run_capture(
+        ["bash", "-lc", "head -c 20000 /dev/zero | tr '\\0' 'x'"],
+        5,
+        max_output=1024,
+        on_chunk=lambda stream, text: chunks.append((stream, text)),
+    )
+
+    streamed_stdout = "".join(text for stream, text in chunks if stream == "stdout")
+    assert len(streamed_stdout) <= 1024
+    assert len(result["stdout"]) <= 1024
+    assert "truncated" in result["stdout"]
+    assert result["status"] == "failed"
 
 
 def test_execute_command_policies_and_refresh():

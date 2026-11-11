@@ -269,3 +269,9 @@ class CommandResultIn(BaseModel):
     error: str = Field(default="", max_length=4000)
     started_at: str = Field(default="", max_length=64)
     completed_at: str = Field(default="", max_length=64)
+
+
+class CommandOutputIn(BaseModel):
+    stream: Literal["stdout", "stderr"]
+    seq: int = Field(ge=1, le=2_000_000_000)
+    text: str = Field(min_length=1, max_length=1_000_000)

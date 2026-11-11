@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import math
 import os
 import shutil
@@ -8,11 +9,12 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .config import AgentConfig
 
 TRUNCATION_NOTE = "\n\n[output truncated by runner-agent]"
+ChunkCallback = Callable[[str, str], None]
 
 
 def truncate_output(text: str, limit: int) -> str:
@@ -33,6 +35,7 @@ def run_capture(
     input_text: str | None = None,
     max_output: int = 200_000,
     env: dict[str, str] | None = None,
+    on_chunk: ChunkCallback | None = None,
 ) -> dict[str, Any]:
     cap = max(1024, int(max_output))
     try:
@@ -60,6 +63,17 @@ def run_capture(
     lock = threading.Lock()
 
     def reader(stream, name: str, chunks: list[bytes]) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+        def emit(text: str) -> None:
+            if not text or on_chunk is None:
+                return
+            try:
+                on_chunk(name, text)
+            except Exception:
+                # Streaming is best-effort; the final result remains authoritative.
+                pass
+
         while True:
             try:
                 data = stream.read(8192)
@@ -67,13 +81,18 @@ def run_capture(
                 break
             if not data:
                 break
+            captured = b""
             with lock:
                 room = cap - totals[name]
                 if room > 0:
-                    chunks.append(data[:room])
-                    totals[name] += min(len(data), room)
+                    captured = data[:room]
+                    chunks.append(captured)
+                    totals[name] += len(captured)
                 if totals[name] >= cap:
                     exceeded.set()
+            if captured:
+                emit(decoder.decode(captured))
+        emit(decoder.decode(b"", final=True))
 
     out_thread = threading.Thread(target=reader, args=(process.stdout, "stdout", stdout_chunks), daemon=True)
     err_thread = threading.Thread(target=reader, args=(process.stderr, "stderr", stderr_chunks), daemon=True)
@@ -164,25 +183,39 @@ def _powershell():
     return shutil.which("powershell") or shutil.which("pwsh") or "powershell"
 
 
-def _powershell_capture(script: str, timeout: int, max_output: int) -> dict[str, Any]:
+def _powershell_capture(
+    script: str,
+    timeout: int,
+    max_output: int,
+    on_chunk: ChunkCallback | None = None,
+) -> dict[str, Any]:
     prefix = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
     return run_capture(
         [_powershell(), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"],
         timeout,
         input_text=prefix + script,
         max_output=max_output,
+        on_chunk=on_chunk,
     )
 
 
-def run_shell(shell: str, command: str, timeout: int, max_output: int) -> dict[str, Any]:
+def run_shell(
+    shell: str,
+    command: str,
+    timeout: int,
+    max_output: int,
+    on_chunk: ChunkCallback | None = None,
+) -> dict[str, Any]:
     shell = shell.lower()
     if not command.strip():
         return {"status": "failed", "exit_code": None, "stdout": "", "stderr": "", "error": "Empty command."}
     if sys.platform.startswith("win"):
         if shell == "powershell":
-            return _powershell_capture(command, timeout, max_output)
+            return _powershell_capture(command, timeout, max_output, on_chunk)
         if shell == "cmd":
-            return run_capture(["cmd.exe", "/d", "/s", "/c", command], timeout, max_output=max_output)
+            return run_capture(
+                ["cmd.exe", "/d", "/s", "/c", command], timeout, max_output=max_output, on_chunk=on_chunk
+            )
         if shell == "bash":
             bash = shutil.which("bash")
             if not bash:
@@ -193,11 +226,11 @@ def run_shell(shell: str, command: str, timeout: int, max_output: int) -> dict[s
                     "stderr": "",
                     "error": "bash is not installed on this Windows host.",
                 }
-            return run_capture([bash, "-lc", command], timeout, max_output=max_output)
+            return run_capture([bash, "-lc", command], timeout, max_output=max_output, on_chunk=on_chunk)
     else:
         if shell == "bash":
             bash = shutil.which("bash") or "/bin/bash"
-            return run_capture([bash, "-lc", command], timeout, max_output=max_output)
+            return run_capture([bash, "-lc", command], timeout, max_output=max_output, on_chunk=on_chunk)
         if shell == "powershell":
             pwsh = shutil.which("pwsh")
             if not pwsh:
@@ -213,6 +246,7 @@ def run_shell(shell: str, command: str, timeout: int, max_output: int) -> dict[s
                 timeout,
                 input_text=command,
                 max_output=max_output,
+                on_chunk=on_chunk,
             )
         if shell == "cmd":
             return {
@@ -248,11 +282,17 @@ def build_power_command(action: str, delay: int, os_name: str | None = None) -> 
     return [shutdown, flag, f"+{minutes}"]
 
 
-def run_power(action: str, delay: int, timeout: int = 15, max_output: int = 200_000) -> dict[str, Any]:
+def run_power(
+    action: str,
+    delay: int,
+    timeout: int = 15,
+    max_output: int = 200_000,
+    on_chunk: ChunkCallback | None = None,
+) -> dict[str, Any]:
     if action not in {"shutdown", "reboot", "cancel"}:
         return {"status": "failed", "exit_code": None, "stdout": "", "stderr": "", "error": "Invalid power action."}
     command = build_power_command(action, delay)
-    result = run_capture(command, timeout, max_output=max_output)
+    result = run_capture(command, timeout, max_output=max_output, on_chunk=on_chunk)
     if result["status"] == "succeeded":
         if action == "cancel":
             result["stdout"] = (result["stdout"] + "\nScheduled power action cancelled.").strip()
@@ -282,19 +322,26 @@ def build_service_command(action: str, name: str, os_name: str | None = None) ->
     return [systemctl, action, name]
 
 
-def run_service(action: str, name: str, timeout: int = 60, max_output: int = 200_000) -> dict[str, Any]:
+def run_service(
+    action: str,
+    name: str,
+    timeout: int = 60,
+    max_output: int = 200_000,
+    on_chunk: ChunkCallback | None = None,
+) -> dict[str, Any]:
     if action not in {"start", "stop", "restart", "enable", "disable", "status"}:
         return {"status": "failed", "exit_code": None, "stdout": "", "stderr": "", "error": "Invalid service action."}
     command = build_service_command(action, name)
     if isinstance(command, tuple):
-        return _powershell_capture(command[1], timeout, max_output)
-    return run_capture(command, timeout, max_output=max_output)
+        return _powershell_capture(command[1], timeout, max_output, on_chunk)
+    return run_capture(command, timeout, max_output=max_output, on_chunk=on_chunk)
 
 
 def execute_command(
     command: dict[str, Any],
     config: AgentConfig,
     remote_policy: dict[str, Any] | None = None,
+    on_chunk: ChunkCallback | None = None,
 ) -> dict[str, Any]:
     policy = remote_policy if isinstance(remote_policy, dict) else {}
     allow_shell = config.allow_shell and bool(policy.get("allow_shell", True))
@@ -318,6 +365,7 @@ def execute_command(
             str(args.get("command", "")),
             int(args.get("timeout", 60)),
             config.max_output_bytes,
+            on_chunk,
         )
     if kind == "power":
         if not allow_power:
@@ -328,7 +376,12 @@ def execute_command(
                 "stderr": "",
                 "error": "Power commands are disabled by local or server policy.",
             }
-        return run_power(str(args.get("action", "")), int(args.get("delay", 30)), max_output=config.max_output_bytes)
+        return run_power(
+            str(args.get("action", "")),
+            int(args.get("delay", 30)),
+            max_output=config.max_output_bytes,
+            on_chunk=on_chunk,
+        )
     if kind == "service":
         if not allow_service:
             return {
@@ -338,7 +391,12 @@ def execute_command(
                 "stderr": "",
                 "error": "Service commands are disabled by local or server policy.",
             }
-        return run_service(str(args.get("action", "")), str(args.get("name", "")), max_output=config.max_output_bytes)
+        return run_service(
+            str(args.get("action", "")),
+            str(args.get("name", "")),
+            max_output=config.max_output_bytes,
+            on_chunk=on_chunk,
+        )
     if kind == "package":
         from .packages import apply_actions
 

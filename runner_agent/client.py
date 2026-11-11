@@ -119,6 +119,17 @@ class AgentClient:
             timeout=max(30, self.config.timeout),
         )
 
+    def send_output(self, command_id: str, stream: str, seq: int, text: str) -> dict[str, Any]:
+        agent_id = urllib.parse.quote(self.config.agent_id, safe="")
+        command = urllib.parse.quote(command_id, safe="")
+        return self._request(
+            "POST",
+            f"/api/agent/{agent_id}/commands/{command}/output",
+            {"stream": stream, "seq": int(seq), "text": text},
+            token=self.config.agent_token,
+            timeout=max(15, self.config.timeout),
+        )
+
     def get_update(self, current_version: str) -> dict[str, Any]:
         agent_id = urllib.parse.quote(self.config.agent_id, safe="")
         version = urllib.parse.quote(current_version, safe="")

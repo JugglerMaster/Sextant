@@ -95,6 +95,16 @@ CREATE TABLE IF NOT EXISTS commands (
     error TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS command_output (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    command_id TEXT NOT NULL REFERENCES commands(id) ON DELETE CASCADE,
+    stream TEXT NOT NULL CHECK (stream IN ('stdout', 'stderr')),
+    seq INTEGER NOT NULL,
+    text TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(command_id, stream, seq)
+);
+
 CREATE TABLE IF NOT EXISTS alert_states (
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     alert_key TEXT NOT NULL,
@@ -271,6 +281,7 @@ CREATE INDEX IF NOT EXISTS idx_telemetry_agent_at ON telemetry_samples(agent_id,
 CREATE INDEX IF NOT EXISTS idx_telemetry_at ON telemetry_samples(at);
 CREATE INDEX IF NOT EXISTS idx_commands_status_dispatched ON commands(status, dispatched_at);
 CREATE INDEX IF NOT EXISTS idx_commands_status_created ON commands(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_command_output_command ON command_output(command_id, id);
 CREATE INDEX IF NOT EXISTS idx_store_releases_package ON store_releases(package_id, published_at);
 CREATE INDEX IF NOT EXISTS idx_store_events_at ON store_events(at);
 CREATE INDEX IF NOT EXISTS idx_package_inventory_agent ON package_inventory(agent_id, manager);
@@ -751,11 +762,99 @@ class Database:
                 return 0
             return int(cur.rowcount)
 
+    def add_command_output(
+        self,
+        command_id: str,
+        stream: str,
+        seq: int,
+        text: str,
+        limit: int,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        """Persist one ordered output chunk, enforcing idempotency and the cap."""
+        if conn is not None:
+            return self._add_command_output(conn, command_id, stream, seq, text, limit)
+        with self.transaction() as own:
+            return self._add_command_output(own, command_id, stream, seq, text, limit)
+
+    def _add_command_output(
+        self,
+        conn: sqlite3.Connection,
+        command_id: str,
+        stream: str,
+        seq: int,
+        text: str,
+        limit: int,
+    ) -> dict[str, Any]:
+        existing = conn.execute(
+            """SELECT * FROM command_output
+               WHERE command_id = ? AND stream = ? AND seq = ?""",
+            (command_id, stream, seq),
+        ).fetchone()
+        if existing is not None:
+            if existing["text"] == text:
+                return {"state": "duplicate", "chunk": existing}
+            return {"state": "conflict", "chunk": existing}
+        last = conn.execute(
+            """SELECT MAX(seq) AS seq FROM command_output
+               WHERE command_id = ? AND stream = ?""",
+            (command_id, stream),
+        ).fetchone()
+        if last is not None and last["seq"] is not None and seq <= int(last["seq"]):
+            return {"state": "out_of_order", "last_seq": int(last["seq"])}
+        total = conn.execute(
+            "SELECT COALESCE(SUM(LENGTH(text)), 0) AS n FROM command_output WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()["n"]
+        if int(total) + len(text) > limit:
+            return {"state": "over_limit", "total": int(total), "limit": int(limit)}
+        cursor = conn.execute(
+            """INSERT INTO command_output (command_id, stream, seq, text, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (command_id, stream, seq, text, utcnow_iso()),
+        )
+        chunk = conn.execute(
+            "SELECT * FROM command_output WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+        return {"state": "accepted", "chunk": chunk}
+
+    def replay_command_output(self, command_id: str, limit: int) -> list[sqlite3.Row]:
+        """Return the newest bounded window of chunks in insertion order."""
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """SELECT * FROM (
+                           SELECT * FROM command_output
+                           WHERE command_id = ? ORDER BY id DESC LIMIT ?
+                       ) ORDER BY id ASC""",
+                    (command_id, max(1, int(limit))),
+                ).fetchall()
+            )
+
+    def command_output_since(
+        self, command_id: str, after_id: int, limit: int = 500
+    ) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """SELECT * FROM command_output
+                       WHERE command_id = ? AND id > ? ORDER BY id ASC LIMIT ?""",
+                    (command_id, max(0, int(after_id)), max(1, int(limit))),
+                ).fetchall()
+            )
+
     def prune_commands(self, retention_days: int = 90) -> int:
-        """Delete terminal command rows older than the retention window."""
+        """Delete terminal command rows and their streamed chunks older than retention."""
         days = max(1, int(retention_days))
         cutoff = (utcnow() - timedelta(days=days)).isoformat(timespec="seconds").replace("+00:00", "Z")
         with self.transaction() as conn:
+            conn.execute(
+                """DELETE FROM command_output WHERE command_id IN (
+                       SELECT id FROM commands
+                       WHERE status IN ('succeeded', 'failed', 'cancelled') AND created_at < ?
+                   )""",
+                (cutoff,),
+            )
             cur = conn.execute(
                 """DELETE FROM commands
                    WHERE status IN ('succeeded', 'failed', 'cancelled') AND created_at < ?""",

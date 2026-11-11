@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import queue
 import random
 import signal
 import threading
@@ -13,6 +14,84 @@ from .config import AgentConfig
 from .executor import execute_command
 
 logger = logging.getLogger("runner_agent")
+
+OUTPUT_BATCH_SECONDS = 0.15
+OUTPUT_BATCH_CHARS = 16 * 1024
+
+
+class _OutputUploader:
+    """Batch command output chunks onto a background upload thread.
+
+    Streaming is best-effort: a failed upload is logged and dropped so it can
+    never prevent the final result from being posted.
+    """
+
+    def __init__(self, client: AgentClient, command_id: str):
+        self.client = client
+        self.command_id = command_id
+        self._queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def push(self, stream: str, text: str) -> None:
+        if text:
+            self._queue.put((stream, text))
+
+    def close(self, timeout: float = 5.0) -> None:
+        self._stop.set()
+        self._queue.put(None)
+        self._thread.join(timeout)
+
+    def _run(self) -> None:
+        buffers = {"stdout": [], "stderr": []}
+        sizes = {"stdout": 0, "stderr": 0}
+        seqs = {"stdout": 0, "stderr": 0}
+        last_flush = time.monotonic()
+
+        def flush(stream: str | None = None) -> None:
+            nonlocal last_flush
+            streams = [stream] if stream else ["stdout", "stderr"]
+            for name in streams:
+                text = "".join(buffers[name])
+                if not text:
+                    continue
+                buffers[name].clear()
+                sizes[name] = 0
+                seqs[name] += 1
+                try:
+                    self.client.send_output(self.command_id, name, seqs[name], text)
+                except Exception as exc:
+                    logger.warning(
+                        "Dropping command %s %s output chunk %s: %s",
+                        self.command_id,
+                        name,
+                        seqs[name],
+                        exc,
+                    )
+            last_flush = time.monotonic()
+
+        while True:
+            try:
+                item = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                if time.monotonic() - last_flush >= OUTPUT_BATCH_SECONDS:
+                    flush()
+                if self._stop.is_set() and self._queue.empty():
+                    flush()
+                    return
+                continue
+            if item is None:
+                flush()
+                return
+            stream, text = item
+            buffers[stream].append(text)
+            sizes[stream] += len(text)
+            if sizes[stream] >= OUTPUT_BATCH_CHARS:
+                flush(stream)
+            elif time.monotonic() - last_flush >= OUTPUT_BATCH_SECONDS:
+                flush()
+        # Any chunks still buffered are flushed by the sentinel or idleness path.
 
 
 class AgentRunner:
@@ -104,9 +183,15 @@ class AgentRunner:
         logger.info("Executing command %s (%s)", command_id, kind)
         if kind == "refresh":
             self.collector.request_inventory_refresh()
+        uploader = _OutputUploader(self.client, command_id) if command_id else None
+
+        def on_chunk(stream: str, text: str) -> None:
+            if uploader is not None:
+                uploader.push(stream, text)
+
         started = time.time()
         try:
-            result = execute_command(command, self.config, self.remote_policy)
+            result = execute_command(command, self.config, self.remote_policy, on_chunk=on_chunk)
         except Exception as exc:  # defensive: never let one command kill the agent loop
             logger.exception("Command %s crashed the executor", command_id)
             result = {
@@ -116,6 +201,11 @@ class AgentRunner:
                 "stderr": "",
                 "error": f"Agent executor error: {type(exc).__name__}",
             }
+        finally:
+            # Flush accepted output before posting the result so the server can
+            # emit the final chunk before the terminal command event.
+            if uploader is not None:
+                uploader.close()
         result.setdefault("started_at", "")
         result["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started))
         result["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
