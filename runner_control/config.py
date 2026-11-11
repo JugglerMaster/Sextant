@@ -60,6 +60,7 @@ class Settings:
     cookie_name: str = "rc_session"
     cookie_secure: bool = False
     offline_after_seconds: int = 90
+    alert_ack_ttl_hours: int = 168
     enrollment_ttl_minutes: int = 30
     max_body_bytes: int = 2_000_000
     command_output_limit: int = 200_000
@@ -130,6 +131,7 @@ class Settings:
             cookie_name=env.get("RC_COOKIE_NAME", "rc_session").strip() or "rc_session",
             cookie_secure=_bool(env.get("RC_COOKIE_SECURE"), False),
             offline_after_seconds=_int(env.get("RC_OFFLINE_AFTER_SECONDS"), 90, 15),
+            alert_ack_ttl_hours=min(8760, _int(env.get("RC_ALERT_ACK_TTL_HOURS"), 168, 1)),
             enrollment_ttl_minutes=_int(env.get("RC_ENROLLMENT_TTL_MINUTES"), 30),
             max_body_bytes=_int(env.get("RC_MAX_BODY_BYTES"), 2_000_000, 1024),
             command_output_limit=_int(env.get("RC_COMMAND_OUTPUT_LIMIT"), 200_000, 1024),

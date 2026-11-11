@@ -65,6 +65,7 @@ Key properties:
 | `users` | Local/AD users, role, scrypt hash, source, active flag, `session_version` |
 | `sessions` | Random session ID, user, IP, user agent, created/last-seen/expiry, revocation |
 | `agents` | Identity, stable machine ID, MAC/IP, token hash, tags/notes, watched services, policy, last-known telemetry |
+| `alert_states` | Per-agent alert incident state: incident id, first/last seen, cleared time, acknowledgement, snooze |
 | `telemetry_samples` | Bounded per-heartbeat history: CPU, memory, disk max %, GPU max util/temp, watched-service-down count |
 | `agent_events` | Best-effort state-change log per agent: connectivity, service, package, version, profile, and alert lifecycle |
 | `store_packages`, `store_releases` | Package metadata and versioned artifacts (SHA-256, size, channel, yank state) |
@@ -82,7 +83,7 @@ Key properties:
 
 Telemetry is stored denormalized in the agent row (`disks`, `gpus`, `services`, `startup`, `extra`) because the dashboard only needs the latest sample. A separate `telemetry_samples` table keeps one bounded row per heartbeat for trend queries; it is pruned to `RC_TELEMETRY_RETENTION_DAYS` (default 7) and can be disabled with `RC_TELEMETRY_HISTORY=0`. Trend queries fill every requested bucket, so missing heartbeats are explicit `null` points with real timestamps rather than omitted rows. Command history is retained per agent (the drawer History tab paginates and filters it server-side, with CSV export; the overview keeps a bounded latest-50 preview) and terminal commands are pruned after `RC_COMMAND_RETENTION_DAYS` (default 90). Audit rows are pruned after `RC_AUDIT_RETENTION_DAYS` (default 365).
 
-`agent_events` is an append-only, best-effort state-change log recording transitions rather than every heartbeat: an agent returning online after being offline, watched-service status changes, package additions/removals/version changes, agent version changes, profile assignments, and alert raise/clear/acknowledge/snooze lifecycle entries. Writes are fail-open so they cannot break a heartbeat or command path, and detail JSON is bounded. Events share the command retention policy (`RC_COMMAND_RETENTION_DAYS`, default 90).
+`agent_events` is an append-only, best-effort state-change log recording transitions rather than every heartbeat: an agent returning online after being offline, watched-service status changes, package additions/removals/version changes, agent version changes, profile assignments, and alert raise/clear/acknowledge/re-acknowledge/snooze/expiry lifecycle entries. Writes are fail-open so they cannot break a heartbeat or command path, and detail JSON is bounded. Events share the command retention policy (`RC_COMMAND_RETENTION_DAYS`, default 90).
 
 `saved_views` belongs to a user row and is scoped by `user_id`, with a case-insensitive unique name per user. The browser imports legacy `rc.savedViews` localStorage data after sign-in, skipping names already present, and uses localStorage only as an offline fallback; the database is authoritative when the API is reachable.
 
@@ -170,7 +171,7 @@ NVIDIA GPUs are then queried with `nvidia-smi` for actual utilization/VRAM/tempe
 
 ### Alerts
 
-Computed at read time, not stored:
+Alert conditions are computed at read time from the latest heartbeat telemetry:
 
 | Alert | Threshold |
 | --- | --- |
@@ -180,6 +181,15 @@ Computed at read time, not stored:
 | Watched service not running | status not `running`/`active` |
 
 GPU utilization is displayed but not itself alerted: AI workloads and mining both legitimately show sustained high utilization. Investigate with the service list, startup entries, and a shell command.
+
+The computed conditions are reconciled into `alert_states` on every heartbeat and whenever the dashboard or agent detail is built. Reconciliation is idempotent and runs in a database transaction so concurrent reads cannot clear a still-present incident:
+
+- a new condition gets a new `incident_id`, `first_seen_at`, `last_seen_at`, and no acknowledgement/snooze;
+- a still-present condition only advances `last_seen_at` and preserves its acknowledgement;
+- a condition that disappears gets `cleared_at` and loses its acknowledgement and snooze;
+- if the same key reappears after being cleared, it starts a new incident with a new id and fresh first-seen time, so the old acknowledgement cannot mute it.
+
+Acknowledgements are also bounded by `RC_ALERT_ACK_TTL_HOURS` (default 168, range 1–8760) from `acknowledged_at`; an expired acknowledgement is cleared so a persistent alert eventually becomes active again. Snoozes keep their explicit `snoozed_until` expiry. `alert_count` counts only current, unacknowledged, unexpired alerts. Raise/clear/acknowledge/re-acknowledge/snooze/expiry transitions are written to `agent_events`; steady heartbeats do not create events.
 
 ## Package store and application management
 

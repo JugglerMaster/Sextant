@@ -45,12 +45,13 @@ Run the whole suite:
 | `tests/test_command_history.py` | Paginated command history: total counts, status/text/time filters, limit/offset/timestamp validation, and viewer/anonymous read access |
 | `tests/test_history.py` | Heartbeat-derived telemetry samples, gap-aware bucket series with explicit nulls and timestamps, point caps, viewer access, retention, disabled history, legacy schema migration |
 | `tests/test_agent_events.py` | Transition-based event recording without heartbeat duplicates, service/package/version/profile/alert lifecycle events, event API hours/limit/RBAC, and event retention |
+| `tests/test_alert_lifecycle.py` | Alert incident reconciliation: acknowledgement then clear, recurrence as a new incident, last-seen updates preserving acknowledgement, acknowledgement TTL expiry, idempotent/concurrent dashboard reads, lifecycle events, and alert-action RBAC |
 | `tests/test_events.py` | SSE dashboard initial payload/content type, 401/403 auth, command event terminal payload and stream close |
 | `tests/test_hardening.py` | Failed-login audit, session registry and revocation, user disable/reset, command cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication |
 | `tests/test_security.py` | Password hashing/policy, session signing/tampering/expiry, token hashing, magic packets, LDAP escaping and role mapping, fake LDAP bind flow |
 | `tests/test_agent.py` | Linux/metric parsers, collector normalization, config persistence, executor builders and policy intersection, agent runner smoke test |
 | `tests/test_ad_login.py` | AD login provisioning, role mapping, bad credentials, directory outage, local-account precedence |
-| `tests/test_db.py` | Schema initialization and migration of one legacy schema fixture |
+| `tests/test_db.py` | Schema initialization and migration of legacy schemas, including alert incident lifecycle columns |
 
 Fixtures live in `tests/conftest.py`. `settings` points at a fresh `tmp_path`, `app` builds the FastAPI application, `client` wraps it in a `TestClient`, and `admin` signs in the bootstrap administrator. Helpers in `tests/helpers.py` create enrollment tokens, enroll agents, send heartbeats, and build headers.
 
@@ -84,7 +85,7 @@ npm ci
 npm test
 ```
 
-`npm test` runs `ui-tests/ui-smoke.js`. It loads the real `runner_control/static/index.html` and `app.js` in jsdom, replaces `window.fetch` with mocked API responses and `EventSource` with a controllable mock, signs in, and checks the fleet view, update banner, SSE live updates and polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer tabs, package inventory and rule editor, service filters, GPU process list, gap-aware trends charts (timestamp-positioned points and broken lines over null buckets), persistent state-change timeline entries with real event timestamps, the What changed summary, alert actions, paginated command history (search, status filter, page sizes, Previous/Next, X-Y of Z count, and filter-aware CSV export), remote terminal, profiles page, remote install page, and the policy/user/session dialogs. It is a DOM smoke test, not a browser end-to-end test.
+`npm test` runs `ui-tests/ui-smoke.js`. It loads the real `runner_control/static/index.html` and `app.js` in jsdom, replaces `window.fetch` with mocked API responses and `EventSource` with a controllable mock, signs in, and checks the fleet view, update banner, SSE live updates and polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer tabs, package inventory and rule editor, service filters, GPU process list, gap-aware trends charts (timestamp-positioned points and broken lines over null buckets), persistent state-change timeline entries with real event timestamps, the What changed summary, alert first/last-seen and acknowledgement-age labels, recurrence rendering as a fresh active incident, alert actions, paginated command history (search, status filter, page sizes, Previous/Next, X-Y of Z count, and filter-aware CSV export), remote terminal, profiles page, remote install page, and the policy/user/session dialogs. It is a DOM smoke test, not a browser end-to-end test.
 
 `ui-tests/node_modules` is not committed. `npm ci` needs network access to fetch jsdom; if the directory is absent and the environment is offline, skip the UI test rather than vendoring dependencies.
 

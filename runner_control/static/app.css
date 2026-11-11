@@ -739,6 +739,8 @@ svg { display: block; }
 .alert-item .alert-mark { flex: none; font-weight: 800; }
 .alert-item .alert-body { display: grid; flex: 1; gap: 3px; min-width: 0; }
 .alert-item .alert-state { color: var(--text-dim); font-family: var(--mono); font-size: 9.5px; }
+.alert-item.acknowledged { border-color: rgba(109, 168, 255, 0.32); background: rgba(109, 168, 255, 0.065); }
+.alert-item.acknowledged .alert-mark { color: var(--blue); }
 .alert-item.muted { border-color: var(--line); background: var(--muted-row-bg); color: var(--text-dim); }
 .alert-actions { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
 .alert-actions .button { min-height: 25px; padding: 4px 7px; font-size: 9.5px; }

@@ -87,3 +87,43 @@ def test_old_schema_migrates_without_losing_rows(tmp_path):
     assert telemetry_table is not None
     assert store_table is not None
     assert version == 6
+
+
+def test_legacy_alert_states_gain_incident_lifecycle_columns(tmp_path):
+    path = tmp_path / "legacy-alerts.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.executescript(OLD_SCHEMA)
+    conn.executescript(
+        """
+        CREATE TABLE alert_states (
+            agent_id TEXT NOT NULL,
+            alert_key TEXT NOT NULL,
+            acknowledged_at TEXT,
+            acknowledged_by TEXT NOT NULL DEFAULT '',
+            snoozed_until TEXT,
+            PRIMARY KEY (agent_id, alert_key)
+        );
+        INSERT INTO alert_states (agent_id, alert_key, acknowledged_at, acknowledged_by)
+        VALUES ('agt_legacy', 'disk:!2F', '2026-01-01T00:00:00Z', 'legacyadmin');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    database = Database(path)
+    database.initialize()
+
+    with database.connection() as migrated:
+        columns = {row["name"] for row in migrated.execute("PRAGMA table_info(alert_states)")}
+        state = migrated.execute(
+            "SELECT * FROM alert_states WHERE agent_id = 'agt_legacy'"
+        ).fetchone()
+
+    assert {"incident_id", "first_seen_at", "last_seen_at", "cleared_at"} <= columns
+    assert state is not None
+    assert state["incident_id"].startswith("inc_")
+    assert state["first_seen_at"]
+    assert state["last_seen_at"]
+    assert state["cleared_at"] is None
+    assert state["acknowledged_at"] == "2026-01-01T00:00:00Z"
+    assert state["acknowledged_by"] == "legacyadmin"

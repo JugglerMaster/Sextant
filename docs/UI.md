@@ -67,7 +67,7 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 - 24-hour CPU/memory/disk/GPU sparklines in the drawer.
 - Drawer focus trap, focus return to the trigger, and sortable-header `aria-sort` markers.
 - Cadence-aware stale badges for heartbeat and inventory age.
-- Alert center with acknowledge, snooze, and clear actions for every current health alert.
+- Alert center with acknowledge, snooze, and clear actions for every current health alert, including incident first/last-seen timestamps, incident age, acknowledgement age, and an explicit “condition still active” label for acknowledged alerts.
 - Bulk selection with refresh-telemetry, wake, reboot, shutdown, service, and profile actions, sent as one batch request and reported per agent.
 - CSV export for the fleet, per-agent package inventory, and filtered command history.
 - Trends tab with gap-aware 24h/7d detail charts, a persistent state-change timeline, and a What changed summary.
@@ -99,7 +99,7 @@ Priority: full pagination for Services and Users next.
 - Status/profile/tag filters, persistence, and per-user server-side saved views are implemented.
 - Agent cards render incrementally by keyed agent id, reuse unchanged nodes, preserve selection/focus through SSE updates, and are bounded with Show more.
 - Bulk select with refresh-telemetry, wake, reboot, shutdown, service, and profile actions is implemented through one batch request; results list counts and failed agent names/messages. Selection is preserved until the user clears it.
-- Alert center lists current alerts with acknowledge/snooze/clear and links to the machine.
+- Alert center lists current alerts with acknowledge/snooze/clear and links to the machine. Each row shows first seen, last seen, incident age, and (when acknowledged) the acknowledgement age with a “condition still active” label. A resolved-then-recurring alert is a new incident, so it renders as active and unacknowledged automatically.
 - Remaining: profile badges.
 
 ### 4. History and charts
@@ -138,7 +138,7 @@ Priority: full pagination for Services and Users next.
 | Table sort/pagination | Implemented for Packages, Startup, Audit, and History; Services bounded show-more; Users search/count |
 | Charts/sparklines | 24h sparklines plus gap-aware 24h/7d detail charts, persistent event timeline, and What changed summary; SVG rendering now verified in a real browser |
 | Accessibility pass | Implemented and browser-tested: focus trap/return, aria-sort, live regions, theme toggle, command palette, labelled dialogs/progress bars, and axe scans with no serious/critical violations in both themes |
-| Alert center | Implemented with acknowledge/snooze/clear |
+| Alert center | Implemented with acknowledge/snooze/clear, incident first/last-seen and age, acknowledgement age, and recurrence reset |
 | Bulk actions | Implemented through one batch request: refresh, wake, reboot, shutdown, service, profile, with per-agent results |
 | Saved views/export | CSV export (fleet, packages, filtered command history) and per-user server-side named fleet views |
 | SSE/WebSocket | Change-driven dashboard SSE with shared snapshot cache, periodic safety refresh, session revalidation, and polling fallback; command status/result SSE with live stdout/stderr chunks, replay, and poll fallback |

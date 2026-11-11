@@ -108,6 +108,10 @@ CREATE TABLE IF NOT EXISTS command_output (
 CREATE TABLE IF NOT EXISTS alert_states (
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     alert_key TEXT NOT NULL,
+    incident_id TEXT NOT NULL DEFAULT '',
+    first_seen_at TEXT,
+    last_seen_at TEXT,
+    cleared_at TEXT,
     acknowledged_at TEXT,
     acknowledged_by TEXT NOT NULL DEFAULT '',
     snoozed_until TEXT,
@@ -500,6 +504,26 @@ class Database:
         state_columns = columns("package_inventory_state")
         if state_columns and "revision" not in state_columns:
             conn.execute("ALTER TABLE package_inventory_state ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+
+        alert_columns = columns("alert_states")
+        if alert_columns:
+            if "incident_id" not in alert_columns:
+                conn.execute("ALTER TABLE alert_states ADD COLUMN incident_id TEXT NOT NULL DEFAULT ''")
+            if "first_seen_at" not in alert_columns:
+                conn.execute("ALTER TABLE alert_states ADD COLUMN first_seen_at TEXT")
+            if "last_seen_at" not in alert_columns:
+                conn.execute("ALTER TABLE alert_states ADD COLUMN last_seen_at TEXT")
+            if "cleared_at" not in alert_columns:
+                conn.execute("ALTER TABLE alert_states ADD COLUMN cleared_at TEXT")
+            now = utcnow_iso()
+            conn.execute(
+                """UPDATE alert_states SET
+                     incident_id = CASE WHEN incident_id = '' THEN 'inc_' || lower(hex(randomblob(8))) ELSE incident_id END,
+                     first_seen_at = COALESCE(first_seen_at, acknowledged_at, ?),
+                     last_seen_at = COALESCE(last_seen_at, acknowledged_at, ?)
+                   WHERE incident_id = '' OR first_seen_at IS NULL OR last_seen_at IS NULL""",
+                (now, now),
+            )
 
         remote_columns = columns("remote_install_jobs")
         if remote_columns and "watch_services" not in remote_columns:
@@ -1081,6 +1105,174 @@ class Database:
         with self.connection() as own:
             return self._alert_states(own)
 
+    @staticmethod
+    def _new_incident_id() -> str:
+        return "inc_" + secrets.token_hex(8)
+
+    def _reconcile_alert_states(
+        self,
+        conn: sqlite3.Connection,
+        agent_id: str,
+        alerts: dict[str, dict[str, Any]] | list[dict[str, Any]],
+        *,
+        now: datetime,
+        at: str,
+        ack_ttl_hours: int,
+        allow_clear: bool,
+    ) -> dict[str, sqlite3.Row]:
+        if isinstance(alerts, dict):
+            incoming = {str(key): alert for key, alert in alerts.items()}
+        else:
+            incoming = {str(alert["key"]): alert for alert in alerts}
+        rows = self._alert_states(conn, agent_id)
+        ttl = timedelta(hours=max(1, min(8760, int(ack_ttl_hours))))
+
+        for key, alert in incoming.items():
+            row = rows.get(key)
+            level = str(alert.get("level") or "warning")
+            message = str(alert.get("message") or key)
+            if row is None or row["cleared_at"] or not row["incident_id"]:
+                previous_incident = row["incident_id"] if row is not None else ""
+                incident_id = self._new_incident_id()
+                if row is None:
+                    conn.execute(
+                        """INSERT INTO alert_states
+                           (agent_id, alert_key, incident_id, first_seen_at, last_seen_at,
+                            cleared_at, acknowledged_at, acknowledged_by, snoozed_until)
+                           VALUES (?, ?, ?, ?, ?, NULL, NULL, '', NULL)""",
+                        (agent_id, key, incident_id, at, at),
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE alert_states SET
+                             incident_id = ?, first_seen_at = ?, last_seen_at = ?,
+                             cleared_at = NULL, acknowledged_at = NULL,
+                             acknowledged_by = '', snoozed_until = NULL
+                           WHERE agent_id = ? AND alert_key = ?""",
+                        (incident_id, at, at, agent_id, key),
+                    )
+                detail = {
+                    "action": "raised",
+                    "alert_key": key,
+                    "incident_id": incident_id,
+                    "level": level,
+                    "message": message,
+                }
+                if previous_incident:
+                    detail["previous_incident_id"] = previous_incident
+                    detail["recurrence"] = True
+                self.record_agent_event(
+                    agent_id,
+                    "alert",
+                    level,
+                    f"Alert raised: {message}",
+                    detail,
+                    at=at,
+                    conn=conn,
+                )
+                continue
+
+            acknowledged_at = parse_iso(row["acknowledged_at"])
+            ack_expired = bool(acknowledged_at and now - acknowledged_at >= ttl)
+            if ack_expired:
+                conn.execute(
+                    """UPDATE alert_states SET
+                         last_seen_at = ?, acknowledged_at = NULL, acknowledged_by = ''
+                       WHERE agent_id = ? AND alert_key = ?""",
+                    (at, agent_id, key),
+                )
+                self.record_agent_event(
+                    agent_id,
+                    "alert",
+                    "info",
+                    f"Alert acknowledgement expired: {message}",
+                    {
+                        "action": "acknowledgement_expired",
+                        "alert_key": key,
+                        "incident_id": row["incident_id"],
+                        "level": level,
+                        "message": message,
+                    },
+                    at=at,
+                    conn=conn,
+                )
+            else:
+                conn.execute(
+                    "UPDATE alert_states SET last_seen_at = ? WHERE agent_id = ? AND alert_key = ?",
+                    (at, agent_id, key),
+                )
+
+        if allow_clear:
+            for key, row in rows.items():
+                if key in incoming or row["cleared_at"]:
+                    continue
+                conn.execute(
+                    """UPDATE alert_states SET
+                         cleared_at = ?, acknowledged_at = NULL, acknowledged_by = '',
+                         snoozed_until = NULL
+                       WHERE agent_id = ? AND alert_key = ?""",
+                    (at, agent_id, key),
+                )
+                self.record_agent_event(
+                    agent_id,
+                    "alert",
+                    "info",
+                    f"Alert cleared: {key}",
+                    {
+                        "action": "cleared",
+                        "alert_key": key,
+                        "incident_id": row["incident_id"],
+                        "level": "",
+                        "message": "",
+                    },
+                    at=at,
+                    conn=conn,
+                )
+
+        return self._alert_states(conn, agent_id)
+
+    def reconcile_alert_states(
+        self,
+        agent_id: str,
+        alerts: dict[str, dict[str, Any]] | list[dict[str, Any]],
+        *,
+        now: datetime | None = None,
+        at: str | None = None,
+        ack_ttl_hours: int = 168,
+        conn: sqlite3.Connection | None = None,
+        allow_clear: bool = True,
+    ) -> dict[str, sqlite3.Row]:
+        """Materialize the current alert conditions as incident state.
+
+        A new condition gets a stable incident id and first/last-seen stamps. A
+        still-present condition only advances last-seen, preserving an
+        acknowledgement until its TTL expires. A condition that is no longer
+        reported is marked cleared and loses its acknowledgement and snooze. If
+        the same key reappears after being cleared it starts a new incident.
+        """
+        now_value = now or utcnow()
+        at_value = at or now_value.isoformat(timespec="seconds").replace("+00:00", "Z")
+        if conn is not None:
+            return self._reconcile_alert_states(
+                conn,
+                agent_id,
+                alerts,
+                now=now_value,
+                at=at_value,
+                ack_ttl_hours=ack_ttl_hours,
+                allow_clear=allow_clear,
+            )
+        with self.transaction() as own:
+            return self._reconcile_alert_states(
+                own,
+                agent_id,
+                alerts,
+                now=now_value,
+                at=at_value,
+                ack_ttl_hours=ack_ttl_hours,
+                allow_clear=allow_clear,
+            )
+
     def set_alert_ack(
         self,
         agent_id: str,
@@ -1088,12 +1280,14 @@ class Database:
         actor: str,
         conn: sqlite3.Connection | None = None,
     ) -> None:
-        sql = """INSERT INTO alert_states (agent_id, alert_key, acknowledged_at, acknowledged_by)
-                 VALUES (?, ?, ?, ?)
+        now = utcnow_iso()
+        sql = """INSERT INTO alert_states
+                 (agent_id, alert_key, incident_id, first_seen_at, last_seen_at, acknowledged_at, acknowledged_by)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(agent_id, alert_key) DO UPDATE SET
                    acknowledged_at = excluded.acknowledged_at,
                    acknowledged_by = excluded.acknowledged_by"""
-        params = (agent_id, alert_key, utcnow_iso(), actor)
+        params = (agent_id, alert_key, self._new_incident_id(), now, now, now, actor)
         if conn is not None:
             conn.execute(sql, params)
             return
@@ -1107,14 +1301,16 @@ class Database:
         minutes: int,
         conn: sqlite3.Connection | None = None,
     ) -> str:
+        now = utcnow_iso()
         snoozed_until = (
             utcnow() + timedelta(minutes=int(minutes))
         ).isoformat(timespec="seconds").replace("+00:00", "Z")
-        sql = """INSERT INTO alert_states (agent_id, alert_key, snoozed_until)
-                 VALUES (?, ?, ?)
+        sql = """INSERT INTO alert_states
+                 (agent_id, alert_key, incident_id, first_seen_at, last_seen_at, snoozed_until)
+                 VALUES (?, ?, ?, ?, ?, ?)
                  ON CONFLICT(agent_id, alert_key) DO UPDATE SET
                    snoozed_until = excluded.snoozed_until"""
-        params = (agent_id, alert_key, snoozed_until)
+        params = (agent_id, alert_key, self._new_incident_id(), now, now, snoozed_until)
         if conn is not None:
             conn.execute(sql, params)
         else:
@@ -1128,12 +1324,16 @@ class Database:
         alert_key: str,
         conn: sqlite3.Connection | None = None,
     ) -> bool:
-        sql = "DELETE FROM alert_states WHERE agent_id = ? AND alert_key = ?"
+        """Clear the acknowledgement/snooze on the current incident."""
+        sql = """UPDATE alert_states SET
+                   acknowledged_at = NULL, acknowledged_by = '', snoozed_until = NULL
+                 WHERE agent_id = ? AND alert_key = ?"""
         params = (agent_id, alert_key)
         if conn is not None:
             return conn.execute(sql, params).rowcount == 1
         with self.connection() as own:
             return own.execute(sql, params).rowcount == 1
+
 
     # ---- Agent / command housekeeping ----------------------------------
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -134,19 +134,31 @@ def _decorate_alerts(
     alerts: list[dict],
     states: dict[str, Any] | None,
     now: datetime,
+    ack_ttl_hours: int = 168,
 ) -> list[dict]:
     states = states or {}
+    ttl = timedelta(hours=max(1, min(8760, int(ack_ttl_hours))))
     decorated: list[dict] = []
     for alert in alerts:
         state = states.get(alert["key"])
-        acknowledged = bool(state and state["acknowledged_at"])
+        acknowledged_at = state["acknowledged_at"] if state is not None else None
+        acknowledged_since = parse_iso(acknowledged_at)
+        acknowledged = bool(acknowledged_since and now - acknowledged_since < ttl)
         snoozed_until = state["snoozed_until"] if state is not None else None
         until = parse_iso(snoozed_until)
         snoozed = bool(until is not None and until > now)
+        incident_id = state["incident_id"] if state is not None else None
+        first_seen_at = state["first_seen_at"] if state is not None else None
+        last_seen_at = state["last_seen_at"] if state is not None else None
         decorated.append(
             {
                 **alert,
+                "incident_id": incident_id or f"incident:{alert['key']}:{first_seen_at or ''}",
+                "first_seen_at": first_seen_at,
+                "last_seen_at": last_seen_at,
                 "acknowledged": acknowledged,
+                "acknowledged_at": acknowledged_at,
+                "acknowledged_by": state["acknowledged_by"] if state is not None else "",
                 "snoozed": snoozed,
                 "snoozed_until": snoozed_until if snoozed else None,
             }
@@ -168,7 +180,12 @@ def agent_to_dict(
     services = loads(row["services"], [])
     startup = loads(row["startup"], [])
     mem_pct = float(row["mem_pct"] or 0)
-    alerts = _decorate_alerts(_agent_alerts(disks, gpus, services, mem_pct), alert_states, now)
+    alerts = _decorate_alerts(
+        _agent_alerts(disks, gpus, services, mem_pct),
+        alert_states,
+        now,
+        settings.alert_ack_ttl_hours,
+    )
     active_alerts = [alert for alert in alerts if not alert["acknowledged"] and not alert["snoozed"]]
     watch_services = loads(row["watch_services"], [])
     policy = loads(row["policy"], {})

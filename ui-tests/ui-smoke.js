@@ -97,8 +97,30 @@ const agent = {
   extra: { cpu_model: "Ryzen 9", kernel: "10.0", gpu_processes: [{ pid: 4242, name: "python.exe", mem_used: 8000000000 }] },
   alert_count: 1,
   alerts: [
-    { key: "disk_root", level: "warning", message: "Disk C: is 85% full", acknowledged: false, snoozed: false, snoozed_until: null },
-    { key: "memory", level: "critical", message: "Memory is 91% used", acknowledged: true, snoozed: false, snoozed_until: null },
+    {
+      key: "disk_root",
+      incident_id: "inc_disk_1",
+      first_seen_at: "2026-11-06T07:10:00Z",
+      last_seen_at: "2026-11-06T08:00:00Z",
+      level: "warning",
+      message: "Disk C: is 85% full",
+      acknowledged: false,
+      acknowledged_at: null,
+      snoozed: false,
+      snoozed_until: null,
+    },
+    {
+      key: "memory",
+      incident_id: "inc_memory_1",
+      first_seen_at: "2026-11-06T07:20:00Z",
+      last_seen_at: "2026-11-06T08:00:00Z",
+      level: "critical",
+      message: "Memory is 91% used",
+      acknowledged: true,
+      acknowledged_at: "2026-11-06T07:30:00Z",
+      snoozed: false,
+      snoozed_until: null,
+    },
   ],
 };
 
@@ -474,6 +496,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const alertCenter = window.document.getElementById("alert-center");
   if (alertCenter.hidden) throw new Error("alert center should be visible");
   if (!alertCenter.textContent.includes("Disk C:")) throw new Error("alert center missing alert");
+  if (!alertCenter.textContent.includes("First seen")) throw new Error("alert center missing first-seen timing");
+  if (!alertCenter.textContent.includes("Last seen")) throw new Error("alert center missing last-seen timing");
+  if (!alertCenter.textContent.includes("Incident age")) throw new Error("alert center missing incident age");
+  if (!alertCenter.textContent.includes("Acknowledged · condition still active")) {
+    throw new Error("alert center should mark an acknowledged alert as still active");
+  }
   if (!findButton(alertCenter, "Acknowledge")) throw new Error("alert acknowledge action missing");
   if (!findButton(alertCenter, "Snooze")) throw new Error("alert snooze action missing");
   if (!findButton(alertCenter, "Clear")) throw new Error("alert clear action missing");
@@ -492,6 +520,32 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!window.document.getElementById("toast-region").textContent.includes("Alert cleared")) {
     throw new Error("alert clear action did not run");
   }
+  const recurredMemory = {
+    ...agent.alerts[1],
+    incident_id: "inc_memory_2",
+    first_seen_at: "2026-11-06T08:05:00Z",
+    last_seen_at: "2026-11-06T08:06:00Z",
+    acknowledged: false,
+    acknowledged_at: null,
+  };
+  liveSource.emit("dashboard", {
+    ...dashboardBody,
+    agents: [{ ...agent, alerts: [agent.alerts[0], recurredMemory] }],
+  });
+  await sleep(30);
+  const recurredRow = alertCenter.querySelector('[data-alert-key="memory"]');
+  if (!recurredRow) throw new Error("recurring alert did not render");
+  if (recurredRow.dataset.incidentId !== "inc_memory_2") {
+    throw new Error("recurring alert did not use its new incident id");
+  }
+  if (recurredRow.textContent.includes("Acknowledged")) {
+    throw new Error("recurring alert should not stay acknowledged");
+  }
+  if (!findButton(recurredRow, "Acknowledge")) {
+    throw new Error("recurring alert should be active again");
+  }
+  liveSource.emit("dashboard", dashboardBody);
+  await sleep(30);
   const bulkBar = window.document.getElementById("bulk-actions");
   if (bulkBar.hidden) throw new Error("bulk actions should be visible for operators");
   const rebootButton = window.document.getElementById("bulk-reboot");

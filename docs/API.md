@@ -153,6 +153,9 @@ the source of truth for saved views.
 | `GET` | `/api/agents/{id}` | any | One agent + latest 50 commands |
 | `GET` | `/api/agents/{id}/history?hours=24&points=200` | any | Gap-aware telemetry history (1–720 hours, 10–1000 buckets) |
 | `GET` | `/api/agents/{id}/events?hours=24&limit=100` | any | Persistent state-change events, newest first (1–720 hours, 1–500 events) |
+| `POST` | `/api/agents/{id}/alerts/{key}/ack` | operator | Acknowledge the current alert incident |
+| `POST` | `/api/agents/{id}/alerts/{key}/snooze` | operator | Snooze the current alert incident (5–10080 minutes) |
+| `DELETE` | `/api/agents/{id}/alerts/{key}` | operator | Clear the acknowledgement/snooze on the current incident |
 | `PATCH` | `/api/agents/{id}` | admin | Edit tags, notes, watched services, action policy |
 | `POST` | `/api/agents/{id}/commands` | operator | Queue a command |
 | `GET` | `/api/agents/{id}/commands?limit=50&offset=0` | any | Paginated command history (limit 1–200) |
@@ -165,7 +168,25 @@ the source of truth for saved views.
 | `POST` | `/api/agents/{id}/rotate-token` | admin | Rotate agent bearer token |
 | `DELETE` | `/api/agents/{id}` | admin | Delete agent and command history |
 
-Dashboard agent fields include `online`, `last_seen`, `cpu_pct`, `mem_pct`, `mem_total`, `mem_used`, `uptime_seconds`, `disks`, `gpus`, `services`, `startup`, `alerts`, `alert_count`, tags, IP/MAC, machine ID, OS, agent version, watched services, and the server policy. `alerts` are computed at read time.
+Dashboard agent fields include `online`, `last_seen`, `cpu_pct`, `mem_pct`, `mem_total`, `mem_used`, `uptime_seconds`, `disks`, `gpus`, `services`, `startup`, `alerts`, `alert_count`, tags, IP/MAC, machine ID, OS, agent version, watched services, and the server policy. Alert objects add incident identity and lifecycle fields:
+
+```json
+{
+  "key": "disk:!2F",
+  "level": "warning",
+  "message": "Disk / is 85% full",
+  "incident_id": "inc_ab12cd34ef56",
+  "first_seen_at": "2026-11-06T07:10:00Z",
+  "last_seen_at": "2026-11-06T08:00:00Z",
+  "acknowledged": true,
+  "acknowledged_at": "2026-11-06T07:30:00Z",
+  "acknowledged_by": "alice",
+  "snoozed": false,
+  "snoozed_until": null
+}
+```
+
+Alert conditions are computed from the latest heartbeat telemetry and reconciled into `alert_states` whenever the dashboard or agent detail is built. A new condition receives a fresh `incident_id`, `first_seen_at`, and `last_seen_at`. A still-present condition only advances `last_seen_at`, preserving an acknowledgement. A condition that disappears is marked cleared and loses its acknowledgement and snooze. If the same key later reappears it starts a new incident with a new id and fresh first-seen time, so a resolved-then-recurring alert is never silently muted. Acknowledgements also expire after `RC_ALERT_ACK_TTL_HOURS` (default 168, 1–8760), at which point the alert becomes active again and must be re-acknowledged. Snoozes keep their explicit `snoozed_until` expiry. `alert_count` counts only current alerts that are unacknowledged and not snoozed.
 
 ### Live updates (Server-Sent Events)
 
@@ -478,7 +499,7 @@ Any authenticated role can read. `hours` must be 1–720 and `limit` must be 1�
 }
 ```
 
-Kinds are `online`, `service`, `package`, `version`, `profile`, and `alert`. Alert detail identifies the lifecycle action (`raised`, `cleared`, `acknowledged`, or `snoozed`). Events are recorded best-effort: a failed event write never breaks a heartbeat or command path. Detail is deliberately bounded (for package transitions, at most the first ten names plus counts and a `truncated` flag), and an oversized detail payload is replaced with `{"truncated": true}`. Events are pruned with `RC_COMMAND_RETENTION_DAYS` (default 90).
+Kinds are `online`, `service`, `package`, `version`, `profile`, and `alert`. Alert detail identifies the lifecycle action (`raised`, `cleared`, `acknowledged`, `reacknowledged`, `snoozed`, or `acknowledgement_expired`) plus the `incident_id` where applicable. Raises are recorded on the first heartbeat that sees a condition; a recurrence is still a `raised` event with `recurrence: true` and the previous incident id. Steady heartbeats only advance `last_seen_at` and do not create events. Events are recorded best-effort: a failed event write never breaks a heartbeat or command path. Detail is deliberately bounded (for package transitions, at most the first ten names plus counts and a `truncated` flag), and an oversized detail payload is replaced with `{"truncated": true}`. Events are pruned with `RC_COMMAND_RETENTION_DAYS` (default 90).
 
 ## Package management
 

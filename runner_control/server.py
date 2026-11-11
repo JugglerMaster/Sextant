@@ -382,8 +382,13 @@ def _validate_broadcast(value: str) -> str:
         raise ValueError("broadcast must be an IPv4 address") from exc
 
 
-def _find_agent_alert(row: sqlite3.Row, settings: Settings, alert_key: str) -> dict[str, Any] | None:
-    for alert in agent_to_dict(row, settings)["alerts"]:
+def _find_agent_alert(
+    row: sqlite3.Row,
+    settings: Settings,
+    alert_key: str,
+    alert_states: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    for alert in agent_to_dict(row, settings, alert_states=alert_states)["alerts"]:
         if alert["key"] == alert_key:
             return alert
     return None
@@ -401,6 +406,27 @@ def _alert_map(row: Any) -> dict[str, dict[str, Any]]:
         services = []
     alerts = _agent_alerts(disks, gpus, services, float(row["mem_pct"] or 0))
     return {str(alert["key"]): alert for alert in alerts}
+
+
+def _reconcile_agent_alerts(
+    database: Database,
+    row: sqlite3.Row,
+    config: Settings,
+    now: datetime,
+    conn: sqlite3.Connection,
+    at: str | None = None,
+) -> dict[str, sqlite3.Row]:
+    """Reconcile the current telemetry-derived alerts with incident state."""
+    allow_clear = bool(row["last_seen"])
+    return database.reconcile_alert_states(
+        row["id"],
+        _alert_map(row),
+        now=now,
+        at=at,
+        ack_ttl_hours=config.alert_ack_ttl_hours,
+        conn=conn,
+        allow_clear=allow_clear,
+    )
 
 
 def _service_map(services: Any) -> dict[str, tuple[str, str, bool]]:
@@ -756,12 +782,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Single source of truth for GET /api/dashboard and the SSE stream."""
         sweep_commands(database, config)
         now = datetime.now(timezone.utc)
-        with database.connection() as conn:
+        alert_states: dict[str, dict[str, sqlite3.Row]] = {}
+        with database.transaction() as conn:
             rows = conn.execute("SELECT * FROM agents ORDER BY name COLLATE NOCASE").fetchall()
             queued = conn.execute(
                 "SELECT COUNT(*) AS n FROM commands WHERE status IN ('queued', 'dispatched', 'running')"
             ).fetchone()
-        alert_states = database.get_all_alert_states()
+            for row in rows:
+                alert_states[row["id"]] = _reconcile_agent_alerts(
+                    database, row, config, now, conn
+                )
         agents = [
             agent_to_dict(row, config, now, alert_states.get(row["id"], {}))
             for row in rows
@@ -1679,7 +1709,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         config: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         del user
-        with database.connection() as conn:
+        now = utcnow()
+        with database.transaction() as conn:
             row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Agent not found.")
@@ -1687,8 +1718,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "SELECT * FROM commands WHERE agent_id = ? ORDER BY created_at DESC LIMIT 50",
                 (agent_id,),
             ).fetchall()
+            states = _reconcile_agent_alerts(database, row, config, now, conn)
         return {
-            "agent": agent_to_dict(row, config, alert_states=database.get_alert_states(agent_id)),
+            "agent": agent_to_dict(row, config, now=now, alert_states=states),
             "commands": [command_to_dict(command, full_output=False) for command in commands],
         }
 
@@ -1705,15 +1737,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Agent not found.")
-            alert = _find_agent_alert(row, config, alert_key)
+            prior_state = database.get_alert_states(agent_id, conn=conn).get(alert_key)
+            states = _reconcile_agent_alerts(database, row, config, utcnow(), conn)
+            alert = _find_agent_alert(row, config, alert_key, states)
             if alert is None:
                 raise HTTPException(status_code=404, detail="Alert not found.")
             database.set_alert_ack(agent_id, alert_key, user["username"], conn=conn)
+            reacknowledged = bool(
+                prior_state and (prior_state["acknowledged_at"] or prior_state["cleared_at"])
+            )
+            action = "reacknowledged" if reacknowledged else "acknowledged"
             database.audit(
                 actor=user["username"],
-                action="alert.acknowledged",
+                action=f"alert.{action}",
                 target=agent_id,
-                detail={"alert_key": alert_key, "level": alert["level"], "message": alert["message"]},
+                detail={
+                    "alert_key": alert_key,
+                    "incident_id": alert["incident_id"],
+                    "level": alert["level"],
+                    "message": alert["message"],
+                },
                 ip=client_ip(request, config.trust_proxy),
                 conn=conn,
             )
@@ -1721,10 +1764,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 agent_id,
                 "alert",
                 alert["level"],
-                f"Alert acknowledged: {alert['message']}",
+                f"Alert {'re-acknowledged' if reacknowledged else 'acknowledged'}: {alert['message']}",
                 {
-                    "action": "acknowledged",
+                    "action": action,
                     "alert_key": alert_key,
+                    "incident_id": alert["incident_id"],
                     "level": alert["level"],
                     "message": alert["message"],
                     "actor": user["username"],
@@ -1751,7 +1795,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Agent not found.")
-            alert = _find_agent_alert(row, config, alert_key)
+            states = _reconcile_agent_alerts(database, row, config, utcnow(), conn)
+            alert = _find_agent_alert(row, config, alert_key, states)
             if alert is None:
                 raise HTTPException(status_code=404, detail="Alert not found.")
             snoozed_until = database.set_alert_snooze(agent_id, alert_key, payload.minutes, conn=conn)
@@ -1761,6 +1806,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 target=agent_id,
                 detail={
                     "alert_key": alert_key,
+                    "incident_id": alert["incident_id"],
                     "level": alert["level"],
                     "message": alert["message"],
                     "minutes": payload.minutes,
@@ -1777,6 +1823,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 {
                     "action": "snoozed",
                     "alert_key": alert_key,
+                    "incident_id": alert["incident_id"],
                     "level": alert["level"],
                     "message": alert["message"],
                     "minutes": payload.minutes,
@@ -1804,7 +1851,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Agent not found.")
-            alert = _find_agent_alert(row, config, alert_key)
+            states = _reconcile_agent_alerts(database, row, config, utcnow(), conn)
+            alert = _find_agent_alert(row, config, alert_key, states)
             if alert is None:
                 raise HTTPException(status_code=404, detail="Alert not found.")
             database.clear_alert_state(agent_id, alert_key, conn=conn)
@@ -1812,7 +1860,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 actor=user["username"],
                 action="alert.cleared",
                 target=agent_id,
-                detail={"alert_key": alert_key, "level": alert["level"], "message": alert["message"]},
+                detail={
+                    "alert_key": alert_key,
+                    "incident_id": alert["incident_id"],
+                    "level": alert["level"],
+                    "message": alert["message"],
+                },
                 ip=client_ip(request, config.trust_proxy),
                 conn=conn,
             )
@@ -1824,6 +1877,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 {
                     "action": "cleared",
                     "alert_key": alert_key,
+                    "incident_id": alert["incident_id"],
                     "level": alert["level"],
                     "message": alert["message"],
                     "actor": user["username"],
@@ -2804,7 +2858,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if str(name).strip()
         }
         previous_packages = _package_snapshot(database.list_package_inventory(agent_id))
-        previous_alerts = _alert_map(agent)
         previous_version = str(agent["agent_version"] or "")
         old_last_seen = parse_iso(agent["last_seen"] if "last_seen" in agent else None)
         was_online = bool(
@@ -2927,8 +2980,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         }
                     )
             current_agent = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            _reconcile_agent_alerts(
+                database, current_agent, config, now, conn, at=event_at
+            )
         current_packages = _package_snapshot(database.list_package_inventory(agent_id))
-        current_alerts = _alert_map(current_agent)
         current_version = str((payload.agent_version or agent["agent_version"] or "0"))[:64]
         state_events: list[dict[str, Any]] = []
         if old_last_seen is not None and not was_online:
@@ -2957,42 +3012,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             state_events.append({"agent_id": agent_id, "at": event_at, **event})
         for event in _package_change_events(previous_packages, current_packages):
             state_events.append({"agent_id": agent_id, "at": event_at, **event})
-        for key, alert in current_alerts.items():
-            if key in previous_alerts:
-                continue
-            state_events.append(
-                {
-                    "agent_id": agent_id,
-                    "at": event_at,
-                    "kind": "alert",
-                    "severity": alert.get("level", "warning"),
-                    "title": f"Alert raised: {alert.get('message') or key}",
-                    "detail": {
-                        "action": "raised",
-                        "alert_key": key,
-                        "level": alert.get("level"),
-                        "message": alert.get("message"),
-                    },
-                }
-            )
-        for key, alert in previous_alerts.items():
-            if key in current_alerts:
-                continue
-            state_events.append(
-                {
-                    "agent_id": agent_id,
-                    "at": event_at,
-                    "kind": "alert",
-                    "severity": "info",
-                    "title": f"Alert cleared: {alert.get('message') or key}",
-                    "detail": {
-                        "action": "cleared",
-                        "alert_key": key,
-                        "level": alert.get("level"),
-                        "message": alert.get("message"),
-                    },
-                }
-            )
         _record_agent_events(database, state_events)
         notify_dashboard()
         if secrets.randbelow(100) == 0:

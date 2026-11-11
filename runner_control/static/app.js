@@ -226,6 +226,16 @@ function relativeTime(value) {
   return date.toLocaleDateString();
 }
 
+function elapsedLabel(value) {
+  const date = parseDate(value);
+  if (!date) return "unknown";
+  const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d`;
+}
+
 function localTime(value) {
   const date = parseDate(value);
   return date ? date.toLocaleString() : "—";
@@ -980,20 +990,27 @@ function alertRow(agent, alert, showAgent = false) {
   if (showAgent) actions.push(button("View", "button-ghost button-small", () => openAgent(agent.id)));
   const meta = [];
   if (showAgent) meta.push(agent.name);
-  if (alert.acknowledged) meta.push("Acknowledged");
-  else if (alert.snoozed) {
+  if (alert.acknowledged) {
+    meta.push("Acknowledged · condition still active");
+    if (alert.acknowledged_at) meta.push(`Acknowledged ${elapsedLabel(alert.acknowledged_at)} ago`);
+  } else if (alert.snoozed) {
     meta.push(alert.snoozed_until ? `Snoozed until ${localTime(alert.snoozed_until)}` : "Snoozed");
   }
-  const className = `alert-item${active && alert.level === "critical" ? " critical" : ""}${active ? "" : " muted"}`;
+  const timing = [];
+  if (alert.first_seen_at) timing.push(`First seen ${relativeTime(alert.first_seen_at)}`);
+  if (alert.last_seen_at) timing.push(`Last seen ${relativeTime(alert.last_seen_at)}`);
+  if (alert.first_seen_at) timing.push(`Incident age ${elapsedLabel(alert.first_seen_at)}`);
+  const className = `alert-item${active && alert.level === "critical" ? " critical" : ""}${active ? "" : " muted"}${alert.acknowledged ? " acknowledged" : ""}`;
   return h(
     "div",
-    { class: className },
-    h("span", { class: "alert-mark" }, active ? (alert.level === "critical" ? "!" : "•") : "✓"),
+    { class: className, "data-alert-key": alert.key, "data-incident-id": alert.incident_id || "" },
+    h("span", { class: "alert-mark" }, active ? (alert.level === "critical" ? "!" : "•") : alert.acknowledged ? "A" : "✓"),
     h(
       "div",
       { class: "alert-body" },
       meta.length ? h("span", { class: "alert-state" }, meta.join(" · ")) : null,
       h("span", {}, alert.message),
+      timing.length ? h("span", { class: "alert-state alert-timing" }, timing.join(" · ")) : null,
     ),
     actions.length ? h("div", { class: "alert-actions" }, ...actions) : null,
   );
