@@ -31,8 +31,8 @@ Related plans: [Discovery](DISCOVERY.md) (proposed, not implemented), [Package m
 - [x] Read-only package inventory and per-device apt/dnf/winget/choco desired-state sync (API + device Packages tab; rule editor pending).
 - [x] Server-managed agent profiles (`workstation`/`server`/custom) with installer selection, heartbeat sync, module flags, cadence, dashboard editor, admin reassignment, tag assignment, true package inventory delta, and weekly full reconciliation.
 - [x] Linux remote install over key-based SSH with prerequisite checks, one-time enrollment, job log, and one-at-a-time jobs.
-- [x] Package desired-state rule editor, inventory filter, heartbeat/inventory freshness labels, interactive tables, fleet filters and saved views, alert center with acknowledge/snooze, cadence-aware stale badges, 24h/7d detail charts and timeline, bulk fleet actions, light/dark theme, command palette, and SSE dashboard/command events ([UI plan](UI.md)).
-- [ ] Remaining UI refinements: History table export, profile badges, offline-gap markers, high-contrast audit, and incremental command stdout streaming.
+- [x] Package desired-state rule editor, inventory filter, heartbeat/inventory freshness labels, interactive tables, fleet filters and per-user server-side saved views, alert center with acknowledge/snooze and recurrence-aware incidents, cadence-aware stale badges, gap-aware 24h/7d detail charts with a persistent event timeline and What changed summary, batch fleet actions, light/dark theme, command palette, Playwright/axe browser tests, change-driven SSE, and incremental command stdout streaming ([UI plan](UI.md)).
+- [ ] Remaining UI refinements: profile badges and a high-contrast/zoom accessibility pass.
 
 ### Explicitly deferred
 
@@ -86,18 +86,15 @@ Acceptance criteria:
 
 Effort: small–medium. No new datastore required if deduplication state is in SQLite.
 
-### 3. Metrics history and charts (backend done, UI pending)
+### 3. Metrics history and charts (implemented)
 
 **Why:** The dashboard only shows the latest sample. Disk and GPU trends are more useful than a snapshot.
 
-Done: bounded `telemetry_samples` table, retention (`RC_TELEMETRY_RETENTION_DAYS`, default 7 days), and `GET /api/agents/{id}/history` with server-side downsampling.
+Done: bounded `telemetry_samples` table, retention (`RC_TELEMETRY_RETENTION_DAYS`, default 7 days), `GET /api/agents/{id}/history` with server-side downsampling and gap-aware buckets, 24-hour sparklines, and 24h/7d detail charts with a real timestamp axis. Persistent `agent_events` feed the timeline and What changed summary.
 
 Remaining scope:
 
-- Charts for CPU, memory, disk percent, GPU utilization, GPU VRAM, temperature.
-- Per-agent detail graphs and fleet sparklines.
 - Optional Prometheus exporter.
-- Visible gaps for offline periods instead of interpolated data.
 
 Acceptance criteria:
 

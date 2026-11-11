@@ -46,7 +46,10 @@ Run the whole suite:
 | `tests/test_history.py` | Heartbeat-derived telemetry samples, gap-aware bucket series with explicit nulls and timestamps, point caps, viewer access, retention, disabled history, legacy schema migration |
 | `tests/test_agent_events.py` | Transition-based event recording without heartbeat duplicates, service/package/version/profile/alert lifecycle events, event API hours/limit/RBAC, and event retention |
 | `tests/test_alert_lifecycle.py` | Alert incident reconciliation: acknowledgement then clear, recurrence as a new incident, last-seen updates preserving acknowledgement, acknowledgement TTL expiry, idempotent/concurrent dashboard reads, lifecycle events, and alert-action RBAC |
-| `tests/test_events.py` | SSE dashboard initial payload/content type, 401/403 auth, command event terminal payload and stream close |
+| `tests/test_command_output.py` | Agent output chunk upload auth/ownership, ordering/idempotency, per-command cap, terminal-state rejection, retention pruning, and SSE live/replay output |
+| `tests/test_events.py` | Change-driven dashboard SSE payload/content type, prompt heartbeat/mutation delivery, shared per-revision cache, 401/403 auth, session revocation/expiry stream close, command terminal payload and stream close |
+| `tests/test_bulk_saved_views.py` | Batch fleet actions (RBAC, validation, partial failures, per-agent results, audit) and per-user saved-view CRUD, isolation, duplicate names, and filter validation |
+| `tests/test_assets.py` | Static assets stay compatible with the strict CSP: no inline style attributes or DOM inline-style writes |
 | `tests/test_hardening.py` | Failed-login audit, session registry and revocation, user disable/reset, command cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication |
 | `tests/test_security.py` | Password hashing/policy, session signing/tampering/expiry, token hashing, magic packets, LDAP escaping and role mapping, fake LDAP bind flow |
 | `tests/test_agent.py` | Linux/metric parsers, collector normalization, config persistence, executor builders and policy intersection, agent runner smoke test |
@@ -121,6 +124,19 @@ To run only the fast DOM smoke test (as before):
 cd ui-tests
 npm test
 ```
+
+## Manual live validation
+
+A real-agent smoke test was run on a Raspberry Pi (Raspbian 13, armv7l, Python 3.13.5) against a temporary server:
+
+- Built `runner_control-0.2.0-py3-none-any.whl`, installed it with `deploy/install-linux-agent.sh`, enrolled as `pi-live` with the `server` profile, and started the systemd unit.
+- Verified heartbeat telemetry (CPU, memory, root and boot disks, 211 services, 962 apt packages, `arch=armv7l`).
+- Published `0.3.0` to the server package store and ran `runner-agent update --apply --restart`; the agent verified SHA-256, staged a new venv, switched `current`, restarted, and reported `0.3.0`.
+- Ran a six-line shell command and consumed `/api/commands/{id}/events`: 12 output events arrived once per second before the terminal event, followed by the canonical final stdout/stderr.
+- Verified `/api/events` sends the next dashboard snapshot immediately after a command mutation and closes an open stream with an `auth` event when the session is logged out.
+- Drove the real dashboard in Playwright: login, drawer, gap-aware Trends, paginated History, 50-row package/service tables, live terminal output, command palette, and light-theme toggle.
+
+The live run found and fixed two defects the unit/jsdom suites missed: small stdout was buffered until process exit (`read()` vs `read1()`), and the wheel installer looked for the systemd unit under the wheel path. Inline styles blocked by the CSP were also removed. These remain manual checks; the automated browser suite uses mocked APIs.
 
 ## Coverage gaps
 

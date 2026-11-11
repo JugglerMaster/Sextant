@@ -170,13 +170,13 @@ See [deploy/runner-control.env.example](deploy/runner-control.env.example) for a
 - **Wake-on-LAN is layer-2 local.** A server packet reaches its own broadcast domain. Use a directed broadcast or a separate relay for other VLANs; agents do not act as WoL relays.
 - **AD group mapping checks direct `memberOf` membership.** Nested group expansion is not implemented.
 - **Single node.** SQLite and the in-process login limiter target a home/lab/small-office deployment, not a multi-region cluster.
-- **Charts are inline SVG.** The dashboard has 24-hour sparklines and 24h/7d detail charts with a command/alert timeline; it does not embed a charting library.
+- **Charts are inline SVG.** The dashboard has 24-hour sparklines and gap-aware 24h/7d detail charts with a persistent state-change timeline and a What changed summary; it does not embed a charting library.
 - **Package store is Tier 0.** SHA-256 integrity, no signatures or CA; a compromised server can replace artifacts and hashes.
 - **Package management UI is functional.** The Packages tab has an interactive inventory table (search/sort/pagination), a desired-state rule editor, heartbeat/inventory age, and sync.
 - **Data freshness is shown on cards and in the drawer.** Heartbeat and inventory age are visible, with cadence-aware stale badges.
 - **Table controls are partial.** Packages, Startup, and Audit have search/sort/pagination; Services and Users have search, counts, and filtering, but only Services has bounded “show more” paging. History is server-paginated and filterable with CSV export.
-- **Fleet operations** — status/profile/tag filters, named saved views, bulk refresh/wake/reboot/shutdown/service/profile actions, an alert center with acknowledge/snooze, cadence-aware stale badges, 24h sparklines, detail charts, and CSV export.
-- **Live updates use SSE with polling fallback.** The dashboard streams `/api/events`; command status/result streams use `/api/commands/{id}/events`. Agents still upload one final command result, so raw incremental stdout is not implemented.
+- **Fleet operations** — status/profile/tag filters, per-user server-side saved views, batch refresh/wake/reboot/shutdown/service/profile actions with per-agent results, an alert center with acknowledge/snooze/clear and recurrence-aware incidents, cadence-aware stale badges, 24h sparklines, detail charts, and CSV export.
+- **Live updates use SSE with polling fallback.** The dashboard streams `/api/events` change-driven with a shared per-revision snapshot and periodic safety refresh. Command status, final results, and incremental stdout/stderr chunks stream over `/api/commands/{id}/events`; chunk delivery is best-effort and the final result remains authoritative.
 - **Package management is enabled by default.** Both the profile and agent-local flags must allow it; disable either side to opt out.
 - **Profile assignment is enrollment, admin, or tag.** Profiles are selected at enrollment, reassigned from the device drawer/API, or inherited from a tag. AD/LDAP group sync is future work.
 - **Remote install is Linux-only and one-at-a-time.** It uses a single server SSH key and disables host-key verification for rebuilt hosts; use it on a trusted admin network.

@@ -266,6 +266,7 @@ Optional installer variables:
 | Variable | Purpose |
 |---|---|
 | `SOURCE_DIR` | Source tree (or built wheel) to install |
+| `SERVICE_FILE` | Optional explicit path to `runner-agent.service`; otherwise resolved from the source/script tree |
 | `WATCH_SERVICES` | Comma-separated systemd units to monitor |
 | `AGENT_TAGS` | Comma-separated tags shown in the dashboard |
 | `CA_FILE` | Private CA bundle for TLS verification |
