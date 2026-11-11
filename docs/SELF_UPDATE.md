@@ -351,7 +351,7 @@ The installer should:
 | U4 | Policies (tag/percentage/window), auto-update, pause/yank, UI panels | M | medium |
 | U5 | Windows single-file/MSI packaging; canary automation; server self-update (separate); optional Tier 1 signing | L | high |
 
-Start with U1–U3 on Linux and Windows; the Windows task/junction switch is implemented but still needs a disposable Windows runner for live proof.
+Start with U1–U3 on Linux and Windows; the Windows directory-junction switch runs in CI, but the scheduled-task restart still needs a disposable Windows runner for live proof.
 
 ---
 

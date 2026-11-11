@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from sextant_agent import selfupdate
 from sextant_agent.config import AgentConfig
@@ -92,6 +95,7 @@ def test_selfupdate_apply_verifies_and_switches(monkeypatch, tmp_path):
         return len(data)
 
     switched = []
+    monkeypatch.setattr("sextant_agent.selfupdate._is_windows", lambda: False)
     monkeypatch.setattr("sextant_agent.selfupdate.AgentClient.download", fake_download)
     monkeypatch.setattr("sextant_agent.selfupdate._stage_venv", lambda version, wheel, install_dir: tmp_path / "venv")
     monkeypatch.setattr("sextant_agent.selfupdate._health_check", lambda venv, cfg: True)
@@ -214,4 +218,24 @@ def test_windows_task_action_switches_to_current(monkeypatch, tmp_path):
     run_spec = change[change.index("/TR") + 1]
     assert str(tmp_path / "current" / "Scripts" / "sextant-agent.exe") in run_spec
     assert 'run --config "C:\\ProgramData\\SextantAgent\\config.json"' in run_spec
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction integration test")
+def test_windows_junction_switch(tmp_path):
+    install = tmp_path / "install"
+    (install / "venv").mkdir(parents=True)
+    (install / "venv" / "marker.txt").write_text("old", encoding="utf-8")
+    target = install / "releases" / "1.2.3" / "venv"
+    target.mkdir(parents=True)
+    (target / "marker.txt").write_text("new", encoding="utf-8")
+    try:
+        selfupdate._ensure_windows_current(install)
+        assert (install / "current" / "marker.txt").read_text(encoding="utf-8") == "old"
+        previous = selfupdate._switch_windows_current(install, "1.2.3")
+        assert previous is not None
+        assert (install / "current" / "marker.txt").read_text(encoding="utf-8") == "new"
+        assert (install / "venv" / "marker.txt").read_text(encoding="utf-8") == "old"
+    finally:
+        selfupdate._remove_windows_junction(install / "current")
+
 
