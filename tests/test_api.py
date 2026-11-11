@@ -283,3 +283,149 @@ def test_agent_rotation_and_delete(client, admin):
 
     assert client.delete(f"/api/agents/{agent['agent_id']}", headers=headers(admin)).status_code == 204
     assert client.get(f"/api/agents/{agent['agent_id']}").status_code == 404
+
+
+def test_alert_ack_snooze_clear_and_rbac(app, client, admin):
+    agent = enroll_agent(admin)
+    agent_id = agent["agent_id"]
+    metrics = sample_metrics(
+        mem_used=15 * 1024**3,
+        gpus=[{"name": "GPU Zero", "util_pct": 50, "mem_used": 1, "mem_total": 2, "temp_c": 90}],
+        services=[
+            {
+                "name": "nginx.service",
+                "display_name": "Nginx",
+                "status": "stopped",
+                "startup": "enabled",
+                "watched": True,
+            }
+        ],
+    )
+    heartbeat(admin, agent, metrics)
+
+    detail = client.get(f"/api/agents/{agent_id}").json()["agent"]
+    assert detail["alert_count"] == 4
+    alerts = {alert["key"]: alert for alert in detail["alerts"]}
+    assert len(alerts) == 4
+    disk_key = next(key for key in alerts if key.startswith("disk:"))
+    assert alerts["memory"]["level"] == "critical"
+    assert any(key.startswith("gpu:") for key in alerts)
+    assert any(key.startswith("service:") for key in alerts)
+    assert all(alert["acknowledged"] is False and alert["snoozed"] is False for alert in alerts.values())
+    assert all(alert["snoozed_until"] is None for alert in alerts.values())
+
+    acked = client.post(f"/api/agents/{agent_id}/alerts/{disk_key}/ack", headers=headers(admin))
+    assert acked.status_code == 200, acked.text
+    assert acked.json()["alert"]["acknowledged"] is True
+
+    dashboard = client.get("/api/dashboard").json()
+    machine = dashboard["agents"][0]
+    assert machine["alert_count"] == 3
+    assert dashboard["stats"]["alerts"] == 3
+    disk_alert = next(alert for alert in machine["alerts"] if alert["key"] == disk_key)
+    assert disk_alert["acknowledged"] is True
+
+    snoozed = client.post(
+        f"/api/agents/{agent_id}/alerts/memory/snooze",
+        json={"minutes": 60},
+        headers=headers(admin),
+    )
+    assert snoozed.status_code == 200, snoozed.text
+    assert snoozed.json()["alert"]["snoozed"] is True
+    assert snoozed.json()["alert"]["snoozed_until"]
+    assert client.get(f"/api/agents/{agent_id}").json()["agent"]["alert_count"] == 2
+
+    assert (
+        client.post(
+            f"/api/agents/{agent_id}/alerts/memory/snooze",
+            json={"minutes": 4},
+            headers=headers(admin),
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            f"/api/agents/{agent_id}/alerts/memory/snooze",
+            json={"minutes": 10081},
+            headers=headers(admin),
+        ).status_code
+        == 422
+    )
+
+    assert (
+        client.post(f"/api/agents/{agent_id}/alerts/not-a-real-alert/ack", headers=headers(admin)).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/api/agents/{agent_id}/alerts/not-a-real-alert/snooze",
+            json={"minutes": 60},
+            headers=headers(admin),
+        ).status_code
+        == 404
+    )
+    assert (
+        client.delete(f"/api/agents/{agent_id}/alerts/not-a-real-alert", headers=headers(admin)).status_code
+        == 404
+    )
+    assert (
+        client.post("/api/agents/agt_missing/alerts/memory/ack", headers=headers(admin)).status_code == 404
+    )
+
+    created_user = client.post(
+        "/api/users",
+        json={
+            "username": "alertviewer",
+            "display_name": "Alert Viewer",
+            "role": "viewer",
+            "password": "viewer password 123",
+        },
+        headers=headers(admin),
+    )
+    assert created_user.status_code == 200, created_user.text
+    with TestClient(app) as viewer_client:
+        viewer = login(viewer_client, "alertviewer", "viewer password 123")
+        assert (
+            viewer_client.post(
+                f"/api/agents/{agent_id}/alerts/{disk_key}/ack",
+                headers=headers(viewer),
+            ).status_code
+            == 403
+        )
+        assert (
+            viewer_client.post(
+                f"/api/agents/{agent_id}/alerts/memory/snooze",
+                json={"minutes": 60},
+                headers=headers(viewer),
+            ).status_code
+            == 403
+        )
+        assert (
+            viewer_client.delete(
+                f"/api/agents/{agent_id}/alerts/memory",
+                headers=headers(viewer),
+            ).status_code
+            == 403
+        )
+        viewer_dashboard = viewer_client.get("/api/dashboard")
+        assert viewer_dashboard.status_code == 200
+        assert viewer_dashboard.json()["agents"][0]["alerts"][0]["key"]
+
+    cleared = client.delete(f"/api/agents/{agent_id}/alerts/{disk_key}", headers=headers(admin))
+    assert cleared.status_code == 204
+    detail = client.get(f"/api/agents/{agent_id}").json()["agent"]
+    disk_alert = next(alert for alert in detail["alerts"] if alert["key"] == disk_key)
+    assert disk_alert["acknowledged"] is False
+    assert detail["alert_count"] == 3
+
+    assert client.delete(f"/api/agents/{agent_id}/alerts/memory", headers=headers(admin)).status_code == 204
+    detail = client.get(f"/api/agents/{agent_id}").json()["agent"]
+    memory_alert = next(alert for alert in detail["alerts"] if alert["key"] == "memory")
+    assert memory_alert["snoozed"] is False
+    assert memory_alert["snoozed_until"] is None
+    assert detail["alert_count"] == 4
+
+    actions = [event["action"] for event in client.get("/api/audit").json()["events"]]
+    assert "alert.acknowledged" in actions
+    assert "alert.snoozed" in actions
+    assert "alert.cleared" in actions

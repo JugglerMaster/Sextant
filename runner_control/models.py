@@ -243,6 +243,10 @@ class AgentWakeIn(BaseModel):
     packets: int = Field(default=3, ge=1, le=10)
 
 
+class AlertSnoozeIn(BaseModel):
+    minutes: int = Field(ge=5, le=10080)
+
+
 class WakeTargetIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     mac: str = Field(min_length=17, max_length=32)

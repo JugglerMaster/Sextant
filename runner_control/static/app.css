@@ -598,6 +598,11 @@ svg { display: block; }
 .alert-item { display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px; border: 1px solid rgba(242, 184, 75, 0.24); border-radius: 8px; background: rgba(242, 184, 75, 0.055); color: #e9c575; font-size: 11px; }
 .alert-item.critical { border-color: rgba(255, 107, 115, 0.26); background: rgba(255, 107, 115, 0.055); color: #ff9ca2; }
 .alert-item .alert-mark { flex: none; font-weight: 800; }
+.alert-item .alert-body { display: grid; flex: 1; gap: 3px; min-width: 0; }
+.alert-item .alert-state { color: var(--text-dim); font-family: var(--mono); font-size: 9.5px; }
+.alert-item.muted { border-color: var(--line); background: rgba(20, 32, 44, 0.28); color: var(--text-dim); }
+.alert-actions { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.alert-actions .button { min-height: 25px; padding: 4px 7px; font-size: 9.5px; }
 
 .service-list { display: grid; gap: 5px; }
 .service-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: rgba(7, 12, 18, 0.36); }
@@ -728,4 +733,6 @@ svg { display: block; }
   .service-actions { justify-content: flex-start; }
   .list-row { align-items: flex-start; flex-direction: column; }
   .list-row-actions { width: 100%; }
+  .alert-item { flex-wrap: wrap; }
+  .alert-actions { width: 100%; justify-content: flex-start; }
 }

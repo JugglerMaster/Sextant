@@ -95,6 +95,15 @@ CREATE TABLE IF NOT EXISTS commands (
     error TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS alert_states (
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    alert_key TEXT NOT NULL,
+    acknowledged_at TEXT,
+    acknowledged_by TEXT NOT NULL DEFAULT '',
+    snoozed_until TEXT,
+    PRIMARY KEY (agent_id, alert_key)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     at TEXT NOT NULL,
@@ -761,6 +770,92 @@ class Database:
         with self.transaction() as conn:
             cur = conn.execute("DELETE FROM audit_log WHERE at < ?", (cutoff,))
             return int(cur.rowcount)
+
+    # ---- Alert acknowledgement / snooze -------------------------------
+
+    @staticmethod
+    def _alert_states(conn: sqlite3.Connection, agent_id: str | None = None) -> Any:
+        if agent_id is None:
+            rows = conn.execute("SELECT * FROM alert_states").fetchall()
+            grouped: dict[str, dict[str, sqlite3.Row]] = {}
+            for row in rows:
+                grouped.setdefault(row["agent_id"], {})[row["alert_key"]] = row
+            return grouped
+        rows = conn.execute("SELECT * FROM alert_states WHERE agent_id = ?", (agent_id,)).fetchall()
+        return {row["alert_key"]: row for row in rows}
+
+    def get_alert_states(
+        self,
+        agent_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, sqlite3.Row]:
+        if conn is not None:
+            return self._alert_states(conn, agent_id)
+        with self.connection() as own:
+            return self._alert_states(own, agent_id)
+
+    def get_all_alert_states(
+        self,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, dict[str, sqlite3.Row]]:
+        if conn is not None:
+            return self._alert_states(conn)
+        with self.connection() as own:
+            return self._alert_states(own)
+
+    def set_alert_ack(
+        self,
+        agent_id: str,
+        alert_key: str,
+        actor: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        sql = """INSERT INTO alert_states (agent_id, alert_key, acknowledged_at, acknowledged_by)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(agent_id, alert_key) DO UPDATE SET
+                   acknowledged_at = excluded.acknowledged_at,
+                   acknowledged_by = excluded.acknowledged_by"""
+        params = (agent_id, alert_key, utcnow_iso(), actor)
+        if conn is not None:
+            conn.execute(sql, params)
+            return
+        with self.connection() as own:
+            own.execute(sql, params)
+
+    def set_alert_snooze(
+        self,
+        agent_id: str,
+        alert_key: str,
+        minutes: int,
+        conn: sqlite3.Connection | None = None,
+    ) -> str:
+        snoozed_until = (
+            utcnow() + timedelta(minutes=int(minutes))
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        sql = """INSERT INTO alert_states (agent_id, alert_key, snoozed_until)
+                 VALUES (?, ?, ?)
+                 ON CONFLICT(agent_id, alert_key) DO UPDATE SET
+                   snoozed_until = excluded.snoozed_until"""
+        params = (agent_id, alert_key, snoozed_until)
+        if conn is not None:
+            conn.execute(sql, params)
+        else:
+            with self.connection() as own:
+                own.execute(sql, params)
+        return snoozed_until
+
+    def clear_alert_state(
+        self,
+        agent_id: str,
+        alert_key: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        sql = "DELETE FROM alert_states WHERE agent_id = ? AND alert_key = ?"
+        params = (agent_id, alert_key)
+        if conn is not None:
+            return conn.execute(sql, params).rowcount == 1
+        with self.connection() as own:
+            return own.execute(sql, params).rowcount == 1
 
     # ---- Agent / command housekeeping ----------------------------------
 

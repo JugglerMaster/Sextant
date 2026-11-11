@@ -4,6 +4,7 @@ import re
 import sqlite3
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 from .config import Settings
 from .db import dumps, loads, parse_iso
@@ -87,31 +88,78 @@ def validate_command_args(kind: str, args: dict[str, Any]) -> dict[str, Any]:
     raise ValueError("unsupported command kind")
 
 
+def _alert_key_part(value: Any) -> str:
+    """Encode a value so an alert key is safe inside a single URL path segment."""
+    return quote(str(value), safe="").replace("%", "!")
+
+
 def _agent_alerts(disks: list[dict], gpus: list[dict], services: list[dict], mem_pct: float) -> list[dict]:
     alerts: list[dict] = []
     for disk in disks:
+        mount = disk.get("mount") or "?"
         pct = float(disk.get("percent") or 0)
+        key = f"disk:{_alert_key_part(mount)}"
         if pct >= 90:
-            alerts.append({"level": "critical", "message": f"Disk {disk.get('mount') or '?'} is {pct:.0f}% full"})
+            alerts.append({"key": key, "level": "critical", "message": f"Disk {mount} is {pct:.0f}% full"})
         elif pct >= 80:
-            alerts.append({"level": "warning", "message": f"Disk {disk.get('mount') or '?'} is {pct:.0f}% full"})
+            alerts.append({"key": key, "level": "warning", "message": f"Disk {mount} is {pct:.0f}% full"})
     if mem_pct >= 90:
-        alerts.append({"level": "critical", "message": f"Memory is {mem_pct:.0f}% used"})
+        alerts.append({"key": "memory", "level": "critical", "message": f"Memory is {mem_pct:.0f}% used"})
     elif mem_pct >= 80:
-        alerts.append({"level": "warning", "message": f"Memory is {mem_pct:.0f}% used"})
-    for gpu in gpus:
+        alerts.append({"key": "memory", "level": "warning", "message": f"Memory is {mem_pct:.0f}% used"})
+    for index, gpu in enumerate(gpus):
         temp = float(gpu.get("temp_c") or 0)
         if temp >= 85:
-            alerts.append({"level": "warning", "message": f"GPU {gpu.get('name') or ''} is {temp:.0f} C"})
+            alerts.append(
+                {
+                    "key": f"gpu:{index}",
+                    "level": "warning",
+                    "message": f"GPU {gpu.get('name') or ''} is {temp:.0f} C",
+                }
+            )
     for service in services:
         if service.get("watched") and str(service.get("status", "")).lower() not in {"running", "active"}:
+            name = service.get("name") or "?"
             alerts.append(
-                {"level": "critical", "message": f"Monitored service {service.get('name') or '?'} is not running"}
+                {
+                    "key": f"service:{_alert_key_part(name)}",
+                    "level": "critical",
+                    "message": f"Monitored service {name} is not running",
+                }
             )
     return alerts
 
 
-def agent_to_dict(row: sqlite3.Row, settings: Settings, now: datetime | None = None) -> dict[str, Any]:
+def _decorate_alerts(
+    alerts: list[dict],
+    states: dict[str, Any] | None,
+    now: datetime,
+) -> list[dict]:
+    states = states or {}
+    decorated: list[dict] = []
+    for alert in alerts:
+        state = states.get(alert["key"])
+        acknowledged = bool(state and state["acknowledged_at"])
+        snoozed_until = state["snoozed_until"] if state is not None else None
+        until = parse_iso(snoozed_until)
+        snoozed = bool(until is not None and until > now)
+        decorated.append(
+            {
+                **alert,
+                "acknowledged": acknowledged,
+                "snoozed": snoozed,
+                "snoozed_until": snoozed_until if snoozed else None,
+            }
+        )
+    return decorated
+
+
+def agent_to_dict(
+    row: sqlite3.Row,
+    settings: Settings,
+    now: datetime | None = None,
+    alert_states: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     now = now or datetime.now().astimezone()
     last_seen = parse_iso(row["last_seen"])
     online = bool(last_seen and (now - last_seen).total_seconds() <= settings.offline_after_seconds)
@@ -120,7 +168,8 @@ def agent_to_dict(row: sqlite3.Row, settings: Settings, now: datetime | None = N
     services = loads(row["services"], [])
     startup = loads(row["startup"], [])
     mem_pct = float(row["mem_pct"] or 0)
-    alerts = _agent_alerts(disks, gpus, services, mem_pct)
+    alerts = _decorate_alerts(_agent_alerts(disks, gpus, services, mem_pct), alert_states, now)
+    active_alerts = [alert for alert in alerts if not alert["acknowledged"] and not alert["snoozed"]]
     watch_services = loads(row["watch_services"], [])
     policy = loads(row["policy"], {})
     if not isinstance(watch_services, list):
@@ -163,7 +212,7 @@ def agent_to_dict(row: sqlite3.Row, settings: Settings, now: datetime | None = N
         "services": services,
         "startup": startup,
         "extra": loads(row["extra"], {}),
-        "alert_count": len(alerts),
+        "alert_count": len(active_alerts),
         "alerts": alerts,
     }
 

@@ -33,6 +33,7 @@ from .models import (
     AgentProfilePatchIn,
     AgentUpdateIn,
     AgentWakeIn,
+    AlertSnoozeIn,
     CommandIn,
     CommandResultIn,
     EnrollmentTokenIn,
@@ -174,6 +175,13 @@ def _validate_broadcast(value: str) -> str:
         return str(ipaddress.IPv4Address(value.strip()))
     except ValueError as exc:
         raise ValueError("broadcast must be an IPv4 address") from exc
+
+
+def _find_agent_alert(row: sqlite3.Row, settings: Settings, alert_key: str) -> dict[str, Any] | None:
+    for alert in agent_to_dict(row, settings)["alerts"]:
+        if alert["key"] == alert_key:
+            return alert
+    return None
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -834,7 +842,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with database.connection() as conn:
             rows = conn.execute("SELECT * FROM agents ORDER BY name COLLATE NOCASE").fetchall()
             queued = conn.execute("SELECT COUNT(*) AS n FROM commands WHERE status IN ('queued', 'dispatched', 'running')").fetchone()
-        agents = [agent_to_dict(row, config, now) for row in rows]
+        alert_states = database.get_all_alert_states()
+        agents = [
+            agent_to_dict(row, config, now, alert_states.get(row["id"], {}))
+            for row in rows
+        ]
         agents.sort(key=lambda item: (not item["online"], item["name"].casefold()))
         online = sum(1 for item in agents if item["online"])
         return {
@@ -866,9 +878,103 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 (agent_id,),
             ).fetchall()
         return {
-            "agent": agent_to_dict(row, config),
+            "agent": agent_to_dict(row, config, alert_states=database.get_alert_states(agent_id)),
             "commands": [command_to_dict(command, full_output=False) for command in commands],
         }
+
+    @app.post("/api/agents/{agent_id}/alerts/{alert_key}/ack")
+    def acknowledge_agent_alert(
+        agent_id: str,
+        alert_key: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        with database.transaction() as conn:
+            row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Agent not found.")
+            alert = _find_agent_alert(row, config, alert_key)
+            if alert is None:
+                raise HTTPException(status_code=404, detail="Alert not found.")
+            database.set_alert_ack(agent_id, alert_key, user["username"], conn=conn)
+            database.audit(
+                actor=user["username"],
+                action="alert.acknowledged",
+                target=agent_id,
+                detail={"alert_key": alert_key, "level": alert["level"], "message": alert["message"]},
+                ip=client_ip(request, config.trust_proxy),
+                conn=conn,
+            )
+            updated = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            states = database.get_alert_states(agent_id, conn=conn)
+            decorated = agent_to_dict(updated, config, alert_states=states)["alerts"]
+        return {"alert": next(item for item in decorated if item["key"] == alert_key)}
+
+    @app.post("/api/agents/{agent_id}/alerts/{alert_key}/snooze")
+    def snooze_agent_alert(
+        agent_id: str,
+        alert_key: str,
+        payload: AlertSnoozeIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        with database.transaction() as conn:
+            row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Agent not found.")
+            alert = _find_agent_alert(row, config, alert_key)
+            if alert is None:
+                raise HTTPException(status_code=404, detail="Alert not found.")
+            snoozed_until = database.set_alert_snooze(agent_id, alert_key, payload.minutes, conn=conn)
+            database.audit(
+                actor=user["username"],
+                action="alert.snoozed",
+                target=agent_id,
+                detail={
+                    "alert_key": alert_key,
+                    "level": alert["level"],
+                    "message": alert["message"],
+                    "minutes": payload.minutes,
+                    "snoozed_until": snoozed_until,
+                },
+                ip=client_ip(request, config.trust_proxy),
+                conn=conn,
+            )
+            updated = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            states = database.get_alert_states(agent_id, conn=conn)
+            decorated = agent_to_dict(updated, config, alert_states=states)["alerts"]
+        return {"alert": next(item for item in decorated if item["key"] == alert_key)}
+
+    @app.delete("/api/agents/{agent_id}/alerts/{alert_key}")
+    def clear_agent_alert(
+        agent_id: str,
+        alert_key: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> Response:
+        with database.transaction() as conn:
+            row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Agent not found.")
+            alert = _find_agent_alert(row, config, alert_key)
+            if alert is None:
+                raise HTTPException(status_code=404, detail="Alert not found.")
+            database.clear_alert_state(agent_id, alert_key, conn=conn)
+            database.audit(
+                actor=user["username"],
+                action="alert.cleared",
+                target=agent_id,
+                detail={"alert_key": alert_key, "level": alert["level"], "message": alert["message"]},
+                ip=client_ip(request, config.trust_proxy),
+                conn=conn,
+            )
+        return Response(status_code=204)
 
     @app.get("/api/agents/{agent_id}/history")
     def agent_history(
@@ -998,7 +1104,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 conn=conn,
             )
             updated = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
-        return agent_to_dict(updated, config)
+        return agent_to_dict(updated, config, alert_states=database.get_alert_states(agent_id))
 
     @app.post("/api/agents/{agent_id}/commands")
     def create_command(

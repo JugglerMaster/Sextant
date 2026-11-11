@@ -71,7 +71,10 @@ const agent = {
   startup: [{ name: "Backup", command: "C:\\backup.exe", source: "HKCU Run", enabled: true }],
   extra: { cpu_model: "Ryzen 9", kernel: "10.0", gpu_processes: [{ pid: 4242, name: "python.exe", mem_used: 8000000000 }] },
   alert_count: 1,
-  alerts: [{ level: "warning", message: "Disk C: is 85% full" }],
+  alerts: [
+    { key: "disk_root", level: "warning", message: "Disk C: is 85% full", acknowledged: false, snoozed: false, snoozed_until: null },
+    { key: "memory", level: "critical", message: "Memory is 91% used", acknowledged: true, snoozed: false, snoozed_until: null },
+  ],
 };
 
 const responses = {
@@ -123,6 +126,10 @@ const responses = {
       drift: [],
     },
   },
+  "/api/agents/agt_demo/alerts/disk_root/ack": { status: 200, body: { alert: agent.alerts[0] } },
+  "/api/agents/agt_demo/alerts/disk_root/snooze": { status: 200, body: { alert: agent.alerts[0] } },
+  "/api/agents/agt_demo/alerts/disk_root": { status: 204, body: null },
+  "/api/agents/agt_demo/alerts/memory": { status: 204, body: null },
   "/api/agents/agt_demo/history": {
     status: 200,
     body: {
@@ -262,6 +269,24 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const alertCenter = window.document.getElementById("alert-center");
   if (alertCenter.hidden) throw new Error("alert center should be visible");
   if (!alertCenter.textContent.includes("Disk C:")) throw new Error("alert center missing alert");
+  if (!findButton(alertCenter, "Acknowledge")) throw new Error("alert acknowledge action missing");
+  if (!findButton(alertCenter, "Snooze")) throw new Error("alert snooze action missing");
+  if (!findButton(alertCenter, "Clear")) throw new Error("alert clear action missing");
+  const alertPrompt = window.prompt;
+  window.prompt = () => "60";
+  findButton(alertCenter, "Snooze").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
+  window.prompt = alertPrompt;
+  if (!window.document.getElementById("toast-region").textContent.includes("snoozed for 60 minutes")) {
+    throw new Error("alert snooze action did not run");
+  }
+  findButton(alertCenter, "Acknowledge").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
+  findButton(alertCenter, "Clear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
+  if (!window.document.getElementById("toast-region").textContent.includes("Alert cleared")) {
+    throw new Error("alert clear action did not run");
+  }
   const selector = window.document.querySelector(".agent-select");
   if (!selector) throw new Error("agent selection checkbox missing");
   selector.checked = false;
@@ -350,6 +375,15 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (window.document.getElementById("agent-drawer").hidden) throw new Error("drawer did not open");
   if (!window.document.getElementById("drawer-title").textContent.includes("Studio PC")) {
     throw new Error("drawer title missing");
+  }
+  if (!findButton(window.document.getElementById("drawer-body"), "Acknowledge")) {
+    throw new Error("drawer alert acknowledge action missing");
+  }
+  if (!findButton(window.document.getElementById("drawer-body"), "Snooze")) {
+    throw new Error("drawer alert snooze action missing");
+  }
+  if (!findButton(window.document.getElementById("drawer-body"), "Clear")) {
+    throw new Error("drawer alert clear action missing");
   }
 
   const serviceTab = window.document.querySelector('[data-tab="services"]');

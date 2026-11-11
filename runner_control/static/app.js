@@ -556,29 +556,106 @@ function staleInfo(agent) {
   return { heartbeatStale, inventoryStale, heartbeatSeconds, inventorySeconds };
 }
 
+function alertIsActive(alert) {
+  return !alert.acknowledged && !alert.snoozed;
+}
+
+function alertRow(agent, alert, showAgent = false) {
+  const active = alertIsActive(alert);
+  const actions = [];
+  if (state.permissions.operate) {
+    if (active) {
+      actions.push(button("Acknowledge", "button-secondary button-small", () => acknowledgeAlert(agent.id, alert.key)));
+      actions.push(button("Snooze", "button-ghost button-small", () => snoozeAlert(agent.id, alert.key)));
+    } else {
+      actions.push(button("Clear", "button-ghost button-small", () => clearAlert(agent.id, alert.key)));
+    }
+  }
+  if (showAgent) actions.push(button("View", "button-ghost button-small", () => openAgent(agent.id)));
+  const meta = [];
+  if (showAgent) meta.push(agent.name);
+  if (alert.acknowledged) meta.push("Acknowledged");
+  else if (alert.snoozed) {
+    meta.push(alert.snoozed_until ? `Snoozed until ${localTime(alert.snoozed_until)}` : "Snoozed");
+  }
+  const className = `alert-item${active && alert.level === "critical" ? " critical" : ""}${active ? "" : " muted"}`;
+  return h(
+    "div",
+    { class: className },
+    h("span", { class: "alert-mark" }, active ? (alert.level === "critical" ? "!" : "•") : "✓"),
+    h(
+      "div",
+      { class: "alert-body" },
+      meta.length ? h("span", { class: "alert-state" }, meta.join(" · ")) : null,
+      h("span", {}, alert.message),
+    ),
+    actions.length ? h("div", { class: "alert-actions" }, ...actions) : null,
+  );
+}
+
+async function acknowledgeAlert(agentId, alertKey) {
+  try {
+    await api(`/api/agents/${encodeURIComponent(agentId)}/alerts/${encodeURIComponent(alertKey)}/ack`, {
+      method: "POST",
+      body: {},
+    });
+    toast("Alert acknowledged.");
+    await loadDashboard(true);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function snoozeAlert(agentId, alertKey) {
+  const answer = window.prompt("Snooze this alert for how many minutes? (5–10080)", "60");
+  if (answer === null) return;
+  const minutes = Number(answer);
+  if (!Number.isInteger(minutes) || minutes < 5 || minutes > 10080) {
+    toast("Snooze must be between 5 and 10080 minutes.", "error");
+    return;
+  }
+  try {
+    await api(`/api/agents/${encodeURIComponent(agentId)}/alerts/${encodeURIComponent(alertKey)}/snooze`, {
+      method: "POST",
+      body: { minutes },
+    });
+    toast(`Alert snoozed for ${minutes} minutes.`);
+    await loadDashboard(true);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function clearAlert(agentId, alertKey) {
+  try {
+    await api(`/api/agents/${encodeURIComponent(agentId)}/alerts/${encodeURIComponent(alertKey)}`, {
+      method: "DELETE",
+    });
+    toast("Alert cleared.");
+    await loadDashboard(true);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 function renderAlertCenter() {
   const sectionEl = $("alert-center");
   const list = $("alert-center-list");
   if (!sectionEl || !list) return;
   const agents = (state.dashboard?.agents || []).filter((agent) => (agent.alerts || []).length);
   sectionEl.hidden = agents.length === 0;
-  setText("alert-center-count", agents.length ? `${agents.length} machine${agents.length === 1 ? "" : "s"}` : "");
+  const active = agents.reduce(
+    (total, agent) => total + (agent.alerts || []).filter((alert) => alertIsActive(alert)).length,
+    0,
+  );
+  setText(
+    "alert-center-count",
+    agents.length ? `${active} active · ${agents.length} machine${agents.length === 1 ? "" : "s"}` : "",
+  );
   clear(list);
   for (const agent of agents) {
     for (const alert of agent.alerts || []) {
-      list.append(
-        h(
-          "div",
-          { class: "list-row" },
-          h(
-            "div",
-            {},
-            h("strong", {}, `${agent.name}${alert.level === "critical" ? " · critical" : ""}`),
-            h("p", { class: "form-hint" }, alert.message),
-          ),
-          button("View", "button-secondary button-small", () => openAgent(agent.id)),
-        ),
-      );
+      list.append(alertRow(agent, alert, true));
     }
   }
 }
@@ -933,15 +1010,12 @@ function renderOverview(body) {
     ),
   );
   if (alerts.length) {
+    const activeAlerts = alerts.filter((alert) => alertIsActive(alert)).length;
     body.append(
       section(
         "Attention",
-        `${alerts.length} health alert${alerts.length === 1 ? "" : "s"}`,
-        h(
-          "div",
-          { class: "alert-stack" },
-          ...alerts.map((alert) => h("div", { class: `alert-item ${alert.level === "critical" ? "critical" : ""}` }, h("span", { class: "alert-mark" }, alert.level === "critical" ? "!" : "•"), alert.message)),
-        ),
+        `${activeAlerts} active health alert${activeAlerts === 1 ? "" : "s"}`,
+        h("div", { class: "alert-stack" }, ...alerts.map((alert) => alertRow(agent, alert))),
       ),
     );
   } else {
