@@ -1690,6 +1690,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "networks": [
                 docker_network_to_dict(item) for item in database.list_docker_networks(agent_id)
             ],
+            "deployments": [
+                _deployment_payload(database, item)
+                for item in database.list_docker_deployments(agent_id=agent_id, limit=100)
+            ],
         }
 
     @app.post("/api/docker/hosts/{agent_id}/refresh")
@@ -1770,6 +1774,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             args["container_id"] = target
             detail["target"] = target
             detail["container_name"] = container["name"]
+            if action == "container.clone":
+                image = database.find_docker_image(agent_id, str(args["image_id"]))
+                if image is None:
+                    raise HTTPException(status_code=404, detail="Clone image not found in the latest inventory.")
+                args["image_id"] = str(image["image_id"])
+                detail["image_id"] = args["image_id"]
+                for network_id in args.get("network_ids") or []:
+                    network = database.find_docker_network(agent_id, network_id)
+                    if network is None:
+                        raise HTTPException(status_code=404, detail="Clone network not found in the latest inventory.")
+                if container["compose_project"] and not bool(args.get("acknowledge_drift", False)):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Clone is blocked for a Compose-managed container. "
+                            "Retry with acknowledge_drift=true; docker compose up may revert the clone."
+                        ),
+                    )
+                for existing in database.list_docker_containers(agent_id):
+                    if existing["name"] == args.get("new_name"):
+                        raise HTTPException(status_code=409, detail="A container with that name already exists.")
+                detail["new_name"] = args.get("new_name")
+                detail["network_ids"] = args.get("network_ids") or []
+                detail["acknowledge_drift"] = bool(args.get("acknowledge_drift", False))
         elif action == "image.remove":
             image = database.find_docker_image(agent_id, str(args["image_id"]))
             if image is None:
@@ -1990,6 +2018,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def _default_project(slug: str) -> str:
         return f"sextant_{slug}"[:63]
 
+    def _deployment_payload(database: Database, row: sqlite3.Row) -> dict[str, Any]:
+        payload = docker_deployment_to_dict(row)
+        config_drift = bool(
+            payload["active"]
+            and payload["action"] == "up"
+            and database.docker_deployment_config_drift(row)
+        )
+        payload["config_drift"] = config_drift
+        payload["drift"] = bool(payload.get("drift") or config_drift)
+        return payload
+
     @app.get("/api/docker/stacks")
     def list_docker_stacks(
         user: dict[str, Any] = Depends(current_user),
@@ -2170,100 +2209,156 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         stack = database.get_docker_stack(stack_id)
         if stack is None:
             raise HTTPException(status_code=404, detail="Compose stack not found.")
-        host_row, _agent_row, _profile_row, capabilities = _docker_context(
-            database, payload.agent_id, config
-        )
-        if not host_row["available"]:
-            raise HTTPException(status_code=409, detail="Docker is not currently reachable on this host.")
-        if not capabilities["compose"]:
-            raise HTTPException(
-                status_code=409,
-                detail="Compose deployment is disabled by the agent profile or server policy.",
+        targets = payload.agent_ids or ([payload.agent_id] if payload.agent_id else [])
+        if not targets:
+            raise HTTPException(status_code=400, detail="Select at least one Docker host.")
+        if len(targets) > 20:
+            raise HTTPException(status_code=400, detail="At most 20 Docker hosts can be deployed at once.")
+
+        def deploy_one(agent_id: str) -> dict[str, Any]:
+            host_row, _agent_row, _profile_row, capabilities = _docker_context(
+                database, agent_id, config
             )
-        action = payload.action
-        active = database.active_docker_deployment(
-            agent_id=payload.agent_id,
-            project_name=payload.project_name,
-            stack_id=stack["id"],
-        )
-        if action == "up":
-            revision_hash = payload.revision_hash or str(stack["current_revision_hash"])
-            project_name = payload.project_name or _default_project(str(stack["slug"]))
-            pull_before_up = bool(payload.pull_before_up)
-            remove_volumes = False
-        else:
-            if active is None:
-                raise HTTPException(status_code=409, detail="No active deployment for this stack on the selected host.")
-            revision_hash = str(active["revision_hash"])
-            project_name = payload.project_name or str(active["project_name"])
-            pull_before_up = False
-            remove_volumes = bool(payload.remove_volumes) if action == "down" else False
-        if not re.match(r"^[a-z0-9][a-z0-9_-]{0,62}$", project_name):
-            raise HTTPException(status_code=400, detail="Invalid Compose project name.")
-        revision = database.get_docker_stack_revision(stack["id"], revision_hash)
-        if revision is None:
-            raise HTTPException(status_code=404, detail="Stack revision not found.")
-        if action == "up":
-            collision = database.docker_project_in_use(
-                agent_id=payload.agent_id, project_name=project_name
+            if not host_row["available"]:
+                raise HTTPException(status_code=409, detail="Docker is not currently reachable on this host.")
+            if not capabilities["compose"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Compose deployment is disabled by the agent profile or server policy.",
+                )
+            action = payload.action
+            active = database.active_docker_deployment(
+                agent_id=agent_id,
+                project_name=payload.project_name,
+                stack_id=stack["id"],
             )
-            if collision is not None and collision["stack_id"] != stack["id"]:
-                raise HTTPException(status_code=409, detail="Compose project name is already active on this host.")
-            for container in database.list_docker_containers(payload.agent_id):
-                if (
-                    container["compose_project"] == project_name
-                    and (active is None or active["project_name"] != project_name)
-                ):
+            if action == "up":
+                revision_hash = payload.revision_hash or str(stack["current_revision_hash"])
+                project_name = payload.project_name or _default_project(str(stack["slug"]))
+                pull_before_up = bool(payload.pull_before_up)
+                remove_volumes = False
+            else:
+                if active is None:
                     raise HTTPException(
                         status_code=409,
-                        detail="Compose project name collides with an external project on this host.",
+                        detail="No active deployment for this stack on the selected host.",
                     )
-        deployment = database.create_docker_deployment(
-            stack_id=stack["id"],
-            agent_id=payload.agent_id,
-            revision_hash=revision_hash,
-            project_name=project_name,
-            action=action,
-            command_id="",
-            actor=user["username"],
-            pull_before_up=pull_before_up,
-            remove_volumes=remove_volumes,
-        )
-        try:
-            command = queue_command(
-                payload.agent_id,
-                "docker",
-                {
-                    "action": f"compose.{action}",
-                    "deployment_id": deployment["id"],
-                    "stack_id": stack["id"],
-                    "revision_hash": revision_hash,
-                    "project_name": project_name,
-                },
-                user,
-                request,
-                database,
-                config,
-                audit_action="docker.deploy_requested",
-                extra_detail={
-                    "deployment_id": deployment["id"],
-                    "stack_id": stack["id"],
-                    "slug": stack["slug"],
-                    "revision_hash": revision_hash,
-                    "project_name": project_name,
-                    "action": action,
-                },
+                revision_hash = str(active["revision_hash"])
+                project_name = payload.project_name or str(active["project_name"])
+                pull_before_up = False
+                remove_volumes = bool(payload.remove_volumes) if action == "down" else False
+            if not re.match(r"^[a-z0-9][a-z0-9_-]{0,62}$", project_name):
+                raise HTTPException(status_code=400, detail="Invalid Compose project name.")
+            revision = database.get_docker_stack_revision(stack["id"], revision_hash)
+            if revision is None:
+                raise HTTPException(status_code=404, detail="Stack revision not found.")
+            if action == "up":
+                collision = database.docker_project_in_use(
+                    agent_id=agent_id, project_name=project_name
+                )
+                if collision is not None and collision["stack_id"] != stack["id"]:
+                    raise HTTPException(status_code=409, detail="Compose project name is already active on this host.")
+                for container in database.list_docker_containers(agent_id):
+                    if (
+                        container["compose_project"] == project_name
+                        and (active is None or active["project_name"] != project_name)
+                    ):
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Compose project name collides with an external project on this host.",
+                        )
+            deployment = database.create_docker_deployment(
+                stack_id=stack["id"],
+                agent_id=agent_id,
+                revision_hash=revision_hash,
+                project_name=project_name,
+                action=action,
+                command_id="",
+                actor=user["username"],
+                pull_before_up=pull_before_up,
+                remove_volumes=remove_volumes,
             )
-        except Exception:
-            database.delete_docker_deployment(deployment["id"])
-            raise
-        database.set_docker_deployment_command(deployment["id"], command["id"])
-        deployment = database.get_docker_deployment(deployment["id"])
-        command["queued"] = True
-        return {
-            "deployment": docker_deployment_to_dict(deployment),
-            "command": command,
+            try:
+                command = queue_command(
+                    agent_id,
+                    "docker",
+                    {
+                        "action": f"compose.{action}",
+                        "deployment_id": deployment["id"],
+                        "stack_id": stack["id"],
+                        "revision_hash": revision_hash,
+                        "project_name": project_name,
+                    },
+                    user,
+                    request,
+                    database,
+                    config,
+                    audit_action="docker.deploy_requested",
+                    extra_detail={
+                        "deployment_id": deployment["id"],
+                        "stack_id": stack["id"],
+                        "slug": stack["slug"],
+                        "revision_hash": revision_hash,
+                        "project_name": project_name,
+                        "action": action,
+                        "agent_name": host_row["agent_name"],
+                    },
+                )
+            except Exception:
+                database.delete_docker_deployment(deployment["id"])
+                raise
+            database.set_docker_deployment_command(deployment["id"], command["id"])
+            deployment = database.get_docker_deployment(deployment["id"])
+            command["queued"] = True
+            return {
+                "agent_id": agent_id,
+                "agent_name": host_row["agent_name"],
+                "status": "queued",
+                "deployment": _deployment_payload(database, deployment),
+                "command": command,
+            }
+
+        results: list[dict[str, Any]] = []
+        for agent_id in targets:
+            try:
+                results.append(deploy_one(agent_id))
+            except HTTPException as exc:
+                results.append(
+                    {
+                        "agent_id": agent_id,
+                        "status": "failed",
+                        "error": str(exc.detail),
+                        "status_code": exc.status_code,
+                    }
+                )
+            except Exception:
+                logger.exception("docker multi-host deploy failed for %s", agent_id)
+                results.append(
+                    {
+                        "agent_id": agent_id,
+                        "status": "failed",
+                        "error": "Deployment failed on this host.",
+                        "status_code": 500,
+                    }
+                )
+        summary = {
+            "total": len(results),
+            "queued": sum(1 for item in results if item["status"] == "queued"),
+            "failed": sum(1 for item in results if item["status"] == "failed"),
         }
+        if not payload.agent_ids:
+            first = results[0]
+            if first["status"] == "failed":
+                raise HTTPException(
+                    status_code=first.get("status_code", 409),
+                    detail=first.get("error", "Deployment failed."),
+                )
+            return {
+                "deployment": first["deployment"],
+                "command": first["command"],
+                "summary": summary,
+            }
+        return {"results": results, "summary": summary}
 
     @app.get("/api/docker/deployments")
     def list_docker_deployments(
@@ -2282,7 +2377,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             stack_id=stack_id[:64],
             limit=max(1, min(int(limit), 500)),
         )
-        return {"deployments": [docker_deployment_to_dict(row) for row in rows]}
+        return {"deployments": [_deployment_payload(database, row) for row in rows]}
 
     @app.get("/api/docker/deployments/{deployment_id}")
     def get_docker_deployment(
@@ -2297,7 +2392,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         deployment = database.get_docker_deployment(deployment_id)
         if deployment is None:
             raise HTTPException(status_code=404, detail="Docker deployment not found.")
-        return {"deployment": docker_deployment_to_dict(deployment)}
+        return {"deployment": _deployment_payload(database, deployment)}
 
     @app.get("/api/docker/settings")
     def get_docker_settings(
@@ -4483,6 +4578,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if len(payload.model_dump_json().encode("utf-8")) > config.docker_inventory_max_bytes:
             raise HTTPException(status_code=413, detail="Docker inventory payload is too large.")
 
+        previous_health = {
+            str(row["container_id"]): {
+                "name": row["name"],
+                "health": str(row["health"] or ""),
+            }
+            for row in database.list_docker_containers(agent_id)
+        }
         summary = payload.summary.model_dump()
         with database.transaction() as conn:
             database.replace_docker_inventory(
@@ -4497,6 +4599,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 inventory_hash=payload.hash,
                 revision=payload.revision,
             )
+            database.reconcile_docker_deployment_hashes(agent_id, conn=conn)
+        health_events = []
+        for item in payload.containers:
+            container_id = item.id
+            health = str(item.health or "").lower()
+            previous = previous_health.get(container_id, {})
+            old_health = str(previous.get("health", "")).lower()
+            if health == old_health:
+                continue
+            if health == "unhealthy":
+                health_events.append(
+                    {
+                        "agent_id": agent_id,
+                        "kind": "docker.health",
+                        "severity": "warning",
+                        "title": f"Container {item.name or container_id} became unhealthy",
+                        "detail": {
+                            "host": agent.get("name", ""),
+                            "container_id": container_id,
+                            "container_name": item.name,
+                            "from": old_health,
+                            "to": health,
+                        },
+                    }
+                )
+            elif old_health == "unhealthy" and health == "healthy":
+                health_events.append(
+                    {
+                        "agent_id": agent_id,
+                        "kind": "docker.health",
+                        "severity": "success",
+                        "title": f"Container {item.name or container_id} recovered",
+                        "detail": {
+                            "host": agent.get("name", ""),
+                            "container_id": container_id,
+                            "container_name": item.name,
+                            "from": old_health,
+                            "to": health,
+                        },
+                    }
+                )
+        _record_agent_events(database, health_events)
         notify_dashboard()
         return {
             "revision": payload.revision,

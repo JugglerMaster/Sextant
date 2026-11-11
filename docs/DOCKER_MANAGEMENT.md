@@ -1,6 +1,6 @@
 # Docker management — plan
 
-**Status:** **D1–D4 implemented.** D5 is proposed and not implemented.
+**Status:** **D1–D5 implemented.**
 
 > D1 ships Linux Docker detection, compact heartbeat summaries, bounded inventory
 > upload, SQLite storage, and the cached Docker Hosts page. D2 adds allowlisted
@@ -9,7 +9,10 @@
 > deploy/update/down/rollback, deployment history, bundle delivery, and the
 > Compose Files view. D4 adds the interactive PTY container console with
 > outbound long-poll stdin, SSE output, resize, idle timeout, and no transcript.
-> Recreate/clone and live-polish work remain D5.
+> D5 adds bounded Docker Hosts auto-refresh, Compose config-hash drift badges,
+> deduplicated `docker.health` agent events, multi-host Compose deployment with
+> per-host results, and validated container clone. Recreate from arbitrary
+> inspect data and raw Docker flags remain deferred.
 
 **Scope:** add a separate **Docker Hosts** view to Sextant for Linux hosts. Every
 enrolled agent that reports a usable Docker engine appears in that view. Selecting
@@ -616,10 +619,15 @@ Rules:
 - **Update:** restart policy and a small allowlist of resource limits
   (`--memory`, `--cpus`, `--pids-limit`) via `docker update`. Docker cannot
   change env, ports, mounts, or labels in place.
-- **Recreate/clone** is a later phase. The UI can prefill a form from inspect,
-  but the operator must re-submit a validated container spec. Containers owned
-  by a Sextant Compose deployment are blocked from manual recreate/rename unless
-  the operator explicitly acknowledges that it will drift from the stack.
+- **Clone (D5)** creates a *new* container from an allowlisted spec: source
+  container ID, new name, an image that exists in the latest inventory, optional
+  command as an argv list, restart policy, memory/CPU/PID limits, and optional
+  existing networks. Host bind mounts, env values, devices, capabilities,
+  privileged mode, and arbitrary flags are rejected by both server and agent.
+  Containers owned by a Compose project require an explicit
+  `acknowledge_drift` checkbox; the UI warns that `docker compose up` may revert
+  the clone. The source container is not changed. Recreate-in-place from a full
+  inspect spec is deferred until a larger validated spec model exists.
 - Compose-managed containers show their project label and a link to the stack.
   Actions that would immediately be undone by `docker compose up` are marked as
   drift-producing, not silently allowed.
@@ -733,13 +741,20 @@ first release.
   readable, with container actions and logs, but no Sextant deploy/update until
   an admin imports or creates a matching stack.
 - Compose projects whose container config hash no longer matches the deployed
-  revision are marked **drifted**.
+  revision are marked **drifted**. The server records the active deployment's
+  `compose_config_hash` from the first inventory snapshot where the project's
+  Compose-managed containers agree on one `com.docker.compose.config-hash`; a
+  later mismatch sets `config_drift` and `drift` on the deployment payload and
+  shows compact badges in host Containers, host Stacks, and deployment history.
+- Drift is advisory. External projects remain read-only, and a drifted managed
+  project is not automatically re-deployed; the operator decides whether to
+  redeploy the revision or accept the manual change.
 - Containers with no Compose project are **unmanaged** and listed separately.
 - Sextant never deletes external or unmanaged resources during a default prune.
 
 ---
 
-## Server API (proposed)
+## Server API
 
 All browser routes use the existing signed cookie, session checks, CSRF, RBAC,
 and security headers.
@@ -1068,12 +1083,12 @@ hosts you administer, behind the same VPN/TLS boundary as the rest of Sextant.
 | See Docker hosts, inventory, counts, stack names | yes | yes | yes |
 | Inspect a container (env masked) and view logs | yes | yes | yes |
 | Refresh inventory | no | yes | yes |
-| Container lifecycle, rename, update, remove | no | yes (if gates allow) | yes |
+| Container lifecycle, rename, update, clone, remove | no | yes (if gates allow) | yes |
 | One-shot exec command | no | yes (if `allow_docker_exec`) | yes |
 | Interactive console | no | yes (if `allow_docker_exec`) | yes |
 | Image/volume/network actions | no | yes | yes |
 | Cleanup and prune | no | yes (if gates allow) | yes |
-| Deploy a Compose revision to a host | no | yes (if gates allow) | yes |
+| Deploy a Compose revision to one or more hosts (max 20) | no | yes (if per-host gates allow) | yes |
 | Read/edit compose files and `.env` | no | no | yes |
 | Change Docker settings / storage path | no | no | yes |
 
@@ -1089,15 +1104,61 @@ Server-side checks are authoritative; the UI only hides controls.
 | **D2 (implemented)** | `docker` command kind, container inspect, lifecycle/update/rename, logs, refresh, cleanup preview/execute, one-shot exec, events, audit, UI actions | M | medium | Start/stop/restart/pause/rename/update/remove, inspect, logs, cleanup, and one-shot exec work on the selected host; every action is audit-visible; policy/local denials are enforced |
 | **D3 (implemented)** | Compose library on disk, revisions, compose directory setting/migration, Compose Files view, deploy bundle endpoint, deploy/update/down/rollback, deployment history | L | medium–high | Admin creates a stack on disk; operator deploys it to one host; containers carry the expected Compose labels; a second revision updates in place; rollback works; bundle/path attacks are rejected |
 | **D4 (implemented)** | Interactive container console: PTY exec, long-poll stdin, SSE output, resize, idle/close handling, session caps, audit | L | high | An operator opens a real shell inside a container, runs interactive commands, resizes the terminal, and closes it; heartbeats continue; the session dies on idle or agent/server disconnect; no transcript is persisted |
-| **D5** | Recreate/clone container, drift polish, live Docker revision refresh, optional container-health events/alerts, multi-host deploy ergonomics | S–M | medium | Recreate uses a validated spec and warns/blocks Compose-managed containers; Docker Hosts updates without manual reload; drift is visible; alerts are deduplicated |
+| **D5 (implemented)** | Container clone, drift polish, live Docker revision refresh, container-health events, multi-host deploy ergonomics | S–M | medium | Clone uses a validated allowlist and warns/blocks Compose-managed containers; Docker Hosts updates without manual reload; drift is visible; health events are deduplicated |
 
 Recommended sequence: **D1 → D2 → D3 → D4 → D5**. D1 made the fleet visible with
 no new destructive surface. D2 delivers day-to-day container work and one-shot
 exec. D3 adds Compose deployment. D4 adds the interactive PTY console, which is
-the highest-risk new channel. D5 adds recreate/clone and live polish.
+the highest-risk new channel. D5 adds validated clone and live/drift polish.
 
 Effort estimates assume the existing command queue, SSE, audit, and profile
 machinery are reused; they do not include Windows Docker or image builds.
+
+### D5 implementation and deferred items
+
+Implemented:
+
+- Docker Hosts reloads the selected host's cached inventory every 12 seconds
+  while the page is visible, pauses when the document is hidden or a Docker
+  dialog/console/action is active, and still exposes manual **Refresh now**.
+  Inventory uploads and Docker action results already notify the dashboard
+  change signal; the poll preserves revision, age, stale, and offline state.
+- `docker_deployments.compose_config_hash` (schema v11) stores the deployed
+  Compose config-hash baseline. Inventory reconciliation populates it when a
+  project's Compose containers share one hash, and deployment payloads expose
+  `config_drift`/`drift`. Containers, host Stacks, and deployment history show a
+  drift badge.
+- `docker.health` events are written to `agent_events` only when a cached
+  container transitions to `unhealthy` or from `unhealthy` to `healthy`, with
+  host, container name/ID, and previous/new health. Repeated heartbeats with the
+  same state do not create rows.
+- `POST /api/docker/stacks/{id}/deploy` accepts `agent_ids` (maximum 20) and
+  creates one deployment/command per host, returning a per-host result list and
+  summary. Per-host availability, Compose capability, revision, project-name
+  collision, and queue checks run independently; one host's failure does not
+  cancel the others. The legacy single `agent_id` response shape is preserved.
+- `container.clone` is validated on the server and revalidated by the agent. The
+  agent builds only `docker create` plus `docker network connect` argv. The UI
+  prefills a clone form from cached inventory and allows only name, existing
+  image, argv command, restart policy, memory/CPUs/PIDs, existing networks, and
+  the Compose drift acknowledgment. Creation is confirmed and audited, and the
+  inventory refreshes afterwards.
+
+Deferred explicitly:
+
+- Recreate-in-place from a full cached inspect spec (ports, mounts, env, labels,
+  healthchecks, capabilities) — the current clone subset intentionally does not
+  accept those.
+- Bind mounts, named-volume mounts, env values, devices, capabilities,
+  privileged mode, and arbitrary Docker flags in clone.
+- Building images or cloning from a build context.
+- `docker.health` alert rows and Telegram delivery. Events are stored and
+  visible in agent history/timeline, but the notification evaluator still derives
+  alerts from disk/GPU/service telemetry only.
+- Server-push Docker inventory over SSE; D5 uses a bounded visibility-aware poll
+  instead of rebuilding the SPA or adding a second live stream.
+- Windows Docker (still unsupported), fleet-wide container aggregates, and
+  automatic drift remediation.
 
 ---
 
@@ -1126,6 +1187,9 @@ machinery are reused; they do not include Windows Docker or image builds.
   - action argv ordering, no shell, timeout handling;
   - one-shot exec builds `docker exec` exactly from validated shell/user/workdir
     fields and never passes a raw flag;
+  - clone builds only `docker create --name/--restart/--memory/--cpus/
+    --pids-limit/--network <image> <argv>` plus `docker network connect`, and
+    rejects raw flags;
   - bundle extraction rejects traversal/symlink/oversize entries.
 - `tests/test_docker_console.py`
   - session lifecycle: open, input, resize, output, close, idle timeout, agent
@@ -1143,6 +1207,12 @@ machinery are reused; they do not include Windows Docker or image builds.
   - inspect masks container environment values;
   - exec/console routes require `allow_docker_exec` and reject disabled agents;
   - deploy creates a deployment + command, bundle ownership is enforced;
+  - multi-host deploy returns a per-host result list, caps targets at 20, and a
+    failure on one host does not cancel the others;
+  - clone rejects unknown fields/raw flags, requires existing image and
+    networks, blocks Compose-managed sources without `acknowledge_drift`, and
+    records the inventory revision signal;
+  - Compose config-hash drift is detected and health events are deduplicated;
   - Windows/Docker-disabled agents cannot execute commands;
   - failed command leaves the previous deployment intact.
 - Extend existing profile/policy tests for the new module/action/collection keys
@@ -1152,9 +1222,13 @@ machinery are reused; they do not include Windows Docker or image builds.
 
 - jsdom smoke coverage for the Docker Hosts view: host list, host selection,
   cached age, container filters, inspect, logs, exec form, console modal,
-  refresh, cleanup confirmation, Compose Files form, and empty/disabled states.
+  refresh, auto-refresh revision update, drift badge, safe clone validation and
+  warning, cleanup confirmation, multi-host Compose deploy summary, Compose
+  Files form, and empty/disabled states.
 - Playwright:
   - Docker Hosts and Compose Files in dark/light at desktop and mobile widths;
+  - Docker Hosts fast-poll revision update, drift badge, and safe clone dialog
+    with focus and Compose drift validation;
   - keyboard selection of a host, console open/close, and focus return from
     confirmation dialogs;
   - viewer cannot see mutation/exec/console controls or edit `.env`;
@@ -1177,11 +1251,21 @@ On a Linux host with Docker Engine and Compose v2:
 5. Create a small Compose stack in Compose Files, deploy it, inspect labels,
    update to a new revision, and roll back.
 6. Confirm `down` stops the project and does not remove volumes by default.
-7. Preview cleanup, then remove a stopped container and dangling image; verify
+7. Deploy the same stack to two Docker hosts in one request and verify the
+   per-host queued/failed summary. Make one host unavailable or Compose-disabled
+   and confirm the other host still queues.
+8. Manually change a Compose-managed container, refresh inventory, and confirm
+   the drift badge appears in Containers, Stacks, and deployment history.
+9. Clone a standalone container with a new name and existing image/network;
+   verify the source is unchanged, the clone appears in inventory, and a
+   Compose-managed source is blocked until drift is acknowledged.
+10. Make a test container healthcheck fail, then recover it; confirm exactly one
+   `docker.health` event per transition in the agent timeline.
+11. Preview cleanup, then remove a stopped container and dangling image; verify
    reclaimed size and audit rows.
-8. Disable `allow_docker`/`allow_docker_exec` locally, restart the agent, and
+12. Disable `allow_docker`/`allow_docker_exec` locally, restart the agent, and
    confirm the host leaves the list and commands are rejected.
-9. Repeat on a Windows agent and confirm `unsupported_os` with no Docker route
+13. Repeat on a Windows agent and confirm `unsupported_os` with no Docker route
    or console execution.
 
 ---

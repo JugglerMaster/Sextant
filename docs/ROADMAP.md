@@ -2,7 +2,7 @@
 
 This document tracks work beyond the initial build and the first hardening pass. It is intentionally separate from the implementation docs so future changes can be prioritized without rewriting the deployment/security guidance.
 
-Related plans: [Discovery](DISCOVERY.md) (proposed, not implemented), [Docker management](DOCKER_MANAGEMENT.md) (proposed, Linux-only), [Notifications](NOTIFICATIONS.md) (proposed, not implemented), [Package management](PACKAGE_MANAGEMENT.md), [Package store](PACKAGE_STORE.md), [Agent self-update](SELF_UPDATE.md), [Server update](SERVER_UPDATE.md), [Agent profiles](PROFILES.md), [UI status](UI.md), and [Code review](CODE_REVIEW.md) (remediation status).
+Related plans: [Discovery](DISCOVERY.md) (proposed, not implemented), [Docker management](DOCKER_MANAGEMENT.md) (D1–D5 implemented, Linux-only), [Notifications](NOTIFICATIONS.md) (proposed, not implemented), [Package management](PACKAGE_MANAGEMENT.md), [Package store](PACKAGE_STORE.md), [Agent self-update](SELF_UPDATE.md), [Server update](SERVER_UPDATE.md), [Agent profiles](PROFILES.md), [UI status](UI.md), and [Code review](CODE_REVIEW.md) (remediation status).
 
 ## Current state
 
@@ -245,17 +245,20 @@ Effort: small–medium.
 
 The current automated coverage and the remaining gaps are listed in [TESTING.md](TESTING.md).
 
-### 17. Docker host and Compose management (D1–D4 implemented, D5 proposed)
+### 17. Docker host and Compose management (D1–D5 implemented)
 
 See [Docker management](DOCKER_MANAGEMENT.md) for the full plan.
 
-D1–D4 are implemented: Linux agents opt into Docker discovery, upload a bounded
+D1–D5 are implemented: Linux agents opt into Docker discovery, upload a bounded
 inventory, and the Docker Hosts page supports allowlisted container actions,
-inspect/logs, one-shot exec, an interactive PTY console, image/volume/network
-removal, cleanup, and audit/events. Compose Files adds a server-side flat Compose
-library, immutable revisions, deploy/update/down/rollback to one host, deployment
-history, and bundle delivery. Console live state is in-memory and single-worker;
-recreate/clone and live polish remain future phases.
+inspect/logs, one-shot exec, an interactive PTY console, safe clone,
+image/volume/network removal, cleanup, audit/events, and visibility-aware live
+refresh. Compose Files adds a server-side flat Compose library, immutable
+revisions, deploy/update/down/rollback to one or up to 20 hosts, deployment
+history, bundle delivery, and config-hash drift badges. Health transitions are
+recorded as deduplicated `docker.health` events. Console live state is in-memory
+and single-worker; recreate-in-place from a full inspect spec, build contexts,
+and health alert rows remain future phases.
 
 **Why:** Docker is now the deployment unit for many services, but the console
 cannot discover engines, inspect containers, clean up stale resources, or deploy

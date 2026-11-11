@@ -73,6 +73,7 @@ _MUTATION_ACTIONS = _CONTAINER_LIFECYCLE_ACTIONS | {
     "container.remove",
     "container.update",
     "container.exec_one_shot",
+    "container.clone",
     "image.remove",
     "volume.remove",
     "network.remove",
@@ -930,6 +931,8 @@ class DockerCollector:
                 return self._container_inspect(command, env, args)
             if action == "container.exec_one_shot":
                 return self._container_exec(command, env, args)
+            if action == "container.clone":
+                return self._container_clone(command, env, args)
             if action == "image.remove":
                 return self._image_remove(command, env, args)
             if action == "volume.remove":
@@ -1107,6 +1110,89 @@ class DockerCollector:
             argv.extend(["-w", workdir])
         argv.extend(["-e", "TERM=xterm-256color", container_id, shell, "-lc", script])
         return self._run(command, argv, env=env, max_output=MAX_COMMAND_OUTPUT, timeout=timeout)
+
+    def _container_clone(self, command: str, env: dict[str, str], args: dict[str, Any]) -> dict[str, Any]:
+        source_id, source_result = self._target_container(command, env, args)
+        if source_id is None:
+            return self._action_result("failed", error="Source container not found.")
+        new_name = str(args.get("new_name", "") or "").strip()
+        if not _RENAME_RE.match(new_name):
+            return self._action_result("failed", error="Invalid clone container name.")
+        image_target = str(args.get("image_id", "") or "").strip()
+        if not _IMAGE_ID_RE.match(image_target):
+            return self._action_result("failed", error="Invalid clone image ID.")
+        image_id, image_result = self._resolve_target(
+            command, env, ["image", "inspect", "--format", "{{.Id}}", image_target], _IMAGE_ID_RE
+        )
+        if image_id is None:
+            return self._action_result("failed", error="Clone image not found.")
+        network_ids: list[str] = []
+        for network_target in args.get("network_ids") or []:
+            network_id, network_result = self._resolve_target(
+                command,
+                env,
+                ["network", "inspect", "--format", "{{.Id}}", str(network_target)],
+                _NETWORK_ID_RE,
+            )
+            if network_id is None:
+                return self._action_result("failed", error="Clone network not found.")
+            network_ids.append(network_id)
+        argv = ["create", "--name", new_name]
+        restart_policy = str(args.get("restart_policy", "") or "").strip()
+        memory = str(args.get("memory", "") or "").strip().lower()
+        cpus = str(args.get("cpus", "") or "").strip()
+        pids_limit = args.get("pids_limit")
+        if restart_policy:
+            if not _RESTART_POLICY_RE.match(restart_policy):
+                return self._action_result("failed", error="Invalid clone restart policy.")
+            argv.extend(["--restart", restart_policy])
+        if memory:
+            if not _MEMORY_RE.match(memory):
+                return self._action_result("failed", error="Invalid clone memory limit.")
+            argv.extend(["--memory", memory])
+        if cpus:
+            if not _CPUS_RE.match(cpus):
+                return self._action_result("failed", error="Invalid clone CPU limit.")
+            argv.extend(["--cpus", cpus])
+        if pids_limit is not None:
+            try:
+                pids = int(pids_limit)
+            except (TypeError, ValueError):
+                return self._action_result("failed", error="Invalid clone pids limit.")
+            if not 0 <= pids <= 1_000_000:
+                return self._action_result("failed", error="Invalid clone pids limit.")
+            argv.extend(["--pids-limit", str(pids)])
+        if network_ids:
+            argv.extend(["--network", network_ids[0]])
+        argv.append(image_id)
+        command_args = args.get("command") or []
+        if not isinstance(command_args, list) or len(command_args) > 64:
+            return self._action_result("failed", error="Invalid clone command.")
+        for item in command_args:
+            value = str(item)
+            if not value or len(value) > 2048 or "\x00" in value:
+                return self._action_result("failed", error="Invalid clone command argument.")
+            argv.append(value)
+        created = self._run(command, argv, env=env, max_output=MAX_COMMAND_OUTPUT)
+        if created["status"] != "succeeded":
+            return created
+        connected: list[dict[str, Any]] = []
+        for network_id in network_ids[1:]:
+            result = self._run(
+                command,
+                ["network", "connect", network_id, new_name],
+                env=env,
+                max_output=16384,
+            )
+            connected.append(result)
+            if result["status"] != "succeeded":
+                return self._compose_aggregate(
+                    "failed",
+                    created,
+                    *connected,
+                    error="Clone was created but an additional network attachment failed.",
+                )
+        return self._compose_aggregate("succeeded", created, *connected)
 
     def _image_remove(self, command: str, env: dict[str, str], args: dict[str, Any]) -> dict[str, Any]:
         target = str(args.get("image_id", "") or "").strip()

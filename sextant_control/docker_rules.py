@@ -49,6 +49,7 @@ CONTAINER_ACTIONS = CONTAINER_LIFECYCLE_ACTIONS | {
     "container.logs",
     "container.inspect",
     "container.exec_one_shot",
+    "container.clone",
 }
 IMAGE_ACTIONS = {"image.remove"}
 VOLUME_ACTIONS = {"volume.remove"}
@@ -66,7 +67,13 @@ DOCKER_ACTIONS = (
 )
 DOCKER_MUTATION_ACTIONS = (
     CONTAINER_LIFECYCLE_ACTIONS
-    | {"container.rename", "container.remove", "container.update", "container.exec_one_shot"}
+    | {
+        "container.rename",
+        "container.remove",
+        "container.update",
+        "container.exec_one_shot",
+        "container.clone",
+    }
     | IMAGE_ACTIONS
     | VOLUME_ACTIONS
     | NETWORK_ACTIONS
@@ -185,6 +192,78 @@ def normalize_docker_command_args(args: dict[str, Any]) -> dict[str, Any]:
     if action == "container.inspect":
         _check_keys(args, {"action", "container_id"})
         return {"action": action, "container_id": _required_container_id(args)}
+    if action == "container.clone":
+        _check_keys(
+            args,
+            {
+                "action",
+                "container_id",
+                "new_name",
+                "image_id",
+                "command",
+                "restart_policy",
+                "memory",
+                "cpus",
+                "pids_limit",
+                "network_ids",
+                "acknowledge_drift",
+            },
+        )
+        new_name = _text(args, "new_name", 128)
+        if not RENAME_RE.match(new_name):
+            raise ValueError("invalid new container name")
+        image_id = _text(args, "image_id", 128)
+        if not IMAGE_ID_RE.match(image_id):
+            raise ValueError("invalid Docker image ID")
+        command = args.get("command") or []
+        if not isinstance(command, list) or len(command) > 64:
+            raise ValueError("command must be an argv list of at most 64 items")
+        normalized_command = []
+        for item in command:
+            value = str(item)
+            if not value or len(value) > 2048 or "\x00" in value:
+                raise ValueError("invalid command argument")
+            normalized_command.append(value)
+        restart_policy = _text(args, "restart_policy", 64)
+        if restart_policy and not RESTART_POLICY_RE.match(restart_policy):
+            raise ValueError("invalid restart policy")
+        memory = _text(args, "memory", 32).lower()
+        if memory and not MEMORY_RE.match(memory):
+            raise ValueError("memory must be a Docker memory value")
+        cpus = _text(args, "cpus", 16)
+        if cpus and not CPUS_RE.match(cpus):
+            raise ValueError("cpus must be a positive number")
+        pids_limit = args.get("pids_limit")
+        if pids_limit is not None:
+            try:
+                pids_limit = int(pids_limit)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("pids_limit must be an integer") from exc
+            if not 0 <= pids_limit <= 1_000_000:
+                raise ValueError("pids_limit out of range")
+        network_ids = args.get("network_ids") or []
+        if not isinstance(network_ids, list) or len(network_ids) > 16:
+            raise ValueError("network_ids must be a list of at most 16 networks")
+        normalized_networks = []
+        for item in network_ids:
+            value = str(item).strip()
+            if not NETWORK_ID_RE.match(value):
+                raise ValueError("invalid network ID")
+            if value not in normalized_networks:
+                normalized_networks.append(value)
+        return {
+            "action": action,
+            "container_id": _required_container_id(args),
+            "new_name": new_name,
+            "image_id": image_id,
+            "command": normalized_command,
+            "restart_policy": restart_policy,
+            "memory": memory,
+            "cpus": cpus,
+            "pids_limit": pids_limit,
+            "network_ids": normalized_networks,
+            "acknowledge_drift": bool(args.get("acknowledge_drift", False)),
+        }
     if action == "container.exec_one_shot":
         _check_keys(
             args,

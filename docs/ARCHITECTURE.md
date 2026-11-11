@@ -21,7 +21,7 @@ There is no agent listener and no third-party relay.
 | Notifications | `sextant_control/notifications.py` | Background condition evaluator, Telegram delivery, persisted outbox, retry/backoff. |
 | Remote install | `sextant_control/remote_install.py` | Key-based SSH install for Linux, job log, one-time enrollment. |
 | Agent | `sextant_agent/` | Heartbeat, telemetry collectors, package inventory/actions, Docker detection/inventory, self-update, queued command execution, result posting. |
-| Docker inventory | `sextant_agent/docker.py`, server Docker routes | Local Docker CLI probe, bounded inventory, allowlisted actions, one-shot exec, cleanup, SQLite cache. |
+| Docker inventory | `sextant_agent/docker.py`, server Docker routes | Local Docker CLI probe, bounded inventory, allowlisted actions/clone, one-shot exec, cleanup, drift metadata, health transitions, SQLite cache. |
 | Compose library | `sextant_control/docker_store.py` | Flat Compose files, deterministic immutable revisions, atomic writes, bundles, migration, revision retention. |
 | Console broker / PTY | `sextant_control/docker_console.py`, `sextant_agent/console.py` | Bounded in-memory stdin/stdout queues, session metadata, agent PTY `docker exec`, long-poll input, SSE output. |
 | Deployment assets | `deploy/` | systemd units, nginx config, Linux/Windows installers, env template. |
@@ -81,7 +81,7 @@ Key properties:
 | `docker_containers`, `docker_images`, `docker_volumes`, `docker_networks` | Latest bounded Docker inventory per agent, replaced atomically |
 | `docker_settings` | Effective Compose library path |
 | `docker_stacks`, `docker_stack_revisions` | Compose stack metadata and immutable revision manifests; file bytes live on disk |
-| `docker_deployments` | Per-host Compose deploy/update/down/restart/pull history, command link, active revision, bounded log |
+| `docker_deployments` | Per-host Compose deploy/update/down/restart/pull history, command link, active revision, Compose config-hash baseline, bounded log |
 | `docker_console_sessions` | Console session metadata: agent/container/shell/user/status/timestamps/exit/error; no stdin or output |
 | `agent_profiles` | Server-managed behavior profiles (cadence, modules, action gates, update policy) |
 | `profile_tag_assignments` | Tag → profile assignments (applied to matching agents) |
@@ -179,7 +179,7 @@ A fast PowerShell metrics script runs on every heartbeat; a second inventory scr
 
 NVIDIA GPUs are then queried with `nvidia-smi` for actual utilization/VRAM/temperature and compute processes. If it is absent, only GPU names are reported with zero statistics.
 
-### Docker inventory and actions (D1/D2)
+### Docker inventory and actions (D1–D5)
 
 Linux agents can opt into Docker discovery with local `allow_docker` plus the
 profile's `modules.docker` and `actions.allow_docker`. The agent probes the local
@@ -227,6 +227,22 @@ process owns the live queues; a server restart closes open metadata rows. Idle
 timeout, per-agent caps, ownership, logout/revocation, agent disconnect, and
 missed polls all terminate the session. Only metadata and bounded errors/exit
 status are stored; keystrokes and terminal output are never persisted or audited.
+
+D5 adds live refresh and drift/health polish without a second live stream. The
+Docker Hosts page polls the selected host every 12 seconds only while visible;
+the existing dashboard change signal still wakes the page after inventory
+uploads or Docker commands. Schema v11 adds
+`docker_deployments.compose_config_hash`; inventory reconciliation captures the
+baseline when a project's Compose containers share one
+`com.docker.compose.config-hash`, and later mismatches surface as
+`config_drift`/`drift` in deployment, stack, and container payloads. Inventory
+transitions also emit deduplicated `docker.health` agent events (unhealthy or
+recovery only), not alert rows. Multi-host Compose deploy accepts up to 20
+`agent_ids`, creates one deployment/command per host, catches per-host failures,
+and returns a per-host result list. `container.clone` canonicalizes the source,
+image, and networks against cached inventory, then the agent builds only
+`docker create` plus `docker network connect` argv from the allowlisted spec.
+Compose-managed sources require `acknowledge_drift`.
 
 ### Alerts
 
@@ -281,7 +297,7 @@ The server must be on the same layer-2 broadcast domain as the target (or have a
 | `shell` | `shell`: bash/powershell/cmd, `command`, `timeout` 5–300s | Local shell, bounded streaming output, process-tree kill on timeout or output cap |
 | `service` | `action`: start/stop/restart/enable/disable/status, `name` | systemctl or PowerShell service cmdlets |
 | `power` | `action`: shutdown/reboot/cancel, `delay` 0–600s | `shutdown`/`shutdown.exe` |
-| `docker` | `inventory.refresh`, allowlisted container/image/volume/network actions, one-shot exec, console open, cleanup scopes, Compose up/down/restart/pull | argv-only Docker CLI action; target re-resolved with `docker inspect`; exec/cleanup/compose gates and per-host mutation guard |
+| `docker` | `inventory.refresh`, allowlisted container/image/volume/network actions, `container.clone`, one-shot exec, console open, cleanup scopes, Compose up/down/restart/pull (one command per host) | argv-only Docker CLI action; target re-resolved with `docker inspect`; exec/cleanup/compose gates and per-host mutation guard; clone accepts only the safe image/name/argv/restart/limits/networks spec |
 | `refresh` | none | No-op result; prompts the UI to refresh after the next heartbeat |
 
 The server validates service names and power actions, but `shell` is intentionally arbitrary. Agent-local flags can disable shell, power, or service execution entirely.
@@ -315,6 +331,6 @@ The app server binds loopback by default in the provided unit. nginx terminates 
 - No nested AD group resolution.
 - No MFA in the app itself (deferred; see the roadmap).
 - NVIDIA-only utilization telemetry.
-- Docker management is D1–D4 and Linux-only: container actions, logs, one-shot exec, interactive PTY console, cleanup, inspect, and image-based Compose deployment are implemented; build contexts and recreate/clone are not. Console state is in-memory and single-process; a restart closes consoles. The server never mounts or connects to a Docker socket.
+- Docker management is D1–D5 and Linux-only: container actions, logs, one-shot exec, interactive PTY console, cleanup, inspect, safe clone, image-based Compose deployment, drift badges, multi-host deploy, and deduplicated health events are implemented; recreate-in-place from a full inspect spec, build contexts, and health alert rows are not. Docker Hosts uses a visibility-aware 12-second poll rather than a second SSE stream. Console state is in-memory and single-process; a restart closes consoles. The server never mounts or connects to a Docker socket.
 - WoL is limited to the server's broadcast domain.
 - Windows agents require Python 3.11+.

@@ -181,10 +181,34 @@ const dockerHost = {
   last_error: "",
   capabilities: { mutate: true, exec: true, prune: true },
 };
+const dockerHost2 = {
+  ...dockerHost,
+  agent_id: "agt_second",
+  name: "Second Docker",
+  hostname: "docker-02",
+  inventory_revision: 2,
+  counts: { ...dockerHost.counts, containers: 1, running: 1, stopped: 0, images: 2, volumes: 0, networks: 2 },
+};
 const dockerDetail = {
   server_time: "2026-11-06T08:00:30Z",
   stale_seconds: 900,
   host: dockerHost,
+  deployments: [
+    {
+      id: "dep_drift",
+      stack_id: "stk_web",
+      agent_id: "agt_demo",
+      revision_hash: "e".repeat(64),
+      project_name: "web",
+      action: "up",
+      status: "succeeded",
+      active: true,
+      drift: true,
+      config_drift: true,
+      stack_name: "Web stack",
+      agent_name: "Studio PC",
+    },
+  ],
   containers: [
     {
       id: "a".repeat(64),
@@ -401,7 +425,7 @@ const responses = {
     },
   },
   "/api/profile-tags": { status: 200, body: { assignments: [] } },
-  "/api/docker/hosts": { status: 200, body: { server_time: "2026-11-06T08:00:30Z", stale_seconds: 900, hosts: [dockerHost] } },
+  "/api/docker/hosts": { status: 200, body: { server_time: "2026-11-06T08:00:30Z", stale_seconds: 900, hosts: [dockerHost, dockerHost2] } },
   "/api/docker/hosts/agt_demo": { status: 200, body: dockerDetail },
   "/api/docker/stacks": { status: 200, body: { stacks: [composeStack] } },
   "/api/docker/stacks/stk_web": { status: 200, body: { stack: composeStack } },
@@ -610,6 +634,10 @@ window.fetch = async (path, options = {}) => {
     response = { status: 200, body: { server_time: "2026-11-06T08:00:30Z", stale_seconds: 900, hosts: [] } };
   } else if (method === "GET" && key === "/api/docker/stacks" && window.__composeEmpty) {
     response = { status: 200, body: { stacks: [] } };
+  } else if (method === "GET" && key === "/api/docker/hosts/agt_demo" && window.__autoDockerRefresh) {
+    dockerHost.inventory_revision += 1;
+    dockerHost.age_seconds = 2;
+    response = { status: 200, body: dockerDetail };
   } else if (method === "POST" && /^\/api\/docker\/hosts\/agt_demo\/containers\/[^/]+\/console$/.test(key)) {
     response = {
       status: 200,
@@ -676,13 +704,27 @@ window.fetch = async (path, options = {}) => {
       finished_at: null,
     };
     composeDeployments.unshift(deployment);
-    response = {
-      status: 200,
-      body: {
+    if (Array.isArray(body?.agent_ids)) {
+      const results = body.agent_ids.map((agentId, index) => ({
+        agent_id: agentId,
+        agent_name: index === 0 ? "Studio PC" : "Second Docker",
+        status: "queued",
         deployment,
-        command: { id: "cmd_compose", kind: "docker", args: { action: `compose.${deployment.action}` }, status: "queued", queued: true },
-      },
-    };
+        command: { id: `cmd_compose_${index}`, kind: "docker", args: { action: "compose.up" }, status: "queued", queued: true },
+      }));
+      response = {
+        status: 200,
+        body: { results, summary: { total: results.length, queued: results.length, failed: 0 } },
+      };
+    } else {
+      response = {
+        status: 200,
+        body: {
+          deployment,
+          command: { id: "cmd_compose", kind: "docker", args: { action: `compose.${deployment.action}` }, status: "queued", queued: true },
+        },
+      };
+    }
   } else if (method === "PUT" && key === "/api/docker/stacks/stk_web") {
     const next = {
       ...composeStack,
@@ -1405,6 +1447,40 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!dockerBody.textContent.includes("web-1")) {
     throw new Error("Docker containers did not render");
   }
+  const driftBadge = [...dockerBody.querySelectorAll(".status-pill.warning")].find((pill) => pill.textContent === "drift");
+  if (!driftBadge) throw new Error("Docker drift badge did not render for a drifted Compose project");
+
+  findButton(dockerBody, "Clone").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  if (!window.document.getElementById("docker-dialog").open) throw new Error("Docker clone dialog did not open");
+  const cloneDialog = window.document.getElementById("docker-dialog");
+  if (!cloneDialog.textContent.includes("Host bind mounts") || !cloneDialog.textContent.includes("Compose-managed")) {
+    throw new Error("Docker clone dialog is missing its safe-spec warning");
+  }
+  findButton(cloneDialog, "Clone").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  if (!window.document.getElementById("docker-dialog-error").textContent.includes("Acknowledge Compose drift")) {
+    throw new Error("Docker clone did not require Compose drift acknowledgment");
+  }
+  const cloneDriftAck = cloneDialog.querySelector('#docker-dialog-body .callout input[type="checkbox"]');
+  if (!cloneDriftAck) throw new Error("Docker clone drift acknowledgment checkbox missing");
+  cloneDriftAck.checked = true;
+  findButton(cloneDialog, "Clone").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await closeConfirm("Clone web-1?");
+  await sleep(1800);
+  const cloneRequest = window.__requests.find(
+    (request) => request.method === "POST" && request.path === "/api/docker/hosts/agt_demo/actions" && request.body?.action === "container.clone",
+  );
+  if (!cloneRequest) throw new Error("Docker clone action was not sent");
+  if (cloneRequest.body.acknowledge_drift !== true) throw new Error("Docker clone did not send drift acknowledgment");
+  if (cloneRequest.body.image_id !== "sha256:" + "c".repeat(64)) throw new Error("Docker clone image was not canonicalized");
+  for (const forbidden of ["privileged", "devices", "cap_add", "env", "mounts", "binds", "flags"]) {
+    if (forbidden in cloneRequest.body) throw new Error(`Docker clone accepted a forbidden field: ${forbidden}`);
+  }
+  if (!window.document.getElementById("docker-dialog").open) throw new Error("Docker clone result dialog did not open");
+  findButton(window.document.getElementById("docker-dialog"), "Close").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(600);
+
   const inspectButton = findButton(dockerBody, "Inspect");
   if (!inspectButton) throw new Error(`Docker inspect action missing: ${dockerBody.textContent.slice(0, 200)}`);
   inspectButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -1494,6 +1570,24 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   findButton(dockerList, "Selected").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(60);
 
+  window.__fastDockerRefresh = true;
+  window.__autoDockerRefresh = true;
+  const revisionBeforeRefresh = dockerHost.inventory_revision;
+  findButton(dockerList, "Selected").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(700);
+  if (dockerHost.inventory_revision <= revisionBeforeRefresh) {
+    throw new Error("Docker auto-refresh did not reload the selected host");
+  }
+  if (!dockerList.textContent.includes(`rev ${dockerHost.inventory_revision}`)) {
+    throw new Error("Docker auto-refresh did not update the inventory revision");
+  }
+  window.__fastDockerRefresh = false;
+  window.__autoDockerRefresh = false;
+  window.document.getElementById("docker-close-host").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  findButton(dockerList, "Open").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+
   window.document.querySelector('[data-docker-tab="images"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(20);
   if (!window.document.getElementById("docker-host-body").textContent.includes("nginx:latest")) {
@@ -1559,14 +1653,23 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!window.document.getElementById("docker-dialog").textContent.includes("Project name")) {
     throw new Error("Compose deploy form is missing project name");
   }
+  const hostChecks = [...window.document.getElementById("docker-dialog").querySelectorAll('input[type="checkbox"][value]')];
+  if (hostChecks.length < 2) throw new Error("Compose multi-host selector missing hosts");
+  hostChecks[0].checked = true;
+  hostChecks[1].checked = true;
   findButton(window.document.getElementById("docker-dialog"), "Deploy").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  await sleep(120);
-  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/docker/stacks/stk_web/deploy")) {
-    throw new Error("Compose deploy was not sent");
+  await sleep(140);
+  const deployRequest = window.__requests.find((request) => request.method === "POST" && request.path === "/api/docker/stacks/stk_web/deploy");
+  if (!deployRequest || deployRequest.body?.agent_ids?.length !== 2) {
+    throw new Error("Multi-host Compose deploy was not sent");
   }
-  if (!window.document.getElementById("compose-body").textContent.includes("queued")) {
-    throw new Error("Compose deployment history did not render");
+  if (!window.document.getElementById("docker-dialog").textContent.includes("Per-host summary")) {
+    throw new Error("Compose per-host deploy summary did not render");
   }
+  if (!window.document.getElementById("docker-dialog").textContent.includes("Second Docker")) {
+    throw new Error("Compose per-host summary is missing a host");
+  }
+  findButton(window.document.getElementById("docker-dialog"), "Close").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   window.document.querySelector('[data-compose-tab="files"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(20);
   const newEditor = window.document.querySelector("#compose-body .compose-editor");
@@ -1658,7 +1761,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty plus inspect/logs/exec/console/remove/cleanup/offline states, Compose Files list/editor/revisions/deploy/deployment history, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

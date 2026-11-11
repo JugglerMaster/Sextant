@@ -86,7 +86,7 @@ def test_old_schema_migrates_without_losing_rows(tmp_path):
     assert session_table is not None
     assert telemetry_table is not None
     assert store_table is not None
-    assert version == 10
+    assert version == 11
 
 
 def test_legacy_alert_states_gain_incident_lifecycle_columns(tmp_path):

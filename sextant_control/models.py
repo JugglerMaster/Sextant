@@ -428,6 +428,60 @@ class DockerNetworkRemoveIn(BaseModel):
     network_id: str = Field(pattern=NETWORK_ID_PATTERN)
 
 
+class DockerContainerCloneIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["container.clone"]
+    container_id: str = Field(pattern=CONTAINER_ID_PATTERN)
+    new_name: str = Field(pattern=RENAME_PATTERN)
+    image_id: str = Field(pattern=IMAGE_ID_PATTERN)
+    command: list[str] = Field(default_factory=list, max_length=64)
+    restart_policy: str = Field(default="", max_length=64)
+    memory: str = Field(default="", max_length=32)
+    cpus: str = Field(default="", max_length=16)
+    pids_limit: int | None = Field(default=None, ge=0, le=1_000_000)
+    network_ids: list[str] = Field(default_factory=list, max_length=16)
+    acknowledge_drift: bool = False
+
+    @field_validator("command")
+    @classmethod
+    def _clone_command(cls, value: list[str]) -> list[str]:
+        for item in value:
+            if not item or len(item) > 2048 or "\x00" in item:
+                raise ValueError("invalid command argument")
+        return value
+
+    @field_validator("restart_policy")
+    @classmethod
+    def _clone_restart(cls, value: str) -> str:
+        if value and not re.match(RESTART_POLICY_PATTERN, value):
+            raise ValueError("invalid restart policy")
+        return value
+
+    @field_validator("memory")
+    @classmethod
+    def _clone_memory(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value and not re.match(MEMORY_PATTERN, value):
+            raise ValueError("invalid memory limit")
+        return value
+
+    @field_validator("cpus")
+    @classmethod
+    def _clone_cpus(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.match(CPUS_PATTERN, value):
+            raise ValueError("invalid CPU limit")
+        return value
+
+    @field_validator("network_ids")
+    @classmethod
+    def _clone_networks(cls, value: list[str]) -> list[str]:
+        for item in value:
+            if not re.match(NETWORK_ID_PATTERN, item):
+                raise ValueError("invalid network ID")
+        return list(dict.fromkeys(value))
+
+
 DockerActionPayload = Annotated[
     Union[
         DockerContainerLifecycleIn,
@@ -436,6 +490,7 @@ DockerActionPayload = Annotated[
         DockerContainerUpdateIn,
         DockerContainerLogsIn,
         DockerContainerInspectIn,
+        DockerContainerCloneIn,
         DockerImageRemoveIn,
         DockerVolumeRemoveIn,
         DockerNetworkRemoveIn,
@@ -525,12 +580,30 @@ class DockerStackPatchIn(BaseModel):
 
 class DockerDeployIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    agent_id: str = Field(min_length=4, max_length=64, pattern=r"^agt_[A-Za-z0-9]+$")
+    agent_id: str = Field(default="", max_length=64)
+    agent_ids: list[str] = Field(default_factory=list, max_length=20)
     revision_hash: str = Field(default="", max_length=64)
     project_name: str = Field(default="", max_length=63, pattern=r"^(?:[a-z0-9][a-z0-9_-]{0,62})?$")
     action: Literal["up", "down", "restart", "pull"] = "up"
     pull_before_up: bool = False
     remove_volumes: bool = False
+
+    @field_validator("agent_id")
+    @classmethod
+    def _agent_id(cls, value: str) -> str:
+        if value and not re.match(r"^agt_[A-Za-z0-9]+$", value):
+            raise ValueError("invalid agent ID")
+        return value
+
+    @field_validator("agent_ids")
+    @classmethod
+    def _agent_ids(cls, value: list[str]) -> list[str]:
+        if len(value) > 20:
+            raise ValueError("at most 20 Docker hosts can be selected")
+        for item in value:
+            if not re.match(r"^agt_[A-Za-z0-9]+$", item):
+                raise ValueError("invalid agent ID")
+        return list(dict.fromkeys(value))
 
     @field_validator("revision_hash")
     @classmethod
@@ -538,6 +611,14 @@ class DockerDeployIn(BaseModel):
         if value and not re.match(REVISION_HASH_PATTERN, value):
             raise ValueError("invalid revision hash")
         return value
+
+    @model_validator(mode="after")
+    def _targets(self) -> "DockerDeployIn":
+        if not self.agent_id and not self.agent_ids:
+            raise ValueError("agent_id or agent_ids is required")
+        if self.agent_id and self.agent_ids:
+            raise ValueError("provide either agent_id or agent_ids, not both")
+        return self
 
 
 class DockerConsoleOpenIn(BaseModel):

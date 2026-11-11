@@ -37,9 +37,44 @@ for (const theme of THEMES) {
     await page.locator("#compose-body").getByRole("button", { name: "Deploy" }).first().click();
     await expect(page.locator("#docker-dialog")).toBeVisible();
     await expect(page.locator("#docker-dialog")).toContainText("Project name");
+    await expect(page.locator("#docker-dialog")).toContainText("Docker hosts (max 20)");
+    await expect(page.locator('#docker-dialog input[type="checkbox"][value]')).toHaveCount(1);
     await page.locator("#docker-dialog").getByRole("button", { name: "Close" }).click();
     await screenshot(page, `compose-files-${theme}`);
     await scan(page, `compose files ${theme}`);
+  });
+
+  test(`Docker Hosts auto-refreshes, shows drift, and opens a safe clone dialog in the ${theme} theme`, async ({ page }) => {
+    await login(page, { theme });
+    await page.locator('[data-page="docker-hosts"]').click();
+    await expect(page.locator("#docker-host-list")).toContainText("rev");
+    const beforeRev = Number((await page.locator("#docker-host-list").innerText()).match(/rev (\d+)/)?.[1]);
+    await page.evaluate(() => {
+      window.__fastDockerRefresh = true;
+      window.__autoDockerRefresh = true;
+    });
+    await page.locator("#docker-host-list").getByRole("button", { name: "Open" }).click();
+    await expect.poll(async () => {
+      const text = await page.locator("#docker-host-list").innerText();
+      return Number(text.match(/rev (\d+)/)?.[1]);
+    }).toBeGreaterThan(beforeRev);
+    await page.evaluate(() => {
+      window.__fastDockerRefresh = false;
+      window.__autoDockerRefresh = false;
+    });
+    await page.locator('#docker-host-tabs [data-docker-tab="containers"]').click();
+    await expect(page.locator("#docker-host-body .status-pill.warning", { hasText: "drift" })).toBeVisible();
+    await page.locator("#docker-host-body").getByRole("button", { name: "Clone" }).first().click();
+    const dialog = page.locator("#docker-dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("Host bind mounts");
+    await expect(dialog).toContainText("Compose-managed");
+    await expect(dialog.locator("#docker-dialog-body input").first()).toBeFocused();
+    await dialog.getByRole("button", { name: "Clone", exact: true }).click();
+    await expect(page.locator("#docker-dialog-error")).toContainText("Acknowledge Compose drift");
+    await screenshot(page, `docker-clone-${theme}`);
+    await scan(page, `docker clone ${theme}`);
+    await dialog.getByRole("button", { name: "Close" }).click();
   });
 
   test(`Docker console opens, renders output, and closes in the ${theme} theme`, async ({ page }) => {

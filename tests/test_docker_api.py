@@ -1022,6 +1022,170 @@ def test_docker_settings_and_env_lock(settings):
         assert denied.status_code == 409
 
 
+def test_multi_host_deploy_partial_failure(client, admin):
+    enable_docker_profile(client, admin, compose_allowed=True)
+    first = enroll_agent(admin, hostname="docker-a", machine_id="docker-a")
+    second = enroll_agent(admin, hostname="docker-b", machine_id="docker-b")
+    for agent in (first, second):
+        assert upload_inventory(client, admin, agent).status_code == 200
+    stack = create_stack(client, admin).json()["stack"]
+    response = client.post(
+        f"/api/docker/stacks/{stack['id']}/deploy",
+        json={
+            "agent_ids": [first["agent_id"], second["agent_id"], "agt_missing"],
+            "revision_hash": stack["current_revision_hash"],
+            "project_name": "multiweb",
+            "action": "up",
+        },
+        headers=headers(admin),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["summary"]["total"] == 3
+    assert body["summary"]["queued"] == 2
+    assert body["summary"]["failed"] == 1
+    by_agent = {item["agent_id"]: item for item in body["results"]}
+    assert by_agent[first["agent_id"]]["status"] == "queued"
+    assert by_agent[second["agent_id"]]["status"] == "queued"
+    assert by_agent["agt_missing"]["status"] == "failed"
+
+
+def test_clone_validation_compose_warning_and_inventory_revision(client, admin, app):
+    enable_docker_profile(client, admin, compose_allowed=True)
+    agent = enroll_agent(admin)
+    assert upload_inventory(client, admin, agent).status_code == 200
+    before_revision = app.state.dashboard_state.revision()
+    source = container_row(1)["id"]
+    image_id = "sha256:" + "a" * 64
+    network_id = "b" * 64
+
+    blocked = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json={
+            "action": "container.clone",
+            "container_id": source,
+            "new_name": "web-clone",
+            "image_id": image_id,
+        },
+        headers=headers(admin),
+    )
+    assert blocked.status_code == 409
+    assert "acknowledge_drift" in blocked.json()["detail"] or "compose" in blocked.json()["detail"].lower()
+
+    cloned = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json={
+            "action": "container.clone",
+            "container_id": source,
+            "new_name": "web-clone",
+            "image_id": image_id,
+            "command": ["nginx", "-g", "daemon off;"],
+            "restart_policy": "unless-stopped",
+            "memory": "512m",
+            "cpus": "1.5",
+            "pids_limit": 128,
+            "network_ids": [network_id],
+            "acknowledge_drift": True,
+        },
+        headers=headers(admin),
+    )
+    assert cloned.status_code == 200, cloned.text
+    args = cloned.json()["args"]
+    assert args["action"] == "container.clone"
+    assert args["new_name"] == "web-clone"
+    assert args["image_id"] == image_id
+    assert args["network_ids"] == [network_id]
+    assert args["acknowledge_drift"] is True
+
+    missing_image = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json={
+            "action": "container.clone",
+            "container_id": source,
+            "new_name": "web-clone-2",
+            "image_id": "sha256:" + "f" * 64,
+            "acknowledge_drift": True,
+        },
+        headers=headers(admin),
+    )
+    assert missing_image.status_code == 404
+
+    # Inventory upload still changes the dashboard revision signal.
+    assert app.state.dashboard_state.revision() > before_revision
+    detail = client.get(f"/api/docker/hosts/{agent['agent_id']}").json()
+    assert detail["host"]["inventory_revision"] == 1
+
+
+def test_compose_config_drift_detection(client, admin):
+    enable_docker_profile(client, admin, compose_allowed=True)
+    agent = enroll_agent(admin)
+    assert upload_inventory(client, admin, agent).status_code == 200
+    stack = create_stack(client, admin).json()["stack"]
+    deployed = deploy_stack(
+        client, admin, stack["id"], agent["agent_id"], project_name="driftweb"
+    )
+    assert deployed.status_code == 200
+    finish_docker_command(client, admin, agent, deployed.json()["command"]["id"])
+    deployment_id = deployed.json()["deployment"]["id"]
+
+    payload = inventory_payload(
+        containers=[
+            container_row(
+                1,
+                compose_project="driftweb",
+                labels={"com.docker.compose.project": "driftweb", "com.docker.compose.config-hash": "hash-a"},
+                compose_config_hash="hash-a",
+            )
+        ]
+    )
+    assert upload_inventory(client, admin, agent, payload).status_code == 200
+    first = client.get(f"/api/docker/deployments/{deployment_id}").json()["deployment"]
+    assert first["active"] is True and first["action"] == "up" and first["status"] == "succeeded", (
+        first["active"], first["action"], first["status"], first["project_name"]
+    )
+    assert first["compose_config_hash"] == "hash-a"
+    assert first["config_drift"] is False
+
+    payload["containers"][0]["compose_config_hash"] = "hash-b"
+    payload["containers"][0]["labels"]["com.docker.compose.config-hash"] = "hash-b"
+    payload["revision"] = 2
+    payload["hash"] = "d" * 64
+    payload["summary"]["inventory_hash"] = payload["hash"]
+    payload["summary"]["inventory_revision"] = 2
+    assert upload_inventory(client, admin, agent, payload).status_code == 200
+    drifted = client.get(f"/api/docker/deployments/{deployment_id}").json()["deployment"]
+    assert drifted["config_drift"] is True
+    assert drifted["drift"] is True
+
+
+def test_container_health_events_are_deduplicated(client, admin):
+    enable_docker_profile(client, admin)
+    agent = enroll_agent(admin)
+    healthy = inventory_payload(
+        containers=[container_row(1, state="running", health="healthy")]
+    )
+    assert upload_inventory(client, admin, agent, healthy).status_code == 200
+    unhealthy = inventory_payload(
+        containers=[container_row(1, state="running", health="unhealthy")],
+        revision=2,
+        hash="e" * 64,
+    )
+    assert upload_inventory(client, admin, agent, unhealthy).status_code == 200
+    assert upload_inventory(client, admin, agent, unhealthy).status_code == 200
+    recovered = inventory_payload(
+        containers=[container_row(1, state="running", health="healthy")],
+        revision=3,
+        hash="f" * 64,
+    )
+    assert upload_inventory(client, admin, agent, recovered).status_code == 200
+
+    events = client.get(f"/api/agents/{agent['agent_id']}/events?hours=24").json()["events"]
+    health_events = [item for item in events if item["kind"] == "docker.health"]
+    assert len(health_events) == 2
+    assert any(item["detail"]["to"] == "unhealthy" for item in health_events)
+    assert any(item["detail"]["to"] == "healthy" and item["detail"]["from"] == "unhealthy" for item in health_events)
+
+
 def test_docker_detail_includes_capabilities_and_no_env_values(client, admin):
     enable_docker_profile(client, admin, exec_allowed=True, prune_allowed=False)
     agent = enroll_agent(admin)

@@ -136,9 +136,15 @@ if args[:2] == ["volume", "inspect"]:
     print("web_data")
     raise SystemExit(0)
 if args[:2] == ["network", "inspect"]:
-    print("c" * 64)
+    print(args[-1])
     raise SystemExit(0)
 if args[:1] in (["rm"], ["rename"], ["update"], ["start"], ["stop"], ["restart"], ["pause"], ["unpause"], ["kill"]):
+    print(args[-1])
+    raise SystemExit(0)
+if args[:1] == ["create"]:
+    print("c" * 64)
+    raise SystemExit(0)
+if args[:2] == ["network", "connect"]:
     print(args[-1])
     raise SystemExit(0)
 if args[:1] == ["logs"]:
@@ -469,6 +475,41 @@ def test_exec_and_prune_gates(tmp_path: Path):
     denied_cleanup = value.execute_action("cleanup", {"scope": "dangling_images"})
     assert denied_cleanup["status"] == "failed"
     assert "cleanup" in denied_cleanup["error"].lower()
+
+
+def test_container_clone_argv_is_allowlisted(tmp_path: Path, monkeypatch):
+    config = make_config(tmp_path)
+    log = tmp_path / "docker.log"
+    monkeypatch.setenv("FAKE_DOCKER_LOG", str(log))
+    value = collector(config)
+    result = value.execute_action(
+        "container.clone",
+        {
+            "container_id": "a" * 64,
+            "new_name": "web-clone",
+            "image_id": "sha256:" + "b" * 64,
+            "command": ["nginx", "-g", "daemon off;"],
+            "restart_policy": "unless-stopped",
+            "memory": "512m",
+            "cpus": "1.5",
+            "pids_limit": 128,
+            "network_ids": ["c" * 64, "d" * 64],
+            "acknowledge_drift": True,
+        },
+    )
+    assert result["status"] == "succeeded", result["error"]
+    commands = _logged_commands(log)
+    create = next(command for command in commands if command[:1] == ["create"])
+    flat = " ".join(create)
+    assert "--name" in create and "web-clone" in create
+    assert "--restart" in create and "unless-stopped" in create
+    assert "--memory" in create and "512m" in create
+    assert "--cpus" in create and "1.5" in create
+    assert "--pids-limit" in create and "128" in create
+    assert "--network" in create and "c" * 64 in create
+    assert create[-3:] == ["nginx", "-g", "daemon off;"]
+    assert not any(flag in flat for flag in ("--privileged", "--env", "--mount", "--device", "--cap-add", "-v"))
+    assert any(command[:2] == ["network", "connect"] and "d" * 64 in command for command in commands)
 
 
 def test_inspect_masks_environment(tmp_path: Path, monkeypatch):

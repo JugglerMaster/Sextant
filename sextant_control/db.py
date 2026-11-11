@@ -464,6 +464,7 @@ CREATE TABLE IF NOT EXISTS docker_deployments (
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     revision_hash TEXT NOT NULL DEFAULT '',
     project_name TEXT NOT NULL DEFAULT '',
+    compose_config_hash TEXT NOT NULL DEFAULT '',
     action TEXT NOT NULL DEFAULT 'up',
     status TEXT NOT NULL DEFAULT 'queued',
     command_id TEXT NOT NULL DEFAULT '',
@@ -688,7 +689,7 @@ class Database:
             if old_version < 7:
                 self._ensure_docker_profile_defaults(conn)
             conn.executescript(INDEXES)
-            conn.execute("PRAGMA user_version=10")
+            conn.execute("PRAGMA user_version=11")
             conn.execute("UPDATE agents SET profile_id = 'prof_workstation' WHERE profile_id = ''")
         try:
             self.path.chmod(0o600)
@@ -718,6 +719,12 @@ class Database:
             conn.execute("ALTER TABLE agents ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'prof_workstation'")
         if "service_inventory_at" not in agent_columns:
             conn.execute("ALTER TABLE agents ADD COLUMN service_inventory_at TEXT")
+
+        deployment_columns = columns("docker_deployments")
+        if deployment_columns and "compose_config_hash" not in deployment_columns:
+            conn.execute(
+                "ALTER TABLE docker_deployments ADD COLUMN compose_config_hash TEXT NOT NULL DEFAULT ''"
+            )
 
         docker_container_columns = columns("docker_containers")
         if docker_container_columns:
@@ -3137,6 +3144,49 @@ class Database:
                 (cutoff,),
             )
             return int(cur.rowcount)
+
+    def reconcile_docker_deployment_hashes(
+        self,
+        agent_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        if conn is None:
+            with self.connection() as own:
+                self.reconcile_docker_deployment_hashes(agent_id, conn=own)
+            return
+        deployments = conn.execute(
+            """SELECT * FROM docker_deployments
+               WHERE agent_id = ? AND active = 1 AND action = 'up'""",
+            (agent_id,),
+        ).fetchall()
+        for deployment in deployments:
+            rows = conn.execute(
+                """SELECT DISTINCT compose_config_hash FROM docker_containers
+                   WHERE agent_id = ? AND compose_project = ?
+                     AND compose_config_hash != ''""",
+                (agent_id, deployment["project_name"]),
+            ).fetchall()
+            hashes = {str(row["compose_config_hash"]) for row in rows}
+            if not deployment["compose_config_hash"] and len(hashes) == 1:
+                conn.execute(
+                    "UPDATE docker_deployments SET compose_config_hash = ? WHERE id = ?",
+                    (next(iter(hashes)), deployment["id"]),
+                )
+
+    def docker_deployment_config_drift(self, row: sqlite3.Row) -> bool:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT DISTINCT compose_config_hash FROM docker_containers
+                   WHERE agent_id = ? AND compose_project = ?
+                     AND compose_config_hash != ''""",
+                (row["agent_id"], row["project_name"]),
+            ).fetchall()
+        hashes = {str(item["compose_config_hash"]) for item in rows}
+        expected = str(row["compose_config_hash"] or "")
+        if expected:
+            return any(value != expected for value in hashes)
+        return len(hashes) > 1
 
     def docker_deployment_revision_hashes(self, stack_id: str) -> set[str]:
         with self.connection() as conn:

@@ -10,8 +10,8 @@ The dashboard is a vanilla HTML/CSS/JS single page backed by the FastAPI API. Th
 - **Saved views** — per-user server-side views (`GET`/`POST`/`DELETE /api/saved-views`) with a localStorage import/fallback only.
 - **Bulk actions** — one `POST /api/agents/bulk` request with a per-agent queued/sent/updated/failed summary, including failed machine names and messages.
 - **Device drawer** — Overview (with 24h sparklines), Disks, GPU, Services, Startup, Packages, Remote, History, Trends.
-- **Docker Hosts** (D2/D3) — host list of agents reporting Docker, selected-host Overview, Containers, Images, Volumes, Networks, and Stacks tabs from cached inventory, freshness badge, unavailable reasons, and **Refresh now**. Containers support inspect, logs, one-shot exec, start/stop/restart/pause/rename/update/remove with confirmations. Images/volumes/networks support guarded removal, and Overview has cached cleanup cards with per-scope confirmation and reclaimed-size results. The Stacks tab separates active Sextant-managed deployments from read-only external Compose projects. No interactive console yet.
-- **Compose Files** (D3) — stack list, admin flat-file editor with compose.yaml/.env/override files, immutable revision history, deploy picker (host/revision/project/pull), deployment history/logs with down/restart/pull, and admin storage settings showing whether the path is fixed by environment. Operators can deploy but cannot edit or read `.env`; viewers are metadata-only.
+- **Docker Hosts** (D2–D5) — host list of agents reporting Docker, selected-host Overview, Containers, Images, Volumes, Networks, and Stacks tabs from cached inventory, freshness badge, inventory revision, unavailable reasons, **Refresh now**, and a 12-second visibility-aware auto-refresh of the selected host. Containers support inspect, logs, one-shot exec, interactive console, clone, start/stop/restart/pause/rename/update/remove with confirmations. Compose config-hash drift shows a compact badge in Containers, Stacks, and deployment history. Images/volumes/networks support guarded removal, and Overview has cached cleanup cards with per-scope confirmation and reclaimed-size results. The Stacks tab separates active Sextant-managed deployments from read-only external Compose projects.
+- **Compose Files** (D3/D5) — stack list, admin flat-file editor with compose.yaml/.env/override files, immutable revision history, multi-host deploy picker (up to 20 hosts with per-host results), deployment history/logs with down/restart/pull, and admin storage settings showing whether the path is fixed by environment. Operators can deploy but cannot edit or read `.env`; viewers are metadata-only.
 - **Container console** (D4) — operator Console action on running containers, setup for shell/user/workdir, warning banner, ANSI-cleaned terminal output, keystroke forwarding and input row, paste/copy, resize, idle countdown, explicit close confirmation, focus return, and mobile layout. No transcript is retained.
 - **Packages** — inventory with interactive table, **desired-state rule editor** (admin), drift summary, Sync now.
 - **Profiles** — create/edit/reset/delete profiles, modules, action gates, cadences, tag assignments.
@@ -46,7 +46,7 @@ Do not label an old inventory as “stale” solely because the heartbeat is rec
 - **Inventory stale** when `now - inventory_updated > 1.5 × profile package_inventory_seconds` (or service cadence for services).
 - Show the cadence next to the age so an old timestamp is understandable.
 
-Current state: the Packages tab, agent cards, and drawer Overview show **Heartbeat** and **Inventory updated**. The service-inventory timestamp is stored in `agents.service_inventory_at`. The Docker Hosts page shows Docker inventory age and a stale badge using `docker_hosts.inventory_at` and `SEXTANT_DOCKER_INVENTORY_STALE_SECONDS`; successful Docker mutations request a fresh inventory upload before the UI reloads.
+Current state: the Packages tab, agent cards, and drawer Overview show **Heartbeat** and **Inventory updated**. The service-inventory timestamp is stored in `agents.service_inventory_at`. The Docker Hosts page shows Docker inventory age, revision, and a stale badge using `docker_hosts.inventory_at` and `SEXTANT_DOCKER_INVENTORY_STALE_SECONDS`; successful Docker mutations request a fresh inventory upload before the UI reloads. While Docker Hosts is visible and no Docker dialog/console/action is active, the selected host refreshes every 12 seconds and pauses while the document is hidden.
 
 ---
 
@@ -80,6 +80,7 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 - D2 Docker Hosts actions with a shared accessible dialog, focused action/confirm flows, offline/gate-disabled states, cached cleanup cards, and an `aria-live` action/refresh status.
 - D3 Compose Files views with admin editing, revision/deploy dialogs, deployment history, .env redaction for operators, storage settings, and managed-vs-external host stack display.
 - D4 interactive console modal with PTY-backed terminal output, keystroke/input handling, resize, idle countdown, close confirmation, focus return, and no transcript.
+- D5 Docker live refresh with revision/age display, drift badges, multi-host Compose deploy with a per-host summary, and a prefilled clone dialog limited to the safe allowlist with Compose drift acknowledgment.
 
 ---
 

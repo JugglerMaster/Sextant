@@ -137,7 +137,7 @@ There is no pixel-level remote desktop or input injection in this version. “Re
 - **GitHub is not an app source.** App packages are uploaded to the store by an admin or CI; agents never download apps from GitHub.
 - **Remote install is admin-only and key-based.** One private key is stored on the server filesystem (`SEXTANT_SSH_KEY_PATH`, mode 0600), not in SQLite. No SSH passwords, no agent forwarding, no forwarding, fixed install script, validated inputs, one job at a time, full audit. Host-key verification is intentionally disabled for rebuilt hosts, so use SSH only on a trusted admin network/VPN.
 
-## Docker inventory and actions (D1/D2)
+## Docker inventory and actions (D1–D5)
 
 - **Docker access is local and opt-in.** The Linux agent's `allow_docker` flag
   defaults to false, and the assigned profile must enable both `modules.docker`
@@ -174,6 +174,32 @@ There is no pixel-level remote desktop or input injection in this version. “Re
 - **Offline behavior.** Actions obey the normal offline-command policy and
   one-command-per-heartbeat queue. Cached inventory remains visible while
   offline, but mutations are rejected or queued according to that policy.
+- **Clone is a validated safe subset (D5).** `container.clone` accepts only a
+  source container ID, new name, existing image ID, optional argv command,
+  restart policy, memory/CPU/PID limits, existing network IDs, and a Compose
+  drift acknowledgment. Bind mounts, env values, devices, capabilities,
+  privileged mode, and arbitrary flags are rejected by the server model and the
+  agent executor. The server re-checks image/network ownership against cached
+  inventory; the agent re-resolves image and networks and builds only
+  `docker create` plus `docker network connect` argv. Compose-managed sources
+  are blocked without `acknowledge_drift`, and the UI warns that a later
+  `docker compose up` may revert the clone. Creation is audited and inventory is
+  refreshed.
+- **Multi-host deploy is per-host isolated (D5).** A request may target at most
+  20 hosts. Each host gets an independent deployment/command and its own
+  availability, Compose, revision, project-name collision, queue, and mutation
+  checks; one host's failure is returned in the per-host result and does not
+  cancel the rest. Project names and mutation locks remain per host.
+- **Drift and health metadata are non-secret (D5).** Drift compares only the
+  Compose `config-hash` label against the recorded deployment baseline. Health
+  events store the host, container name/ID, and previous/new health; they do not
+  include env values, logs, or terminal output. Repeated identical heartbeats do
+  not create rows. Health events are available to the existing events/timeline
+  surface but are not yet Telegram alert rows.
+- **Live refresh is a bounded read (D5).** Docker Hosts polls the selected host
+  every 12 seconds only while visible and pauses for hidden documents, open
+  Docker dialogs/console, and active actions. It reuses the cached-inventory
+  read route; it does not proxy Docker and does not create a second SSE stream.
 
 ## Compose library (D3)
 

@@ -51,6 +51,7 @@ const state = {
   dockerConsoleLastActivity: 0,
   dockerConsoleResizeTimer: null,
   dockerConsoleTrigger: null,
+  dockerAutoTimer: null,
   fleetFilters: { status: "all", profile: "", tag: "" },
   fleetRenderLimit: 60,
   agentCards: new Map(),
@@ -556,6 +557,7 @@ async function copyText(text) {
 function showLogin(message = "") {
   stopLiveUpdates();
   stopDockerRefreshPoll();
+  stopDockerAutoRefresh();
   closeDockerConsoleSource();
   state.dockerConsole = null;
   state.user = null;
@@ -754,13 +756,19 @@ function navigate(page, load = true) {
   });
   $("sidebar").classList.remove("is-open");
   $("sidebar-scrim").hidden = true;
-  if (page !== "docker-hosts") stopDockerRefreshPoll();
+  if (page !== "docker-hosts") {
+    stopDockerRefreshPoll();
+    stopDockerAutoRefresh();
+  }
   if (!load) return;
   if (page === "overview") loadDashboard();
   if (page === "wake") loadWakeTargets();
   if (page === "docker-hosts") {
     loadDockerHosts();
-    if (state.dockerHostId) loadDockerHostDetail(state.dockerHostId, true);
+    if (state.dockerHostId) {
+      loadDockerHostDetail(state.dockerHostId, true);
+      startDockerAutoRefresh();
+    }
   }
   if (page === "compose-files") loadComposeFiles();
   if (page === "enroll") loadEnrollmentTokens();
@@ -4125,6 +4133,25 @@ async function confirmDockerAction(title, message, confirmLabel, path, payload, 
   return queueDockerAction(path, payload, label, options);
 }
 
+function stopDockerAutoRefresh() {
+  if (state.dockerAutoTimer) {
+    clearInterval(state.dockerAutoTimer);
+    state.dockerAutoTimer = null;
+  }
+}
+
+function startDockerAutoRefresh() {
+  stopDockerAutoRefresh();
+  if (state.page !== "docker-hosts" || !state.dockerHostId) return;
+  const delay = window.__fastDockerRefresh ? 300 : 12_000;
+  state.dockerAutoTimer = setInterval(() => {
+    if (document.hidden || state.dockerActionBusy) return;
+    if ($("docker-console-dialog")?.open || $("docker-dialog")?.open) return;
+    loadDockerHosts(true);
+    loadDockerHostDetail(state.dockerHostId, true);
+  }, delay);
+}
+
 function stopDockerRefreshPoll() {
   if (state.dockerRefreshTimer) {
     clearTimeout(state.dockerRefreshTimer);
@@ -4189,7 +4216,7 @@ function renderDockerHostList() {
         h(
           "p",
           { class: "form-hint" },
-          `${host.counts.running} running · ${host.counts.stopped} stopped · ${host.counts.unhealthy} unhealthy · ${host.counts.images} images · ${host.counts.volumes} volumes · ${host.counts.networks} networks · inventory ${dockerAge(host.age_seconds)}`,
+          `${host.counts.running} running · ${host.counts.stopped} stopped · ${host.counts.unhealthy} unhealthy · ${host.counts.images} images · ${host.counts.volumes} volumes · ${host.counts.networks} networks · inventory ${dockerAge(host.age_seconds)} · rev ${host.inventory_revision}`,
         ),
         host.reason
           ? h("p", { class: "form-hint" }, dockerReason(host.reason))
@@ -4213,6 +4240,7 @@ function openDockerHost(agentId) {
   const detail = $("docker-host-detail");
   if (detail) detail.hidden = false;
   renderDockerHostList();
+  startDockerAutoRefresh();
   setText("docker-host-title", "Loading Docker host…");
   setText("docker-host-meta", "Fetching the latest cached inventory.");
   const body = $("docker-host-body");
@@ -4225,6 +4253,7 @@ function openDockerHost(agentId) {
 
 function closeDockerHost() {
   stopDockerRefreshPoll();
+  stopDockerAutoRefresh();
   state.dockerHostId = null;
   state.dockerHostDetail = null;
   const detail = $("docker-host-detail");
@@ -4418,6 +4447,9 @@ function renderDockerContainers(body, detail) {
   const filtered = containers.filter((container) => dockerContainerMatches(container, state.dockerContainerFilter));
   const canMutate = dockerCan("mutate");
   const canExec = dockerCan("exec");
+  const driftProjects = new Set(
+    (detail.deployments || []).filter((deployment) => deployment.drift).map((deployment) => deployment.project_name),
+  );
   const rows = filtered.map((container) => {
     const running = String(container.state || "").toLowerCase() === "running";
     const paused = String(container.state || "").toLowerCase() === "paused";
@@ -4430,7 +4462,7 @@ function renderDockerContainers(body, detail) {
       h("td", {}, container.state || "—"),
       h("td", {}, container.health ? statusPill(container.health, container.health === "unhealthy" ? "critical" : "online") : "—"),
       h("td", {}, (container.ports || []).join(", ") || "—"),
-      h("td", {}, container.compose_project || "—"),
+      h("td", {}, container.compose_project || "—", driftProjects.has(container.compose_project) ? h("span", { title: "Deployed revision or container config hash differs from the stack baseline." }, statusPill("drift", "warning")) : null),
       h("td", {}, container.status || "—"),
       h(
         "td",
@@ -4451,6 +4483,7 @@ function renderDockerContainers(body, detail) {
             : button("Pause", "button-ghost button-small", () => dockerLifecycle(container, "container.pause"), !canMutate || !running),
           button("Rename", "button-ghost button-small", () => openDockerRename(container), !canMutate),
           button("Update", "button-ghost button-small", () => openDockerUpdate(container), !canMutate),
+          button("Clone", "button-ghost button-small", () => openDockerClone(container), !canMutate),
           button("Remove", "button-danger button-small", () => removeDockerContainer(container), !canMutate),
         ),
       ),
@@ -4988,6 +5021,84 @@ function openDockerUpdate(container) {
   });
 }
 
+function openDockerClone(container) {
+  const detail = state.dockerHostDetail;
+  const images = detail?.images || [];
+  const networks = detail?.networks || [];
+  const matchedImage = images.find((image) =>
+    (image.repo_tags || []).some((tag) => tag === container.image || tag.split(":")[0] === container.image),
+  );
+  openDockerDialog(`Clone · ${dockerContainerLabel(container)}`, "Create container from safe spec", (body) => {
+    const name = h("input", { type: "text", maxlength: "128", value: `${container.name || "container"}-clone` });
+    const image = h(
+      "select",
+      {},
+      ...images.map((item) => h("option", { value: item.id }, (item.repo_tags || []).join(", ") || short(item.id, 20))),
+    );
+    if (matchedImage) image.value = matchedImage.id;
+    const command = h("textarea", { rows: "3", placeholder: "Optional command argv, one argument per line" });
+    const restartPolicies = ["", "no", "always", "unless-stopped", "on-failure", "on-failure:3"];
+    const restart = h("select", {}, ...restartPolicies.map((value) => h("option", { value }, value || "No restart policy (default)")));
+    restart.value = restartPolicies.includes(container.restart_policy) ? container.restart_policy : "";
+    const memory = h("input", { type: "text", maxlength: "32", value: container.memory_limit ? `${Math.round(container.memory_limit / (1024 * 1024))}m` : "" });
+    const cpus = h("input", { type: "text", maxlength: "16", value: container.nano_cpus ? (container.nano_cpus / 1e9).toFixed(2) : "" });
+    const pids = h("input", { type: "number", min: "0", max: "1000000", value: container.pids_limit ?? "" });
+    const networkChecks = networks.map((network) => {
+      const checked = (container.networks || []).includes(network.name);
+      const input = h("input", { type: "checkbox", value: network.id, checked });
+      return h("label", { class: "checkbox-row" }, input, h("span", {}, network.name));
+    });
+    const drift = h("input", { type: "checkbox" });
+    const form = h(
+      "form",
+      { class: "form-stack" },
+      h("div", { class: "form-grid" }, h("label", { class: "field" }, h("span", {}, "New name"), name), h("label", { class: "field" }, h("span", {}, "Image"), image)),
+      h("div", { class: "form-grid" }, h("label", { class: "field" }, h("span", {}, "Restart policy"), restart), h("label", { class: "field" }, h("span", {}, "Memory"), memory)),
+      h("div", { class: "form-grid" }, h("label", { class: "field" }, h("span", {}, "CPUs"), cpus), h("label", { class: "field" }, h("span", {}, "PIDs limit"), pids)),
+      h("label", { class: "field" }, h("span", {}, "Command argv (optional)"), command),
+      h("p", { class: "eyebrow" }, "Networks"),
+      ...networkChecks,
+      h("p", { class: "form-hint" }, "Clone copies only the allowlisted spec: image, new name, argv command, restart policy, resource limits, and existing networks. Host bind mounts, env values, devices, capabilities, privileged mode, and arbitrary flags are not copied."),
+      container.compose_project
+        ? h("div", { class: "callout" }, h("p", {}, `Source is Compose-managed (${container.compose_project}). Cloning can drift from the stack; docker compose up may revert it.`), h("label", { class: "checkbox-row" }, drift, h("span", {}, "I understand this may drift from Compose")))
+        : null,
+    );
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const args = command.value.split("\n").map((line) => line.trim()).filter(Boolean);
+      if (container.compose_project && !drift.checked) {
+        return setText("docker-dialog-error", "Acknowledge Compose drift before cloning this container.");
+      }
+      const payload = {
+        action: "container.clone",
+        container_id: container.id,
+        new_name: name.value.trim(),
+        image_id: image.value,
+        command: args,
+        restart_policy: restart.value,
+        memory: memory.value.trim(),
+        cpus: cpus.value.trim(),
+        pids_limit: pids.value === "" ? null : Number(pids.value),
+        network_ids: [...form.querySelectorAll('input[type="checkbox"][value]:checked')].map((item) => item.value),
+        acknowledge_drift: container.compose_project ? drift.checked : false,
+      };
+      const confirmed = await confirmAction(
+        `Clone ${dockerContainerLabel(container)}?`,
+        container.compose_project
+          ? "This creates a separate container from the safe spec. It may drift from the Compose-managed stack."
+          : "This creates a separate container from the safe spec. The source container is not changed.",
+        "Clone container",
+      );
+      if (!confirmed) return;
+      closeDockerDialog();
+      await queueDockerAction(dockerActionUrl(), payload, `Clone ${dockerContainerLabel(container)}`, { showOutput: true });
+    });
+    body.append(form);
+  }, (actions) => {
+    actions.append(button("Clone", "button-primary", () => $("docker-dialog-body").querySelector("form")?.requestSubmit(), !dockerCan("mutate") || !images.length));
+  });
+}
+
 async function removeDockerContainer(container) {
   const running = String(container.state || "").toLowerCase() === "running";
   return confirmDockerAction(
@@ -5215,7 +5326,7 @@ function renderDockerHostStacks(body, detail) {
           h("td", {}, deployment.project_name),
           h("td", { class: "mono" }, short(deployment.revision_hash, 16)),
           h("td", {}, deployment.action),
-          h("td", {}, deployment.status),
+          h("td", {}, deployment.drift ? statusPill("drift", "warning") : deployment.status),
           h("td", {}, button("Open", "button-secondary button-small", () => {
             navigate("compose-files");
             openComposeStack(deployment.stack_id);
@@ -5746,7 +5857,10 @@ function deployComposeDialog(stack, revisionHash) {
           body.append(h("div", { class: "empty-inline" }, "No Docker host currently allows Compose deployment."));
           return;
         }
-        const host = h("select", {}, ...hosts.map((item) => h("option", { value: item.agent_id }, `${item.name} (${item.hostname})`)));
+        const hostChecks = hosts.map((item) => {
+          const input = h("input", { type: "checkbox", value: item.agent_id });
+          return h("label", { class: "checkbox-row" }, input, h("span", {}, `${item.name} (${item.hostname})`));
+        });
         const revision = h("select", {}, ...(stack.revisions || []).map((item) => h("option", { value: item.revision_hash }, `${short(item.revision_hash, 16)} · ${item.created_at ? localTime(item.created_at) : ""}`)));
         if (revisionHash) revision.value = revisionHash;
         const project = h("input", { type: "text", maxlength: "63", value: `sextant_${stack.slug}`.slice(0, 63) });
@@ -5754,16 +5868,19 @@ function deployComposeDialog(stack, revisionHash) {
         const form = h(
           "form",
           { class: "form-stack" },
-          h("label", { class: "field" }, h("span", {}, "Docker host"), host),
+          h("p", { class: "eyebrow" }, `Docker hosts (max 20)`),
+          ...hostChecks,
           h("label", { class: "field" }, h("span", {}, "Revision"), revision),
-          h("label", { class: "field" }, h("span", {}, "Project name"), project),
+          h("label", { class: "field" }, h("span", {}, "Project name per host"), project),
           h("label", { class: "checkbox-row" }, pull, h("span", {}, "Pull images before up")),
-          h("p", { class: "form-hint" }, "Deploys the selected immutable revision to one host. The previous active deployment stays active if this fails."),
+          h("p", { class: "form-hint" }, "One deployment and command is created per selected host. A failure on one host does not cancel the others. The previous active deployment stays active on a failed host."),
         );
         form.addEventListener("submit", (event) => {
           event.preventDefault();
+          const selected = [...form.querySelectorAll('input[type="checkbox"][value]:checked')].map((item) => item.value);
+          if (!selected.length) return setText("docker-dialog-error", "Select at least one Docker host.");
           closeDockerDialog();
-          composeDeploy(stack.id, host.value, revision.value, project.value.trim(), "up", false, pull.checked);
+          composeDeployMany(stack.id, selected, revision.value, project.value.trim(), pull.checked);
         });
         body.append(form);
       }, (actions) => {
@@ -5771,6 +5888,52 @@ function deployComposeDialog(stack, revisionHash) {
       });
     })
     .catch((error) => toast(error.message, "error"));
+}
+
+async function composeDeployMany(stackId, agentIds, revisionHash, projectName, pullBeforeUp = false) {
+  const status = $("compose-status");
+  if (status) status.textContent = `Queuing Compose deployment for ${agentIds.length} host${agentIds.length === 1 ? "" : "s"}…`;
+  try {
+    const data = await api(`/api/docker/stacks/${encodeURIComponent(stackId)}/deploy`, {
+      method: "POST",
+      body: {
+        agent_ids: agentIds,
+        revision_hash: revisionHash,
+        project_name: projectName,
+        action: "up",
+        pull_before_up: pullBeforeUp,
+      },
+    });
+    const results = data.results || [];
+    const summary = data.summary || { total: results.length, queued: 0, failed: results.length };
+    if (status) status.textContent = `Compose deploy: ${summary.queued} queued, ${summary.failed} failed.`;
+    openDockerDialog("Compose deploy results", "Per-host summary", (body) => {
+      body.append(
+        h("p", { class: "form-hint" }, `${summary.queued} of ${summary.total} host(s) queued.`),
+        h("div", { class: "table-wrap" }, h(
+          "table",
+          { class: "data-table" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Host"), h("th", {}, "Status"), h("th", {}, "Project"), h("th", {}, "Detail"))),
+          h("tbody", {}, ...results.map((result) => h(
+            "tr",
+            {},
+            h("td", {}, result.agent_name || result.agent_id),
+            h("td", {}, result.status === "queued" ? statusPill("queued", "neutral") : statusPill("failed", "critical")),
+            h("td", {}, result.deployment?.project_name || projectName),
+            h("td", {}, result.error || (result.deployment?.id || "")),
+          ))),
+        )),
+      );
+    });
+    if (state.composeStackId === stackId) {
+      state.composeTab = "deployments";
+      renderComposeDetail();
+    }
+    await loadComposeFiles(true);
+  } catch (error) {
+    if (status) status.textContent = error.message;
+    toast(error.message, "error");
+  }
 }
 
 async function composeDeploy(stackId, agentId, revisionHash, projectName, action, removeVolumes = false, pullBeforeUp = false) {
@@ -6452,10 +6615,12 @@ function wireEvents() {
     if (!state.user) return;
     if (document.hidden) {
       stopLiveUpdates();
+      stopDockerAutoRefresh();
       return;
     }
     loadDashboard(true);
     startLiveUpdates();
+    if (state.page === "docker-hosts") startDockerAutoRefresh();
   });
 }
 

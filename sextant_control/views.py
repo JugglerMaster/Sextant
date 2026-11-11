@@ -433,6 +433,7 @@ def docker_deployment_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "agent_id": row["agent_id"],
         "revision_hash": row["revision_hash"],
         "project_name": row["project_name"],
+        "compose_config_hash": row["compose_config_hash"] if "compose_config_hash" in row.keys() else "",
         "action": row["action"],
         "status": row["status"],
         "command_id": row["command_id"],

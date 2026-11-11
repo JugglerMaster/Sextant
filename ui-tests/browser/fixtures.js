@@ -191,6 +191,22 @@ const dockerDetail = {
   server_time: "2026-11-06T08:05:00Z",
   stale_seconds: 900,
   host: dockerHost,
+  deployments: [
+    {
+      id: "dep_web",
+      stack_id: "stk_web",
+      agent_id: "agt_build",
+      revision_hash: "e".repeat(64),
+      project_name: "web",
+      action: "up",
+      status: "succeeded",
+      active: true,
+      drift: true,
+      config_drift: true,
+      stack_name: "Web stack",
+      agent_name: "Build Server",
+    },
+  ],
   containers: [
     {
       id: "a".repeat(64),
@@ -540,6 +556,7 @@ const dashboardPayload = {
 
 function createApi(session) {
   let dockerCommand = null;
+  let dockerDetailReads = 0;
   return function respond(url, method, body = null) {
     const key = url.pathname;
     if (key === "/api/auth/config") {
@@ -581,6 +598,11 @@ function createApi(session) {
       return { status: 200, body: { server_time: "2026-11-06T08:05:00Z", stale_seconds: 900, hosts: [dockerHost] } };
     }
     if (key === "/api/docker/hosts/agt_build") {
+      dockerDetailReads += 1;
+      if (dockerDetailReads > 1) {
+        dockerHost.inventory_revision += 1;
+        dockerHost.age_seconds = 2;
+      }
       return { status: 200, body: dockerDetail };
     }
     if (key === "/api/docker/hosts/agt_build/cleanup") {

@@ -306,7 +306,7 @@ Kinds and validated arguments:
 - `power`: `shutdown` | `reboot` | `cancel`; delay 0–600 seconds.
 - `refresh`: no args.
 - `package`: 1–25 actions; each has `manager` (`apt` | `dnf` | `winget` | `choco`), `action` (`install` | `remove` | `upgrade`), `package`, optional `version`. Requires both the agent-local `allow_packages` flag and the server policy flag.
-- `docker`: D2 accepts `inventory.refresh` plus the allowlisted actions above. The Linux agent, profile Docker module, action gate (`allow_docker`, `allow_docker_exec`, or `allow_docker_prune`), and per-agent policy must all allow the requested action. Raw Docker flags and unknown fields are rejected.
+- `docker`: D2 accepts `inventory.refresh` plus the allowlisted actions above. D5 adds `container.clone` and multi-host Compose deployment (one `docker` command per host). The Linux agent, profile Docker module, action gate (`allow_docker`, `allow_docker_exec`, or `allow_docker_prune`), and per-agent policy must all allow the requested action. Raw Docker flags and unknown fields are rejected. Inventory uploads can emit deduplicated `docker.health` agent events.
 
 Queue guardrails:
 
@@ -523,9 +523,9 @@ Any authenticated role can read. `hours` must be 1–720 and `limit` must be 1�
 }
 ```
 
-Kinds are `online`, `service`, `package`, `version`, `profile`, and `alert`. Alert detail identifies the lifecycle action (`raised`, `cleared`, `acknowledged`, `reacknowledged`, `snoozed`, or `acknowledgement_expired`) plus the `incident_id` where applicable. Raises are recorded on the first heartbeat that sees a condition; a recurrence is still a `raised` event with `recurrence: true` and the previous incident id. Steady heartbeats only advance `last_seen_at` and do not create events. Events are recorded best-effort: a failed event write never breaks a heartbeat or command path. Detail is deliberately bounded (for package transitions, at most the first ten names plus counts and a `truncated` flag), and an oversized detail payload is replaced with `{"truncated": true}`. Events are pruned with `SEXTANT_COMMAND_RETENTION_DAYS` (default 90).
+Kinds are `online`, `service`, `package`, `version`, `profile`, `alert`, and `docker.health`. Alert detail identifies the lifecycle action (`raised`, `cleared`, `acknowledged`, `reacknowledged`, `snoozed`, or `acknowledgement_expired`) plus the `incident_id` where applicable. Raises are recorded on the first heartbeat that sees a condition; a recurrence is still a `raised` event with `recurrence: true` and the previous incident id. Steady heartbeats only advance `last_seen_at` and do not create events. Events are recorded best-effort: a failed event write never breaks a heartbeat or command path. Detail is deliberately bounded (for package transitions, at most the first ten names plus counts and a `truncated` flag), and an oversized detail payload is replaced with `{"truncated": true}`. Events are pruned with `SEXTANT_COMMAND_RETENTION_DAYS` (default 90).
 
-## Docker Hosts (D1/D2)
+## Docker Hosts (D1–D5)
 
 Docker is off by default. A host appears only when the Linux agent reports Docker,
 the agent profile enables `modules.docker` and `actions.allow_docker`, and the
@@ -536,7 +536,7 @@ socket.
 | Method | Path | Role | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/api/docker/hosts` | viewer+ | Host summaries, counts, versions, availability/reason, and freshness |
-| `GET` | `/api/docker/hosts/{agent_id}` | viewer+ | One selected host plus cached containers, images, volumes, networks, and capabilities |
+| `GET` | `/api/docker/hosts/{agent_id}` | viewer+ | One selected host plus cached containers, images, volumes, networks, deployment history, and capabilities |
 | `POST` | `/api/docker/hosts/{agent_id}/refresh` | operator+ | Queue a non-mutating `docker` / `inventory.refresh` command |
 | `POST` | `/api/docker/hosts/{agent_id}/actions` | operator+ | Queue an allowlisted container/image/volume/network action |
 | `POST` | `/api/docker/hosts/{agent_id}/containers/{container_id}/exec` | operator+ | Queue a one-shot container exec |
@@ -584,10 +584,17 @@ Docker action bodies are strict and action-specific:
 {"action":"container.update","container_id":"a1b2…","restart_policy":"unless-stopped","memory":"512m","cpus":"1.5","pids_limit":256}
 {"action":"container.logs","container_id":"a1b2…","tail":500,"timestamps":true}
 {"action":"container.inspect","container_id":"a1b2…"}
+{"action":"container.clone","container_id":"a1b2…","new_name":"web-clone","image_id":"sha256:…","command":["nginx","-g","daemon off;"],"restart_policy":"unless-stopped","memory":"512m","cpus":"1.5","pids_limit":256,"network_ids":["c3d4…"],"acknowledge_drift":false}
 {"action":"image.remove","image_id":"sha256:…"}
 {"action":"volume.remove","volume_name":"web_data"}
 {"action":"network.remove","network_id":"c3d4…"}
 ```
+
+`container.clone` accepts only the fields shown. The image and networks must
+exist in the latest inventory. The source container is not modified. Host bind
+mounts, env values, devices, capabilities, privileged mode, and arbitrary flags
+are rejected. A Compose-managed source is blocked unless `acknowledge_drift` is
+true; the UI explains that a later `docker compose up` may revert the clone.
 
 One-shot exec body:
 
@@ -612,6 +619,15 @@ inventory; the agent resolves it again with `docker inspect`. Every request and
 result is audited. Result output is returned through the normal command
 endpoint, and completed mutations create `docker.action` agent events.
 
+Container health transitions create `docker.health` agent events. The server
+compares each inventory upload with the previous cached container health and
+records an event only when a container becomes `unhealthy` (severity `warning`)
+or recovers from `unhealthy` to `healthy` (severity `success`). Detail includes
+`host`, `container_id`, `container_name`, `from`, and `to`. Repeated inventory
+uploads in the same state do not create duplicate rows. These events appear in
+`GET /api/agents/{id}/events` and the agent timeline; they are not yet Telegram
+alert rows.
+
 ### Compose library and deployments
 
 | Method | Path | Role | Purpose |
@@ -621,7 +637,7 @@ endpoint, and completed mutations create `docker.action` agent events.
 | `POST` | `/api/docker/stacks` | admin | Create a stack and first immutable revision |
 | `PUT` | `/api/docker/stacks/{id}` | admin | Save files as a new immutable revision |
 | `DELETE` | `/api/docker/stacks/{id}` | admin | Delete only when no active deployment remains |
-| `POST` | `/api/docker/stacks/{id}/deploy` | operator+ | Deploy up/down/restart/pull to one host |
+| `POST` | `/api/docker/stacks/{id}/deploy` | operator+ | Deploy up/down/restart/pull to one host (`agent_id`) or up to 20 hosts (`agent_ids`) |
 | `GET` | `/api/docker/deployments?agent_id=&stack_id=&limit=` | viewer+ | Deployment history |
 | `GET` | `/api/docker/deployments/{id}` | viewer+ | One deployment with bounded log |
 | `GET` | `/api/docker/settings` | admin | Effective Compose dir, source, limits, counts |
@@ -651,7 +667,7 @@ Deploy body:
 
 ```json
 {
-  "agent_id": "agt_123",
+  "agent_ids": ["agt_123", "agt_456"],
   "revision_hash": "…64 hex…",
   "project_name": "sextant_web",
   "action": "up",
@@ -660,10 +676,34 @@ Deploy body:
 }
 ```
 
+Use either `agent_id` (legacy single-host response) or `agent_ids` (1–20 hosts),
+never both. `agent_ids` creates one deployment and one command per host and
+returns:
+
+```json
+{
+  "results": [
+    {"agent_id": "agt_123", "agent_name": "docker-01", "status": "queued", "deployment": {"…": "…"}, "command": {"…": "…"}},
+    {"agent_id": "agt_456", "status": "failed", "error": "Compose deployment is disabled…", "status_code": 409}
+  ],
+  "summary": {"total": 2, "queued": 1, "failed": 1}
+}
+```
+
+Per-host availability, Compose capability, revision lookup, project-name
+collision, and queue checks run independently. A failure on one host does not
+cancel the others. The single `agent_id` shape remains
+`{"deployment": …, "command": …, "summary": …}`.
+
 The project name is unique per host among active Sextant deployments and must
 not collide with an external Compose project. Down/restart/pull use the active
 deployment when no revision is supplied. `remove_volumes` only affects `down`
 and is never enabled by default.
+
+Deployment objects expose `compose_config_hash`, `config_drift`, and `drift`.
+The server captures the Compose config-hash baseline from the active
+deployment's Compose-managed containers when they agree; a later mismatch sets
+`config_drift`/`drift` so the UI can badge the deployment.
 
 The command carries only the deployment/stack IDs, revision hash, and project
 name. The agent downloads the exact revision bundle:

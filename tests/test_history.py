@@ -266,7 +266,7 @@ def test_old_database_without_history_table_migrates(tmp_path):
 
     assert table is not None
     assert index is not None
-    assert version == 10
+    assert version == 11
 
 
 def test_history_without_table_returns_empty_list(client, admin, app):
