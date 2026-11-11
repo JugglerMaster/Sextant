@@ -108,7 +108,7 @@ The path agent ID and token must belong together. Enrollment uses a one-time enr
 | Method | Path | Role | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/api/dashboard` | any | Stats + all agents with latest telemetry |
-| `GET` | `/api/events` | any | SSE stream: initial dashboard snapshot, then one every 5 seconds |
+| `GET` | `/api/events` | any | SSE stream: immediate dashboard snapshot, then change-driven updates |
 | `GET` | `/api/agents/{id}` | any | One agent + latest 50 commands |
 | `GET` | `/api/agents/{id}/history?hours=24&points=200` | any | Downsampled telemetry history (1–720 hours, 10–1000 points) |
 | `PATCH` | `/api/agents/{id}` | admin | Edit tags, notes, watched services, action policy |
@@ -131,16 +131,36 @@ Both streams use the normal session cookie (`rc_session`) and return
 `connect-src 'self'`. Heartbeat comment lines are sent every 15 seconds.
 
 `GET /api/events` sends the complete dashboard payload (identical to
-`GET /api/dashboard`) as the first `dashboard` event, then repeats it every 5
-seconds. The browser dashboard uses `EventSource` and falls back to the previous
-10-second polling if the stream fails or is unavailable. The stream is paused
-when the tab is hidden and reconnected when it becomes visible.
+`GET /api/dashboard`) as the first `dashboard` event. After that it is
+change-driven: agent enrollment/heartbeat, command queue/cancel/retry/result,
+alert actions, agent/profile changes, and similar dashboard mutations wake the
+stream and cause a new `dashboard` event. A bounded safety refresh (about every
+10 seconds) re-emits the payload even when no request changed state so
+time-derived fields such as `online`/`offline` and `server_time` stay current.
+Comment keep-alives are sent every 15 seconds.
+
+All streams in one server process share an in-process revision counter and
+snapshot cache: clients at the same revision reuse one dashboard build instead
+of rebuilding per client. This is single-node state; it is not coordinated
+across multiple server processes or replicas.
+
+The signed session cookie is revalidated against the `sessions` and `users`
+tables every few seconds while the stream is open. If the session is revoked,
+expires, the user is disabled, or `session_version` changes, the server sends a
+final `auth` event and closes the stream. The browser closes its `EventSource`
+and returns to the login view rather than reconnecting. If the stream fails for
+any other reason, the browser falls back to the 10-second dashboard polling.
+The stream is paused when the tab is hidden and reconnected when it becomes
+visible.
 
 ```text
 event: dashboard
 data: {"server_time":"…","stats":{…},"agents":[…]}
 
 : keep-alive
+
+event: auth
+data: {"authenticated":false}
 ```
 
 `GET /api/commands/{id}/events` requires operator access. The first event is

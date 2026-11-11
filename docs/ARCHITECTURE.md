@@ -103,6 +103,18 @@ Agent authentication is separate: each agent has a 256-bit bearer token. The dat
 
 Agents report a stable machine identity (Windows `MachineGuid`, Linux `/etc/machine-id`, or a host/MAC fallback). Re-enrolling the same machine rotates credentials on the existing agent row instead of creating a duplicate, preserving command history and admin-managed policy.
 
+## Live dashboard updates
+
+`GET /api/events` is a change-driven SSE stream backed by a small in-process dashboard state object:
+
+- State-changing endpoints (agent enrollment/heartbeat, command queue/cancel/retry/result, alert acknowledge/snooze/clear, agent patch/delete/token rotation, profile changes, and related dashboard mutations) increment a thread-safe revision counter after their database commit. The notify call is safe from FastAPI sync endpoints running in threadpool workers.
+- The first dashboard snapshot is sent immediately. Afterwards the stream emits a new snapshot only when the revision changes, and wakes all waiting clients when a mutation occurs.
+- A bounded safety refresh (about 10 seconds) re-emits the payload even without a mutation so time-derived fields such as `online`/`offline` and `server_time` stay current. Comment keep-alives are sent every 15 seconds.
+- The revision cache and an async build lock are shared by every stream in the process, so N clients at the same revision perform one dashboard build rather than N builds. There is no Redis or other dependency.
+- While the stream is open, the same signed-cookie/session/user validation used by normal authenticated requests is re-run every few seconds. Revocation, expiry, a disabled user, or a changed `session_version` produces a final `auth` event and closes the stream.
+
+This is deliberately single-node state. It is not shared or coordinated across multiple server processes or replicas; each process would maintain its own revision and cache. Running multiple control-plane replicas is outside the current deployment model.
+
 ## Agent policy
 
 Admins can edit an agent's display name, tags, notes, watched services, and three action permissions (shell, power, service). The heartbeat response carries the current policy; the agent applies it before executing any commands in that heartbeat.

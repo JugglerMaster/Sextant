@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import queue
+import threading
+import time
 
 from fastapi.testclient import TestClient
 
+import runner_control.server as server_module
 from tests.helpers import enroll_agent, headers, heartbeat, login
 
 
@@ -22,6 +27,39 @@ def _next_event(lines) -> tuple[str | None, dict | None]:
         elif line.startswith("data:"):
             data.append(line[5:].lstrip())
     return None, None
+
+
+def _read_dashboard_events(app, cookie: str, events: queue.Queue, count: int) -> None:
+    """Read ``count`` events from a fresh client in a background thread."""
+    try:
+        with TestClient(app) as stream_client:
+            stream_client.cookies.set("rc_session", cookie)
+            with stream_client.stream("GET", "/api/events") as response:
+                lines = response.iter_lines()
+                for _ in range(count):
+                    events.put(_next_event(lines))
+    except Exception as exc:  # surface reader failures to the test
+        events.put(("error", {"detail": str(exc)}))
+
+
+def _read_dashboard_until_closed(app, cookie: str, events: queue.Queue) -> None:
+    try:
+        with TestClient(app) as stream_client:
+            stream_client.cookies.set("rc_session", cookie)
+            with stream_client.stream("GET", "/api/events") as response:
+                lines = response.iter_lines()
+                while True:
+                    event, payload = _next_event(lines)
+                    if event is None and payload is None:
+                        events.put(("closed", None))
+                        return
+                    events.put((event, payload))
+    except Exception as exc:
+        events.put(("error", {"detail": str(exc)}))
+
+
+def _session_id(admin) -> str:
+    return str(admin["client"].app.state.db.list_sessions(admin["user"]["id"])[0]["id"])
 
 
 def test_dashboard_sse_requires_authentication(client):
@@ -44,6 +82,127 @@ def test_dashboard_sse_emits_dashboard_payload(client, admin):
     assert set(payload["stats"]) == set(dashboard["stats"])
     assert payload["stats"]["total"] == 1
     assert payload["agents"][0]["name"] == "test-box"
+
+
+def test_dashboard_sse_emits_after_heartbeat_without_waiting_for_interval(app, client, admin):
+    agent = enroll_agent(admin)
+    cookie = client.cookies.get("rc_session")
+    events: queue.Queue = queue.Queue()
+    reader = threading.Thread(target=_read_dashboard_events, args=(app, cookie, events, 2), daemon=True)
+    reader.start()
+
+    first_event, first_payload = events.get(timeout=3)
+    assert first_event == "dashboard"
+    assert first_payload is not None
+    assert first_payload["stats"]["total"] == 1
+
+    started = time.monotonic()
+    heartbeat(admin, agent)
+    event, payload = events.get(timeout=4)
+    elapsed = time.monotonic() - started
+
+    reader.join(timeout=2)
+    assert not reader.is_alive()
+    assert event == "dashboard"
+    assert payload is not None
+    assert payload["agents"][0]["cpu_pct"] == 22.5
+    # The old implementation only refreshed every five seconds.
+    assert elapsed < 4.0
+
+
+def test_dashboard_sse_does_not_repeat_unchanged_revision(app, client, admin):
+    enroll_agent(admin)
+    cookie = client.cookies.get("rc_session")
+    events: queue.Queue = queue.Queue()
+    reader = threading.Thread(target=_read_dashboard_events, args=(app, cookie, events, 2), daemon=True)
+    reader.start()
+
+    first_event, _ = events.get(timeout=3)
+    assert first_event == "dashboard"
+
+    time.sleep(1.5)
+    assert events.empty(), "unchanged revision should not emit another dashboard event"
+
+    # Wake the stream once so the reader can finish and close cleanly.
+    app.state.dashboard_state.notify()
+    event, payload = events.get(timeout=3)
+    reader.join(timeout=2)
+    assert not reader.is_alive()
+    assert event == "dashboard"
+    assert payload is not None
+
+
+def test_dashboard_cache_builds_once_per_revision(app):
+    state = app.state.dashboard_state
+    calls: list[int] = []
+
+    def build() -> dict:
+        calls.append(1)
+        return {"build": len(calls)}
+
+    async def exercise() -> None:
+        state.notify()
+        revision = state.revision()
+        first = await state.payload(revision, build)
+        second = await state.payload(revision, build)
+        assert first is second
+        assert len(calls) == 1
+
+        state.notify()
+        next_revision = state.revision()
+        results = await asyncio.gather(
+            state.payload(next_revision, build),
+            state.payload(next_revision, build),
+            state.payload(next_revision, build),
+        )
+        assert all(result is results[0] for result in results)
+        assert len(calls) == 2
+
+    asyncio.run(exercise())
+
+
+def test_dashboard_stream_closes_when_session_revoked(app, client, admin, monkeypatch):
+    monkeypatch.setattr(server_module, "DASHBOARD_AUTH_RECHECK_SECONDS", 0.2)
+    cookie = client.cookies.get("rc_session")
+    events: queue.Queue = queue.Queue()
+    reader = threading.Thread(target=_read_dashboard_until_closed, args=(app, cookie, events), daemon=True)
+    reader.start()
+
+    event, payload = events.get(timeout=3)
+    assert event == "dashboard"
+    assert payload is not None
+
+    app.state.db.revoke_session(_session_id(admin))
+    event, payload = events.get(timeout=3)
+    assert event == "auth"
+    assert payload == {"authenticated": False}
+    assert events.get(timeout=3) == ("closed", None)
+    reader.join(timeout=2)
+    assert not reader.is_alive()
+
+
+def test_dashboard_stream_closes_when_session_expires(app, client, admin, monkeypatch):
+    monkeypatch.setattr(server_module, "DASHBOARD_AUTH_RECHECK_SECONDS", 0.2)
+    cookie = client.cookies.get("rc_session")
+    events: queue.Queue = queue.Queue()
+    reader = threading.Thread(target=_read_dashboard_until_closed, args=(app, cookie, events), daemon=True)
+    reader.start()
+
+    event, _ = events.get(timeout=3)
+    assert event == "dashboard"
+
+    session_id = _session_id(admin)
+    with app.state.db.connection() as conn:
+        conn.execute(
+            "UPDATE sessions SET expires_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00Z", session_id),
+        )
+    event, payload = events.get(timeout=3)
+    assert event == "auth"
+    assert payload == {"authenticated": False}
+    assert events.get(timeout=3) == ("closed", None)
+    reader.join(timeout=2)
+    assert not reader.is_alive()
 
 
 def test_command_events_require_operator_and_close_on_terminal_state(app, client, admin):

@@ -619,6 +619,16 @@ function startLiveUpdates() {
       source.addEventListener("open", () => {
         if (state.eventSource === source) stopPolling();
       });
+      source.addEventListener("auth", () => {
+        if (state.eventSource !== source) return;
+        // The server revalidated the session while streaming and it is no
+        // longer valid. Close explicitly so EventSource does not reconnect,
+        // then return to the login view instead of polling a dead session.
+        source.close();
+        state.eventSource = null;
+        stopPolling();
+        showLogin("Your session expired. Sign in again.");
+      });
       source.addEventListener("error", () => {
         if (state.eventSource !== source) return;
         // EventSource retries by itself, but a failed stream may stay broken

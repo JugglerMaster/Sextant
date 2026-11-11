@@ -84,7 +84,9 @@ from .wol import normalize_mac, send_magic_packet
 logger = logging.getLogger("runner_control")
 
 SSE_HEARTBEAT_SECONDS = 15
-DASHBOARD_STREAM_SECONDS = 5
+DASHBOARD_SAFETY_REFRESH_SECONDS = 10
+DASHBOARD_AUTH_RECHECK_SECONDS = 5
+DASHBOARD_CACHE_MAX_AGE_SECONDS = 9
 COMMAND_STREAM_SECONDS = 1
 COMMAND_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 COMMAND_OUTPUT_CHUNK_BYTES = 64 * 1024
@@ -99,6 +101,100 @@ def _sse_event(event: str, payload: Any) -> str:
 
 def _sse_comment(text: str = "keep-alive") -> str:
     return f": {text}\n\n"
+
+
+class _DashboardState:
+    """In-process revision counter and shared snapshot cache.
+
+    ``notify`` is safe to call from FastAPI threadpool workers. The cache and
+    build lock are shared by every SSE client in this process; concurrent
+    clients at the same revision wait for one dashboard build instead of
+    rebuilding independently. This is deliberately single-node state.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._revision = 0
+        self._cached_revision: int | None = None
+        self._cached_payload: dict[str, Any] | None = None
+        self._cached_at = 0.0
+        self._listeners: dict[int, tuple[asyncio.Event, asyncio.AbstractEventLoop]] = {}
+        self._next_listener = 0
+        self._build_locks: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
+
+    def revision(self) -> int:
+        with self._lock:
+            return self._revision
+
+    def notify(self) -> None:
+        """Mark dashboard state dirty and wake every waiting stream."""
+        with self._lock:
+            self._revision += 1
+            listeners = list(self._listeners.values())
+        for event, loop in listeners:
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                # The stream's event loop has already closed.
+                pass
+
+    def subscribe(self) -> tuple[int, asyncio.Event]:
+        event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            key = self._next_listener
+            self._next_listener += 1
+            self._listeners[key] = (event, loop)
+        return key, event
+
+    def unsubscribe(self, key: int) -> None:
+        with self._lock:
+            self._listeners.pop(key, None)
+
+    def _build_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            lock = self._build_locks.get(loop)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._build_locks[loop] = lock
+            return lock
+
+    async def payload(
+        self,
+        revision: int,
+        build: Any,
+        *,
+        max_age: float | None = None,
+    ) -> dict[str, Any]:
+        """Return a cached or freshly built payload for ``revision``.
+
+        ``max_age`` limits how old a cached payload may be. Change-driven
+        events pass ``None`` (any payload for that revision is valid); the
+        periodic safety refresh passes the cache age limit so time-derived
+        fields are still rebuilt without every client forcing a build.
+        """
+        with self._lock:
+            cached_revision = self._cached_revision
+            cached_payload = self._cached_payload
+            cached_at = self._cached_at
+        if cached_revision == revision and cached_payload is not None:
+            if max_age is None or time.monotonic() - cached_at <= max_age:
+                return cached_payload
+        async with self._build_lock():
+            with self._lock:
+                cached_revision = self._cached_revision
+                cached_payload = self._cached_payload
+                cached_at = self._cached_at
+            if cached_revision == revision and cached_payload is not None:
+                if max_age is None or time.monotonic() - cached_at <= max_age:
+                    return cached_payload
+            payload = await asyncio.to_thread(build)
+            with self._lock:
+                self._cached_revision = revision
+                self._cached_payload = payload
+                self._cached_at = time.monotonic()
+            return payload
 
 
 def _ensure_bootstrap_admin(settings: Settings, db: Database) -> None:
@@ -234,6 +330,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     artifact_store.cleanup_temp()
     app.state.store = artifact_store
     app.state.update_cache = {"at": 0.0, "data": None}
+    dashboard_state = _DashboardState()
+    app.state.dashboard_state = dashboard_state
+
+    def notify_dashboard() -> None:
+        dashboard_state.notify()
 
     def _security_headers(response: Response, path: str) -> Response:
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -333,11 +434,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return payload
 
-    def current_user(
+    def authenticated_user(
         request: Request,
-        database: Database = Depends(get_db),
-        config: Settings = Depends(get_settings),
+        database: Database,
+        config: Settings,
     ) -> dict[str, Any]:
+        """Validate the signed cookie against the session and user rows."""
         payload = decode_session(request.cookies.get(config.cookie_name), config.secret_key)
         if payload is None:
             raise HTTPException(status_code=401, detail="Authentication required.")
@@ -365,6 +467,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         user["csrf"] = payload["csrf"]
         user["sid"] = payload["sid"]
         return user
+
+    def current_user(
+        request: Request,
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        return authenticated_user(request, database, config)
 
     def require_operator(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
         if not role_at_least(user, "operator"):
@@ -511,6 +620,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 conn=conn,
             )
             row = conn.execute("SELECT * FROM commands WHERE id = ?", (command_id,)).fetchone()
+        notify_dashboard()
         return command_to_dict(row)
 
     @app.get("/", include_in_schema=False)
@@ -888,40 +998,86 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/events")
     async def dashboard_events(
+        request: Request,
         user: dict[str, Any] = Depends(current_user),
         database: Database = Depends(get_db),
         config: Settings = Depends(get_settings),
     ) -> StreamingResponse:
         """Authenticated SSE stream of dashboard payloads.
 
-        The first event is sent immediately, then every five seconds. Comment
-        heartbeats keep proxies from idling out the connection. Closing the
-        browser or navigating away cancels the request; Starlette then closes
-        the generator.
+        The first event is sent immediately. After that the stream wakes on a
+        dashboard revision change (an agent heartbeat, command change, alert
+        action, and so on), with a bounded periodic refresh for time-derived
+        fields such as online/offline. Concurrent clients share one cached
+        build per revision. The session is revalidated while the stream is
+        open, and the stream closes if the session is revoked or invalid.
         """
         del user
 
         async def stream() -> Any:
             loop = asyncio.get_running_loop()
-            started = loop.time()
-            next_dashboard = 0.0
-            next_heartbeat = SSE_HEARTBEAT_SECONDS
-            while True:
-                elapsed = loop.time() - started
-                if elapsed >= next_dashboard:
-                    try:
-                        payload = await asyncio.to_thread(dashboard_payload, database, config)
-                    except Exception:  # keep the stream alive across transient DB errors
-                        logger.exception("Dashboard SSE refresh failed")
-                    else:
-                        yield _sse_event("dashboard", payload)
-                    next_dashboard = elapsed + DASHBOARD_STREAM_SECONDS
-                elapsed = loop.time() - started
-                if elapsed >= next_heartbeat:
-                    yield _sse_comment()
-                    next_heartbeat += SSE_HEARTBEAT_SECONDS
-                elapsed = loop.time() - started
-                await asyncio.sleep(max(0.25, min(1.0, next_dashboard - elapsed, next_heartbeat - elapsed)))
+            listener, changed = dashboard_state.subscribe()
+            last_revision = -1
+            next_refresh = loop.time() + DASHBOARD_SAFETY_REFRESH_SECONDS
+            next_heartbeat = loop.time() + SSE_HEARTBEAT_SECONDS
+            next_auth = loop.time() + DASHBOARD_AUTH_RECHECK_SECONDS
+            try:
+                while True:
+                    now = loop.time()
+                    revision = dashboard_state.revision()
+                    refresh_due = now >= next_refresh
+                    if last_revision < 0 or revision != last_revision or refresh_due:
+                        failed = False
+                        try:
+                            payload = await dashboard_state.payload(
+                                revision,
+                                lambda: dashboard_payload(database, config),
+                                max_age=(
+                                    DASHBOARD_CACHE_MAX_AGE_SECONDS if refresh_due else None
+                                ),
+                            )
+                        except Exception:  # keep the stream alive across transient DB errors
+                            failed = True
+                            logger.exception("Dashboard SSE refresh failed")
+                        else:
+                            yield _sse_event("dashboard", payload)
+                            last_revision = revision
+                        if refresh_due:
+                            next_refresh = loop.time() + (
+                                1.0 if failed else DASHBOARD_SAFETY_REFRESH_SECONDS
+                            )
+                        elif failed and last_revision < 0:
+                            # Do not retry a failing initial build in a tight loop.
+                            last_revision = revision
+
+                    now = loop.time()
+                    if now >= next_auth:
+                        try:
+                            authenticated_user(request, database, config)
+                        except HTTPException:
+                            yield _sse_event("auth", {"authenticated": False})
+                            return
+                        next_auth = loop.time() + DASHBOARD_AUTH_RECHECK_SECONDS
+
+                    now = loop.time()
+                    if now >= next_heartbeat:
+                        yield _sse_comment()
+                        next_heartbeat = loop.time() + SSE_HEARTBEAT_SECONDS
+
+                    # Clear before checking the revision so a notify between the
+                    # check and the wait cannot be lost.
+                    changed.clear()
+                    if dashboard_state.revision() != last_revision:
+                        continue
+                    now = loop.time()
+                    timeout = min(next_refresh - now, next_heartbeat - now, next_auth - now)
+                    if timeout > 0:
+                        try:
+                            await asyncio.wait_for(changed.wait(), timeout)
+                        except asyncio.TimeoutError:
+                            pass
+            finally:
+                dashboard_state.unsubscribe(listener)
 
         return StreamingResponse(
             stream(),
@@ -982,6 +1138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             updated = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
             states = database.get_alert_states(agent_id, conn=conn)
             decorated = agent_to_dict(updated, config, alert_states=states)["alerts"]
+        notify_dashboard()
         return {"alert": next(item for item in decorated if item["key"] == alert_key)}
 
     @app.post("/api/agents/{agent_id}/alerts/{alert_key}/snooze")
@@ -1019,6 +1176,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             updated = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
             states = database.get_alert_states(agent_id, conn=conn)
             decorated = agent_to_dict(updated, config, alert_states=states)["alerts"]
+        notify_dashboard()
         return {"alert": next(item for item in decorated if item["key"] == alert_key)}
 
     @app.delete("/api/agents/{agent_id}/alerts/{alert_key}")
@@ -1046,6 +1204,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ip=client_ip(request, config.trust_proxy),
                 conn=conn,
             )
+        notify_dashboard()
         return Response(status_code=204)
 
     @app.get("/api/agents/{agent_id}/history")
@@ -1176,6 +1335,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 conn=conn,
             )
             updated = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        notify_dashboard()
         return agent_to_dict(updated, config, alert_states=database.get_alert_states(agent_id))
 
     @app.post("/api/agents/{agent_id}/commands")
@@ -1220,6 +1380,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 conn=conn,
             )
             updated = conn.execute("SELECT * FROM commands WHERE id = ?", (command_id,)).fetchone()
+        notify_dashboard()
         return command_to_dict(updated)
 
     @app.post("/api/commands/{command_id}/retry")
@@ -1748,6 +1909,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ip=client_ip(request, config.trust_proxy),
                 conn=conn,
             )
+        notify_dashboard()
         return {"agent_id": agent_id, "agent_token": token}
 
     @app.delete("/api/agents/{agent_id}")
@@ -1771,6 +1933,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ip=client_ip(request, config.trust_proxy),
                 conn=conn,
             )
+        notify_dashboard()
         return Response(status_code=204)
 
     # ---- Agent-facing API -------------------------------------------------
@@ -1914,6 +2077,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ip=client_ip(request, config.trust_proxy),
                     conn=conn,
                 )
+        notify_dashboard()
         return {
             "agent_id": agent_id,
             "agent_token": agent_token,
@@ -2090,6 +2254,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "created_at": row["created_at"],
                         }
                     )
+        notify_dashboard()
         if secrets.randbelow(100) == 0:
             if config.telemetry_history:
                 database.prune_telemetry(config.telemetry_retention_days)
@@ -2251,6 +2416,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=404, detail="Command not found.")
             conn.execute("UPDATE agents SET last_seen = ? WHERE id = ?", (utcnow_iso(), agent_id))
             updated = conn.execute("SELECT * FROM commands WHERE id = ?", (command_id,)).fetchone()
+        notify_dashboard()
         return {"command": command_to_dict(updated)}
 
     # ---- Package store (Tier 0) ---------------------------------------
@@ -2599,6 +2765,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             detail={"rules": rules},
             ip=client_ip(request, config.trust_proxy),
         )
+        notify_dashboard()
         return {"rules": rules}
 
     @app.post("/api/agents/{agent_id}/packages/sync")
@@ -2682,6 +2849,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             detail={"slug": payload.slug, "settings": settings},
             ip=client_ip(request, config.trust_proxy),
         )
+        notify_dashboard()
         return {
             "id": row["id"],
             "slug": row["slug"],
@@ -2720,6 +2888,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             detail={"slug": row["slug"], "settings": settings},
             ip=client_ip(request, config.trust_proxy),
         )
+        notify_dashboard()
         return {
             "id": row["id"],
             "slug": row["slug"],
@@ -2754,6 +2923,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             detail={"slug": existing["slug"]},
             ip=client_ip(request, config.trust_proxy),
         )
+        notify_dashboard()
         return {"deleted": True, "id": existing["id"]}
 
     @app.post("/api/profiles/{profile_id}/reset")
@@ -2785,6 +2955,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             detail={"slug": existing["slug"]},
             ip=client_ip(request, config.trust_proxy),
         )
+        notify_dashboard()
         return {"reset": True, "id": existing["id"], "revision": int(row["revision"]) if row else 0}
 
     @app.get("/api/profile-tags")
@@ -2823,6 +2994,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             detail={"profile_id": profile["id"], "agents": changed},
             ip=client_ip(request, config.trust_proxy),
         )
+        notify_dashboard()
         return {"tag": tag, "profile_id": profile["id"], "agents": changed}
 
     @app.delete("/api/profile-tags/{tag}")
@@ -2841,6 +3013,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             detail={"deleted": deleted},
             ip=client_ip(request, config.trust_proxy),
         )
+        notify_dashboard()
         return {"deleted": deleted, "tag": tag}
 
     @app.post("/api/remote-install/test")

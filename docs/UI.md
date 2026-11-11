@@ -70,7 +70,7 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 - CSV export for the fleet and per-agent package inventory.
 - Trends tab with 24h/7d detail charts and a merged command/alert timeline.
 - Light/dark theme toggle and a Ctrl/Cmd+K command palette.
-- Live dashboard updates over SSE with polling fallback.
+- Live dashboard updates over change-driven SSE with polling fallback.
 
 ---
 
@@ -114,7 +114,7 @@ Priority: History export next.
 
 ### 6. Live behavior
 
-- The dashboard streams `GET /api/events` over `EventSource` and falls back to the previous 10-second dashboard polling if SSE is unavailable or fails. The stream closes while the document is hidden and reconnects on visibility.
+- The dashboard streams `GET /api/events` over `EventSource`. The server sends an immediate snapshot, then a new dashboard event only when dashboard state changes (heartbeat, command, alert, agent/profile update), plus a roughly 10-second safety refresh for time-derived fields such as online/offline and server time. Clients at the same revision share one server-side build. If the stream fails, the UI falls back to the previous 10-second dashboard polling. If the server sends an `auth` event because the session was revoked, expired, disabled, or its version changed, the UI closes the stream without reconnecting and shows the login view. The stream closes while the document is hidden and reconnects on visibility.
 - Command waits use `GET /api/commands/{id}/events` when available, with the existing poll as fallback. The terminal appends `output` events live, styling stdout and stderr separately. On reconnect the server replays stored chunks (bounded); the UI de-duplicates by `(stream, seq)`. When the terminal `command` event arrives, the canonical final stdout/stderr is rendered without repeating text already streamed. Chunk delivery is best-effort and the final result remains authoritative.
 - Remaining: virtualization for very large tables (100+ agents).
 
@@ -135,4 +135,4 @@ Priority: History export next.
 | Alert center | Implemented with acknowledge/snooze/clear |
 | Bulk actions | Implemented: refresh, wake, reboot, shutdown, service, profile |
 | Saved views/export | CSV export and named fleet views stored in local storage |
-| SSE/WebSocket | Dashboard SSE with polling fallback; command status/result SSE with live stdout/stderr chunks, replay, and poll fallback |
+| SSE/WebSocket | Change-driven dashboard SSE with shared snapshot cache, periodic safety refresh, session revalidation, and polling fallback; command status/result SSE with live stdout/stderr chunks, replay, and poll fallback |
