@@ -58,7 +58,10 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 - Remote install page.
 - Interactive tables (Packages, Startup, Audit) with search, sort, row counts, and pagination.
 - History search and command count.
+- Services search, status filter, row count, and bounded show-more paging.
+- Users search (username, display name, email, role, source) with a visible row count.
 - Fleet filters: status, profile, and tag (persisted in local storage).
+- Named fleet saved views stored in local storage.
 - 24-hour CPU/memory/disk/GPU sparklines in the drawer.
 - Drawer focus trap, focus return to the trigger, and sortable-header `aria-sort` markers.
 - Cadence-aware stale badges for heartbeat and inventory age.
@@ -72,14 +75,14 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 
 ### 1. Table controls
 
-Implemented for Packages, Startup, and Audit with search, sortable columns, row counts, and pagination. History has search and counts. Remaining:
+Implemented for Packages, Startup, and Audit with search, sortable columns, row counts, and pagination. Services has search, a status filter, counts, and bounded show-more paging. Users has live search and a row count. History has search and counts. Remaining:
 
-- pagination/virtualization for Services and Users;
+- full pagination/virtualization for Services and Users;
 - sort/pagination for History command details;
 - persistent filters per tab;
 - CSV/JSON export for tables.
 
-Priority: Services and Users last; History export next.
+Priority: History export next.
 
 ### 2. Data freshness
 
@@ -89,10 +92,10 @@ Priority: Services and Users last; History export next.
 
 ### 3. Fleet UX
 
-- Status/profile/tag filters and persistence are implemented.
+- Status/profile/tag filters, persistence, and named saved views are implemented.
 - Bulk select with refresh-telemetry and wake is implemented.
 - Alert center lists current alerts and links to the machine.
-- Remaining: saved named views, profile badges, alert acknowledge/snooze, and bulk power/service/profile actions.
+- Remaining: profile badges, alert acknowledge/snooze, and bulk power/service/profile actions.
 
 ### 4. History and charts
 
@@ -118,11 +121,11 @@ Priority: Services and Users last; History export next.
 | Package inventory + rule editor | Implemented |
 | Freshness labels in Packages | Implemented |
 | Freshness on cards/drawer | Implemented with cadence + stale badges |
-| Fleet status/profile/tag filters | Implemented and persisted |
-| Table sort/pagination | Implemented for Packages, Startup, Audit; partial for History/Services/Users |
+| Fleet status/profile/tag filters | Implemented and persisted; named saved views in local storage |
+| Table sort/pagination | Implemented for Packages, Startup, Audit; Services bounded show-more; Users search/count; History search/count |
 | Charts/sparklines | 24h sparklines implemented; detail charts pending |
 | Accessibility pass | Partial (focus trap/return, aria-sort); remaining items listed |
 | Alert center | Implemented (acknowledge/snooze pending) |
 | Bulk actions | Implemented (refresh/wake); power/service/profile bulk pending |
-| Saved views/export | CSV export implemented; named saved views pending |
+| Saved views/export | CSV export implemented; named fleet views stored in local storage |
 | SSE/WebSocket | Pending |

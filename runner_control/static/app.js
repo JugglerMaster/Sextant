@@ -23,11 +23,16 @@ const state = {
   remoteJobId: null,
   remoteTimer: null,
   fleetFilters: { status: "all", profile: "", tag: "" },
+  savedViews: [],
   selectedAgents: new Set(),
   drawerTrigger: null,
+  userSearch: "",
 };
 
 const $ = (id) => document.getElementById(id);
+const SERVICE_PAGE_SIZE = 50;
+const SERVICE_STATUS_FILTERS = ["all", "running", "stopped", "failed", "watched"];
+const FLEET_STATUS_VALUES = ["all", "online", "offline", "alerts"];
 const PAGE_META = {
   overview: ["Fleet", "Live machines and health at a glance."],
   wake: ["Wake targets", "Send Wake-on-LAN packets to machines without agents."],
@@ -1077,44 +1082,104 @@ function renderGpu(body) {
   body.append(section("Workload", "Interpretation", h("p", { class: "form-hint" }, "Sustained high GPU utilization with high VRAM use can indicate AI workloads or mining. Correlate with the process list and service state before acting. GPU process data comes from nvidia-smi.")));
 }
 
+function serviceFilterState(agentId) {
+  let filters = state.serviceFilters[agentId];
+  if (!filters || typeof filters !== "object") {
+    filters = { search: typeof filters === "string" ? filters : "", status: "all", limit: SERVICE_PAGE_SIZE };
+    state.serviceFilters[agentId] = filters;
+  }
+  if (typeof filters.search !== "string") filters.search = "";
+  if (!SERVICE_STATUS_FILTERS.includes(filters.status)) filters.status = "all";
+  if (!Number.isFinite(filters.limit) || filters.limit < SERVICE_PAGE_SIZE) filters.limit = SERVICE_PAGE_SIZE;
+  return filters;
+}
+
+function filteredServices(agent, filters) {
+  const query = String(filters.search || "").trim().toLowerCase();
+  const statusFilter = filters.status || "all";
+  return (agent.services || []).filter((service) => {
+    const status = String(service.status || "unknown").toLowerCase();
+    if (statusFilter === "watched" && !service.watched) return false;
+    if (["running", "stopped", "failed"].includes(statusFilter) && status !== statusFilter) return false;
+    if (!query) return true;
+    return `${service.name || ""} ${service.display_name || ""} ${status} ${service.startup || ""}`
+      .toLowerCase()
+      .includes(query);
+  });
+}
+
 function renderServices(body) {
   const agent = state.detailAgent;
   const services = agent.services || [];
-  const filterValue = state.serviceFilters[agent.id] || "";
-  const list = h("div", { class: "service-list" });
-  const toolbar = h(
-    "div",
-    { class: "section-toolbar" },
-    h("p", {}, `${services.length} services reported. Monitored services are marked.`),
-    h("input", { class: "mini-search", type: "search", placeholder: "Filter services", value: filterValue }),
+  const filters = serviceFilterState(agent.id);
+  const list = h("div", { class: "service-list", id: "service-filter-list" });
+  const count = h("p", { class: "form-hint", id: "service-filter-count", "aria-live": "polite" });
+  const search = h("input", {
+    class: "mini-search",
+    id: "service-filter-search",
+    type: "search",
+    placeholder: "Filter services",
+    value: filters.search,
+    "aria-label": "Filter services",
+  });
+  const status = h(
+    "select",
+    { class: "mini-search", id: "service-filter-status", "aria-label": "Filter services by status" },
+    ...[
+      ["all", "All statuses"],
+      ["running", "Running"],
+      ["stopped", "Stopped"],
+      ["failed", "Failed"],
+      ["watched", "Watched"],
+    ].map(([value, label]) => h("option", { value, selected: value === filters.status }, label)),
   );
-  const input = toolbar.querySelector("input");
-  const draw = () => {
-    state.serviceFilters[agent.id] = input.value;
-    renderServiceList(list, agent, input.value);
-    if (input.value) input.focus();
+  const moreHost = h("div", { class: "section-toolbar" });
+  const toolbar = h("div", { class: "section-toolbar service-toolbar" }, search, status, count);
+  const draw = (focusSearch = false) => {
+    filters.search = search.value;
+    filters.status = status.value;
+    const matches = filteredServices(agent, filters);
+    renderServiceList(list, agent, filters);
+    const shown = Math.min(matches.length, filters.limit);
+    count.textContent = `${matches.length} of ${services.length} services${matches.length > shown ? ` · showing ${shown}` : ""}`;
+    clear(moreHost);
+    if (matches.length > shown) {
+      moreHost.append(
+        button("Show more", "button-ghost button-small", () => {
+          filters.limit += SERVICE_PAGE_SIZE;
+          draw();
+        }),
+      );
+    }
+    if (focusSearch) search.focus();
   };
-  input.addEventListener("input", draw);
-  body.append(section("Services", "Service control", toolbar, list));
-  renderServiceList(list, agent, filterValue);
+  search.addEventListener("input", () => {
+    filters.limit = SERVICE_PAGE_SIZE;
+    draw(true);
+  });
+  status.addEventListener("change", () => {
+    filters.limit = SERVICE_PAGE_SIZE;
+    draw();
+  });
+  body.append(section("Services", "Service control", toolbar, list, moreHost));
+  draw();
 }
 
 function serviceStartupEnabled(startup) {
   return /auto|enabled|automatic/i.test(String(startup || ""));
 }
 
-function renderServiceList(container, agent, filter = "") {
+function renderServiceList(container, agent, filters = {}) {
+  const normalized = typeof filters === "string" ? { search: filters, status: "all" } : filters;
   clear(container);
-  const query = filter.trim().toLowerCase();
-  const services = (agent.services || []).filter((service) =>
-    !query || `${service.name} ${service.display_name || ""} ${service.status}`.toLowerCase().includes(query),
-  );
+  const services = filteredServices(agent, normalized);
   if (!services.length) {
     container.append(h("div", { class: "empty-inline" }, "No services match that filter."));
     return;
   }
+  const limit = Number.isFinite(normalized.limit) ? normalized.limit : SERVICE_PAGE_SIZE;
   const canAct = state.permissions.operate && agent.online && agent.policy?.allow_service !== false;
-  for (const service of services) {
+  for (const service of services.slice(0, limit)) {
     const status = String(service.status || "unknown").toLowerCase();
     const kind = status === "running" ? "online" : status === "failed" ? "critical" : "neutral";
     const startup = String(service.startup || "");
@@ -1878,53 +1943,88 @@ async function loadAudit() {
   host.append(interactiveTable(table, { placeholder: "Filter audit", pageSize: 50 }));
 }
 
+function userRow(user) {
+  const select = h(
+    "select",
+    { class: "input", "aria-label": `Role for ${user.username}` },
+    ...[["viewer", "Viewer"], ["operator", "Operator"], ["admin", "Administrator"]].map(([value, label]) =>
+      h("option", { value, selected: value === user.role }, label),
+    ),
+  );
+  select.addEventListener("change", () => updateUserRole(user, select));
+  return h(
+    "div",
+    { class: "list-row" },
+    h(
+      "div",
+      { class: "list-row-main" },
+      h("strong", {}, user.display_name || user.username),
+      h(
+        "small",
+        {},
+        `${user.username} · ${user.source === "ad" ? "Active Directory" : "Local"} · last login ${user.last_login_at ? relativeTime(user.last_login_at) : "never"}`,
+      ),
+    ),
+    h(
+      "div",
+      { class: "user-row-actions" },
+      statusPill(user.active ? "active" : "disabled", user.active ? "online" : "warning"),
+      h("span", { class: "tag" }, `${user.session_count || 0} session${user.session_count === 1 ? "" : "s"}`),
+      select,
+      button("Sessions", "button-ghost button-small", () => openSessionsDialog(user)),
+      user.source === "local"
+        ? button("Reset password", "button-ghost button-small", () => openResetPasswordDialog(user))
+        : null,
+      state.user?.id === user.id
+        ? null
+        : button(user.active ? "Disable" : "Enable", user.active ? "button-danger button-small" : "button-secondary button-small", () =>
+            setUserActive(user, !user.active),
+          ),
+    ),
+  );
+}
+
+function userMatchesQuery(user, query) {
+  if (!query) return true;
+  return [user.username, user.display_name, user.email, user.role, user.source]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+    .includes(query);
+}
+
 async function loadUsers() {
   const container = $("user-list");
   try {
     const data = await api("/api/users");
+    const users = data.users || [];
     clear(container);
-    for (const user of data.users) {
-      const select = h(
-        "select",
-        { class: "input", "aria-label": `Role for ${user.username}` },
-        ...[["viewer", "Viewer"], ["operator", "Operator"], ["admin", "Administrator"]].map(([value, label]) =>
-          h("option", { value, selected: value === user.role }, label),
-        ),
-      );
-      select.addEventListener("change", () => updateUserRole(user, select));
-      container.append(
-        h(
-          "div",
-          { class: "list-row" },
-          h(
-            "div",
-            { class: "list-row-main" },
-            h("strong", {}, user.display_name || user.username),
-            h(
-              "small",
-              {},
-              `${user.username} · ${user.source === "ad" ? "Active Directory" : "Local"} · last login ${user.last_login_at ? relativeTime(user.last_login_at) : "never"}`,
-            ),
-          ),
-          h(
-            "div",
-            { class: "user-row-actions" },
-            statusPill(user.active ? "active" : "disabled", user.active ? "online" : "warning"),
-            h("span", { class: "tag" }, `${user.session_count || 0} session${user.session_count === 1 ? "" : "s"}`),
-            select,
-            button("Sessions", "button-ghost button-small", () => openSessionsDialog(user)),
-            user.source === "local"
-              ? button("Reset password", "button-ghost button-small", () => openResetPasswordDialog(user))
-              : null,
-            state.user?.id === user.id
-              ? null
-              : button(user.active ? "Disable" : "Enable", user.active ? "button-danger button-small" : "button-secondary button-small", () =>
-                  setUserActive(user, !user.active),
-                ),
-          ),
-        ),
-      );
-    }
+    const search = h("input", {
+      class: "mini-search",
+      id: "user-search",
+      type: "search",
+      placeholder: "Search users",
+      value: state.userSearch,
+      "aria-label": "Search users",
+    });
+    const count = h("span", { class: "form-hint", id: "user-count", "aria-live": "polite" });
+    const rows = h("div", { class: "list-stack" });
+    container.append(h("div", { class: "section-toolbar user-toolbar" }, search, count), rows);
+
+    const draw = () => {
+      state.userSearch = search.value;
+      const query = state.userSearch.trim().toLowerCase();
+      const filtered = users.filter((user) => userMatchesQuery(user, query));
+      clear(rows);
+      count.textContent = `${filtered.length} of ${users.length} users`;
+      if (!filtered.length) {
+        rows.append(h("div", { class: "empty-inline" }, "No users match that search."));
+        return;
+      }
+      for (const user of filtered) rows.append(userRow(user));
+    };
+    search.addEventListener("input", draw);
+    draw();
   } catch (error) {
     clear(container);
     container.append(h("div", { class: "empty-inline" }, error.message));
@@ -2476,7 +2576,7 @@ function loadFleetFilters() {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
       state.fleetFilters = {
-        status: ["all", "online", "offline", "alerts"].includes(parsed.status) ? parsed.status : "all",
+        status: FLEET_STATUS_VALUES.includes(parsed.status) ? parsed.status : "all",
         profile: typeof parsed.profile === "string" ? parsed.profile : "",
         tag: typeof parsed.tag === "string" ? parsed.tag : "",
       };
@@ -2486,9 +2586,102 @@ function loadFleetFilters() {
   }
 }
 
+function loadSavedViews() {
+  try {
+    const raw = localStorage.getItem("rc.savedViews");
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    state.savedViews = parsed
+      .filter((view) => view && typeof view.name === "string" && view.name.trim())
+      .map((view) => ({
+        name: view.name.trim(),
+        status: FLEET_STATUS_VALUES.includes(view.status) ? view.status : "all",
+        profile: typeof view.profile === "string" ? view.profile : "",
+        tag: typeof view.tag === "string" ? view.tag : "",
+        search: typeof view.search === "string" ? view.search : "",
+      }));
+  } catch (_error) {
+    // Ignore corrupt storage.
+  }
+}
+
+function persistSavedViews() {
+  try {
+    localStorage.setItem("rc.savedViews", JSON.stringify(state.savedViews));
+  } catch (_error) {
+    // Storage may be unavailable in private contexts.
+  }
+}
+
+function updateSavedViewControls() {
+  const select = $("saved-view-select");
+  const remove = $("delete-view");
+  if (remove) remove.disabled = !select || !select.value;
+}
+
+function renderSavedViews(selected = "") {
+  const select = $("saved-view-select");
+  if (!select) return;
+  clear(select);
+  select.append(h("option", { value: "" }, "No saved view"));
+  for (const view of state.savedViews) select.append(h("option", { value: view.name }, view.name));
+  select.value = state.savedViews.some((view) => view.name === selected) ? selected : "";
+  updateSavedViewControls();
+}
+
+function saveCurrentFleetView() {
+  const answer = window.prompt("Name this saved view", "");
+  if (answer === null) return;
+  const name = answer.trim();
+  if (!name) {
+    toast("Saved view needs a name.", "warn");
+    return;
+  }
+  const view = {
+    name,
+    status: state.fleetFilters.status,
+    profile: state.fleetFilters.profile,
+    tag: state.fleetFilters.tag,
+    search: state.search,
+  };
+  const index = state.savedViews.findIndex((item) => item.name === name);
+  if (index >= 0) state.savedViews[index] = view;
+  else state.savedViews.push(view);
+  persistSavedViews();
+  renderSavedViews(name);
+  toast(`Saved view "${name}".`);
+}
+
+function applySavedView(name) {
+  const view = state.savedViews.find((item) => item.name === name);
+  if (!view) {
+    updateSavedViewControls();
+    return;
+  }
+  state.fleetFilters = { status: view.status, profile: view.profile, tag: view.tag };
+  state.search = view.search;
+  $("search-input").value = view.search;
+  saveFleetFilters();
+  renderAgentGrid();
+  updateSavedViewControls();
+}
+
+function deleteSavedView() {
+  const select = $("saved-view-select");
+  const name = select ? select.value : "";
+  if (!name) return;
+  state.savedViews = state.savedViews.filter((view) => view.name !== name);
+  persistSavedViews();
+  renderSavedViews();
+  toast(`Deleted saved view "${name}".`);
+}
+
 async function init() {
   loadFleetFilters();
+  loadSavedViews();
   wireEvents();
+  renderSavedViews();
   try {
     const config = await api("/api/auth/config");
     if (config.ldap_enabled) $("login-mode-wrap").hidden = false;
@@ -2596,8 +2789,14 @@ function wireEvents() {
     state.search = "";
     $("search-input").value = "";
     saveFleetFilters();
+    renderSavedViews();
     renderAgentGrid();
   });
+  $("saved-view-select").addEventListener("change", (event) => {
+    applySavedView(event.target.value);
+  });
+  $("save-view").addEventListener("click", saveCurrentFleetView);
+  $("delete-view").addEventListener("click", deleteSavedView);
   $("export-agents").addEventListener("click", () => {
     window.location.href = "/api/export/agents.csv";
   });

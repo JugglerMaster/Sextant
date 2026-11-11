@@ -56,7 +56,18 @@ const agent = {
   uptime_seconds: 90000,
   disks: [{ mount: "C:", total: 1000, used: 850, free: 150, percent: 85, fs: "NTFS" }],
   gpus: [{ name: "NVIDIA RTX 4090", util_pct: 97, mem_used: 20000000000, mem_total: 25000000000, temp_c: 78 }],
-  services: [{ name: "Spooler", display_name: "Print Spooler", status: "running", startup: "Auto", watched: true }],
+  services: [
+    { name: "Spooler", display_name: "Print Spooler", status: "running", startup: "Auto", watched: true },
+    { name: "wuauserv", display_name: "Windows Update", status: "stopped", startup: "Manual", watched: false },
+    { name: "BrokenSvc", display_name: "Broken Service", status: "failed", startup: "Auto", watched: true },
+    ...Array.from({ length: 52 }, (_, index) => ({
+      name: `svc-${index + 1}`,
+      display_name: `Managed service ${index + 1}`,
+      status: index % 2 === 0 ? "running" : "stopped",
+      startup: "Auto",
+      watched: false,
+    })),
+  ],
   startup: [{ name: "Backup", command: "C:\\backup.exe", source: "HKCU Run", enabled: true }],
   extra: { cpu_model: "Ryzen 9", kernel: "10.0", gpu_processes: [{ pid: 4242, name: "python.exe", mem_used: 8000000000 }] },
   alert_count: 1,
@@ -184,11 +195,23 @@ const responses = {
           id: 2,
           username: "operator",
           display_name: "Operator One",
+          email: "operator@example.test",
           role: "operator",
           source: "local",
           active: true,
           session_count: 2,
           last_login_at: "2026-11-06T08:00:00Z",
+        },
+        {
+          id: 3,
+          username: "jdoe",
+          display_name: "Jane Doe",
+          email: "jane.doe@example.test",
+          role: "viewer",
+          source: "ad",
+          active: true,
+          session_count: 0,
+          last_login_at: null,
         },
       ],
     },
@@ -247,6 +270,63 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (window.document.getElementById("bulk-actions").hidden) throw new Error("bulk actions should be visible");
   window.document.getElementById("bulk-clear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 
+  const savedViewSelect = window.document.getElementById("saved-view-select");
+  const saveViewButton = window.document.getElementById("save-view");
+  const deleteViewButton = window.document.getElementById("delete-view");
+  if (!savedViewSelect || !saveViewButton || !deleteViewButton) throw new Error("saved view controls missing");
+  if (savedViewSelect.value !== "" || !savedViewSelect.textContent.includes("No saved view")) {
+    throw new Error("saved view default option missing");
+  }
+  const statusFilter = window.document.getElementById("filter-status");
+  const searchInput = window.document.getElementById("search-input");
+  statusFilter.value = "online";
+  statusFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
+  searchInput.value = "studio";
+  searchInput.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(10);
+  const originalPrompt = window.prompt;
+  window.prompt = () => "GPU hosts";
+  saveViewButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(10);
+  window.prompt = originalPrompt;
+  const storedViews = JSON.parse(window.localStorage.getItem("rc.savedViews") || "[]");
+  if (storedViews.length !== 1) throw new Error("saved view was not persisted");
+  const storedView = storedViews[0];
+  if (
+    storedView.name !== "GPU hosts" ||
+    storedView.status !== "online" ||
+    storedView.profile !== "" ||
+    storedView.tag !== "" ||
+    storedView.search !== "studio"
+  ) {
+    throw new Error(`saved view fields are wrong: ${JSON.stringify(storedView)}`);
+  }
+  if (!savedViewSelect.textContent.includes("GPU hosts")) throw new Error("saved view option missing");
+  if (savedViewSelect.value !== "GPU hosts") throw new Error("saved view was not selected after save");
+  if (deleteViewButton.disabled) throw new Error("delete view should be enabled for a selection");
+  statusFilter.value = "offline";
+  statusFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
+  searchInput.value = "";
+  searchInput.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(10);
+  savedViewSelect.value = "GPU hosts";
+  savedViewSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(10);
+  if (statusFilter.value !== "online") throw new Error("saved view did not restore status");
+  if (searchInput.value !== "studio") throw new Error("saved view did not restore search");
+  if (window.document.querySelectorAll("#agent-grid .agent-card").length !== 1) {
+    throw new Error("saved view did not restore filtered cards");
+  }
+  deleteViewButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(10);
+  if (JSON.parse(window.localStorage.getItem("rc.savedViews") || "[]").length !== 0) {
+    throw new Error("saved view was not deleted");
+  }
+  if (savedViewSelect.value !== "") throw new Error("saved view selection was not cleared");
+  if (!deleteViewButton.disabled) throw new Error("delete view should be disabled without a selection");
+  window.document.getElementById("filter-clear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(10);
+
   const profilesNav = window.document.querySelector('[data-page="profiles"]');
   profilesNav.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(30);
@@ -277,6 +357,53 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   await sleep(10);
   if (!window.document.getElementById("drawer-body").textContent.includes("Spooler")) {
     throw new Error("service list did not render");
+  }
+  const serviceCount = window.document.getElementById("service-filter-count");
+  if (!serviceCount || !serviceCount.textContent.includes("55 of 55 services")) {
+    throw new Error(`service count is wrong: ${serviceCount ? serviceCount.textContent : "missing"}`);
+  }
+  if (window.document.querySelectorAll("#service-filter-list .service-row").length !== 50) {
+    throw new Error("service list should be bounded to 50 rows");
+  }
+  const serviceMore = findButton(window.document.getElementById("drawer-body"), "Show more");
+  if (!serviceMore) throw new Error("service show more control missing");
+  serviceMore.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(10);
+  if (window.document.querySelectorAll("#service-filter-list .service-row").length !== 55) {
+    throw new Error("service show more did not reveal remaining rows");
+  }
+  const serviceStatus = window.document.getElementById("service-filter-status");
+  const serviceSearch = window.document.getElementById("service-filter-search");
+  serviceStatus.value = "stopped";
+  serviceStatus.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(10);
+  if (!serviceCount.textContent.includes("27 of 55 services")) throw new Error("stopped service count is wrong");
+  const serviceListText = window.document.getElementById("service-filter-list").textContent;
+  if (!serviceListText.includes("wuauserv") || serviceListText.includes("Spooler")) {
+    throw new Error("stopped service filter is wrong");
+  }
+  serviceStatus.value = "watched";
+  serviceStatus.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(10);
+  if (!serviceCount.textContent.includes("2 of 55 services")) throw new Error("watched service count is wrong");
+  if (!window.document.getElementById("service-filter-list").textContent.includes("Spooler")) {
+    throw new Error("watched service filter missed Spooler");
+  }
+  serviceStatus.value = "all";
+  serviceStatus.dispatchEvent(new window.Event("change", { bubbles: true }));
+  serviceSearch.value = "spooler";
+  serviceSearch.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(10);
+  if (!serviceCount.textContent.includes("1 of 55 services")) throw new Error("service search count is wrong");
+  if (!window.document.getElementById("service-filter-list").textContent.includes("Spooler")) {
+    throw new Error("service search lost Spooler");
+  }
+  window.document.querySelector('[data-tab="gpu"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(10);
+  serviceTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(10);
+  if (window.document.getElementById("service-filter-search").value !== "spooler") {
+    throw new Error("per-agent service filter state was not preserved");
   }
 
   const gpuTab = window.document.querySelector('[data-tab="gpu"]');
@@ -320,6 +447,28 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   await sleep(30);
   const userList = window.document.getElementById("user-list");
   if (!userList.textContent.includes("Operator One")) throw new Error("user list did not render");
+  const userSearch = window.document.getElementById("user-search");
+  const userCount = window.document.getElementById("user-count");
+  if (!userSearch || !userCount) throw new Error("user search controls missing");
+  if (!userCount.textContent.includes("2 of 2 users")) throw new Error("user count is wrong");
+  userSearch.value = "jane.doe@example.test";
+  userSearch.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(10);
+  if (!userCount.textContent.includes("1 of 2 users")) throw new Error("filtered user count is wrong");
+  if (!userList.textContent.includes("Jane Doe") || userList.textContent.includes("Operator One")) {
+    throw new Error("user email search did not filter rows");
+  }
+  userSearch.value = "local";
+  userSearch.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(10);
+  if (!userCount.textContent.includes("1 of 2 users") || !userList.textContent.includes("Operator One")) {
+    throw new Error("user source search did not filter rows");
+  }
+  userSearch.value = "";
+  userSearch.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(10);
+  if (!userCount.textContent.includes("2 of 2 users")) throw new Error("user search did not clear");
+  if (!findButton(userList, "Disable")) throw new Error("disable user action missing");
   const sessionsButton = findButton(userList, "Sessions");
   if (!sessionsButton) throw new Error("sessions action missing");
   sessionsButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -336,7 +485,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   window.document.querySelector("[data-close-reset-password]").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, dashboard, drawer, services, GPU processes, remote terminal, history actions, policy/user/session dialogs");
+  console.log("UI_DOM_OK: login, dashboard, saved views, drawer, services filters, GPU processes, remote terminal, history actions, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

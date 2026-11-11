@@ -630,6 +630,9 @@ svg { display: block; }
 
 .section-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
 .section-toolbar p { color: var(--text-dim); font-size: 10.5px; }
+#fleet-filters { flex-wrap: wrap; }
+.service-toolbar, .user-toolbar { flex-wrap: wrap; justify-content: flex-start; }
+.service-toolbar .form-hint, .user-toolbar .form-hint { margin-left: auto; }
 .mini-search { width: min(220px, 45vw); height: 32px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-input); font-size: 11px; outline: none; }
 .mini-search:focus { border-color: var(--accent); }
 

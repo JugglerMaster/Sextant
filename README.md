@@ -174,8 +174,8 @@ See [deploy/runner-control.env.example](deploy/runner-control.env.example) for a
 - **Package store is Tier 0.** SHA-256 integrity, no signatures or CA; a compromised server can replace artifacts and hashes.
 - **Package management UI is functional.** The Packages tab has an interactive inventory table (search/sort/pagination), a desired-state rule editor, heartbeat/inventory age, and sync.
 - **Data freshness is shown on cards and in the drawer.** Heartbeat and inventory age are visible; cadence-aware stale badges are pending.
-- **Table controls are partial.** Packages, Startup, and Audit have search/sort/pagination; Services, History, and Users still need full controls.
-- **Fleet operations** — status/profile/tag filters, bulk refresh/wake, an alert center, cadence-aware stale badges, 24h sparklines, and CSV export.
+- **Table controls are partial.** Packages, Startup, and Audit have search/sort/pagination; Services and Users have search, counts, and filtering, but only Services has bounded “show more” paging. History has search and counts.
+- **Fleet operations** — status/profile/tag filters, named saved views, bulk refresh/wake, an alert center, cadence-aware stale badges, 24h sparklines, and CSV export.
 - **Package management is enabled by default.** Both the profile and agent-local flags must allow it; disable either side to opt out.
 - **Profile assignment is enrollment, admin, or tag.** Profiles are selected at enrollment, reassigned from the device drawer/API, or inherited from a tag. AD/LDAP group sync is future work.
 - **Remote install is Linux-only and one-at-a-time.** It uses a single server SSH key and disables host-key verification for rebuilt hosts; use it on a trusted admin network.
