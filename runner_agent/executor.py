@@ -76,7 +76,11 @@ def run_capture(
 
         while True:
             try:
-                data = stream.read(8192)
+                # read() waits for the full buffer size or EOF, which would
+                # delay small/interactive output until the command finishes.
+                # read1() returns whatever is currently available.
+                read = getattr(stream, "read1", stream.read)
+                data = read(8192)
             except (OSError, ValueError):
                 break
             if not data:

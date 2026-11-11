@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -174,6 +175,25 @@ def test_executor_chunk_callback_streams_stdout_and_stderr_before_completion():
     assert "err" in stderr
     assert stdout == result["stdout"]
     assert stderr == result["stderr"]
+
+
+def test_executor_streams_small_output_before_process_exit():
+    chunks: list[tuple[float, str, str]] = []
+    started = time.monotonic()
+
+    result = run_capture(
+        ["bash", "-lc", "printf 'first\\n'; sleep 1.5; printf 'second\\n'"],
+        5,
+        on_chunk=lambda stream, text: chunks.append((time.monotonic() - started, stream, text)),
+    )
+
+    assert result["status"] == "succeeded"
+    assert chunks
+    first_at = min(at for at, stream, _text in chunks if stream == "stdout")
+    last_at = max(at for at, stream, _text in chunks if stream == "stdout")
+    # read1() must return the first line while the process is still sleeping.
+    assert first_at < 1.0, f"first chunk arrived at {first_at:.2f}s"
+    assert last_at >= 1.2, f"second chunk arrived at {last_at:.2f}s"
 
 
 def test_executor_chunk_callback_respects_max_output_bytes():

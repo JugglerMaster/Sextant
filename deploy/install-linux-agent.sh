@@ -18,10 +18,24 @@ if [[ -z "$SERVER" || -z "$TOKEN" ]]; then
 fi
 
 SOURCE_DIR="${SOURCE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-/opt/runner-agent}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/runner-agent}"
 CONFIG_FILE="${CONFIG_FILE:-$CONFIG_DIR/config.json}"
 PROFILE="${PROFILE:-workstation}"
+
+if [[ -n "${SERVICE_FILE:-}" ]]; then
+  :
+elif [[ -f "$SOURCE_DIR/deploy/runner-agent.service" ]]; then
+  SERVICE_FILE="$SOURCE_DIR/deploy/runner-agent.service"
+elif [[ -f "$SCRIPT_DIR/deploy/runner-agent.service" ]]; then
+  SERVICE_FILE="$SCRIPT_DIR/deploy/runner-agent.service"
+elif [[ -f "$SCRIPT_DIR/../deploy/runner-agent.service" ]]; then
+  SERVICE_FILE="$SCRIPT_DIR/../deploy/runner-agent.service"
+else
+  echo "Could not find deploy/runner-agent.service. Set SERVICE_FILE explicitly." >&2
+  exit 1
+fi
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required." >&2
@@ -80,7 +94,7 @@ fi
 chmod 0600 "$CONFIG_FILE"
 chown root:root "$CONFIG_FILE"
 
-install -m 0644 "$SOURCE_DIR/deploy/runner-agent.service" /etc/systemd/system/runner-agent.service
+install -m 0644 "$SERVICE_FILE" /etc/systemd/system/runner-agent.service
 systemctl daemon-reload
 systemctl enable --now runner-agent.service
 
