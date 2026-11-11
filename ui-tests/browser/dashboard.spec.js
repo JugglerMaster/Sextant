@@ -24,6 +24,24 @@ for (const theme of THEMES) {
     await scan(page, `dashboard ${theme} desktop`);
   });
 
+  test(`Compose Files renders and opens deploy controls in the ${theme} theme`, async ({ page }) => {
+    await login(page, { theme });
+    await page.locator('[data-page="compose-files"]').click();
+    await expect(page.locator("#compose-stack-list")).toContainText("Web stack");
+    await expect(page.locator("#compose-settings")).toContainText("/var/lib/sextant/docker/compose");
+    await page.locator("#compose-stack-list").getByRole("button", { name: "Open" }).click();
+    await expect(page.locator("#compose-stack-detail")).toBeVisible();
+    await expect(page.locator("#compose-body .compose-editor")).toHaveValue(/nginx:latest/);
+    await page.locator('#compose-tabs [data-compose-tab="revisions"]').click();
+    await expect(page.locator("#compose-body")).toContainText("eeeeeeeeeeee");
+    await page.locator("#compose-body").getByRole("button", { name: "Deploy" }).first().click();
+    await expect(page.locator("#docker-dialog")).toBeVisible();
+    await expect(page.locator("#docker-dialog")).toContainText("Project name");
+    await page.locator("#docker-dialog").getByRole("button", { name: "Close" }).click();
+    await screenshot(page, `compose-files-${theme}`);
+    await scan(page, `compose files ${theme}`);
+  });
+
   test(`device drawer tabs render in the ${theme} theme`, async ({ page }) => {
     await login(page, { theme });
     await openDrawer(page);
@@ -117,7 +135,7 @@ test("Ctrl/Cmd+K opens, filters, activates, and closes the command palette", asy
   await page.keyboard.press("Control+k");
   await expect(palette).toBeVisible();
   await expect(input).toBeFocused();
-  await expect(list.getByRole("option")).toHaveCount(12);
+  await expect(list.getByRole("option")).toHaveCount(13);
   await screenshot(page, "command-palette-dark");
 
   await input.fill("studio");

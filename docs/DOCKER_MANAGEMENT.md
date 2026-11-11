@@ -1,12 +1,15 @@
 # Docker management — plan
 
-**Status:** **D1 and D2 implemented.** D3–D5 are proposed and not implemented.
+**Status:** **D1, D2, and D3 implemented.** D4–D5 are proposed and not
+implemented.
 
 > D1 ships Linux Docker detection, compact heartbeat summaries, bounded inventory
 > upload, SQLite storage, and the cached Docker Hosts page. D2 adds allowlisted
 > container actions, inspect/logs, one-shot exec, cleanup, audit/events, and the
-> action UI. Compose deployment, interactive console, and recreate/clone remain
-> future phases.
+> action UI. D3 adds the server-side Compose library, immutable revisions,
+> deploy/update/down/rollback, deployment history, bundle delivery, and the
+> Compose Files view. Interactive console and recreate/clone remain future
+> phases.
 
 **Scope:** add a separate **Docker Hosts** view to Sextant for Linux hosts. Every
 enrolled agent that reports a usable Docker engine appears in that view. Selecting
@@ -1084,7 +1087,7 @@ Server-side checks are authoritative; the UI only hides controls.
 | --- | --- | --- | --- | --- |
 | **D1 (implemented)** | Schema, settings, profile/local gates, agent detection + summary, inventory upload, **Docker Hosts** host list + cached read-only host view | M | low | A Linux agent with Docker enabled appears in Docker Hosts; its containers/images/volumes/networks are visible from a cached snapshot; Windows and disabled agents do not appear; no mutation path exists |
 | **D2 (implemented)** | `docker` command kind, container inspect, lifecycle/update/rename, logs, refresh, cleanup preview/execute, one-shot exec, events, audit, UI actions | M | medium | Start/stop/restart/pause/rename/update/remove, inspect, logs, cleanup, and one-shot exec work on the selected host; every action is audit-visible; policy/local denials are enforced |
-| **D3** | Compose library on disk, revisions, compose directory setting/migration, Compose Files view, deploy bundle endpoint, deploy/update/down/rollback, deployment history | L | medium–high | Admin creates a stack on disk; operator deploys it to one host; containers carry the expected Compose labels; a second revision updates in place; rollback works; bundle/path attacks are rejected |
+| **D3 (implemented)** | Compose library on disk, revisions, compose directory setting/migration, Compose Files view, deploy bundle endpoint, deploy/update/down/rollback, deployment history | L | medium–high | Admin creates a stack on disk; operator deploys it to one host; containers carry the expected Compose labels; a second revision updates in place; rollback works; bundle/path attacks are rejected |
 | **D4** | Interactive container console: PTY exec, long-poll stdin, SSE output, resize, idle/close handling, session caps, audit | L | high | An operator opens a real shell inside a container, runs interactive commands, resizes the terminal, and closes it; heartbeats continue; the session dies on idle or agent/server disconnect; no transcript is persisted |
 | **D5** | Recreate/clone container, drift polish, live Docker revision refresh, optional container-health events/alerts, multi-host deploy ergonomics | S–M | medium | Recreate uses a validated spec and warns/blocks Compose-managed containers; Docker Hosts updates without manual reload; drift is visible; alerts are deduplicated |
 

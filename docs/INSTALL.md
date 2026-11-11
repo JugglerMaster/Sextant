@@ -275,6 +275,7 @@ Optional installer variables:
 | `ALLOW_DOCKER_EXEC` / `ALLOW_DOCKER_PRUNE` | Enable one-shot container exec / cleanup actions locally |
 | `ALLOW_DOCKER_COMPOSE` | Reserved for future Compose support; stored in the agent config |
 | `DOCKER_SOCKET` / `DOCKER_COMMAND` | Optional local Docker socket/CLI overrides |
+| `DOCKER_COMPOSE_DIR` | Agent-owned Compose runtime directory (default `/var/lib/sextant-agent/docker/stacks`) |
 | `NO_SELF_UPDATE` | Set to `1` to disable agent self-update in the config |
 | `PROFILE` | Profile slug selected at enrollment (default `workstation`) |
 | `INSTALL_DIR` | Default `/opt/sextant-agent` |

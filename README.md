@@ -70,7 +70,8 @@ way.
 - **Cross-platform agents** — Linux and Windows agents with outbound-only heartbeat/command polling and stable machine identity.
 - **Wake-on-LAN** — server-side magic packets for agents (using their reported MAC) and for saved agent-less targets.
 - **Live health** — online/offline status, CPU, memory, uptime, disks, NVIDIA GPU utilization/VRAM/temperature, GPU compute processes, service states, and startup entries.
-- **Docker Hosts** — Linux agents report Docker engine/Compose versions and a bounded inventory of containers, images, volumes, and networks. Select one host to inspect its environment, run allowlisted lifecycle/rename/update/remove actions, view logs, use one-shot exec, and run cached cleanup previews with confirmed prune actions. Docker is off by default; Windows Docker and Compose deployment are not supported.
+- **Docker Hosts** — Linux agents report Docker engine/Compose versions and a bounded inventory of containers, images, volumes, and networks. Select one host to inspect its environment, run allowlisted lifecycle/rename/update/remove actions, view logs, use one-shot exec, and run cached cleanup previews with confirmed prune actions.
+- **Compose Files** — a server-side flat Compose library under a configurable directory with immutable revisions, `.env` redaction for non-admins, deploy/update/down/rollback to one selected Docker host, deployment history/logs, and external-vs-managed project display. Image-based Compose only; build contexts, interactive console, and recreate/clone are not implemented.
 - **Agent profiles** — server-managed behavior profiles (`workstation`, `server`, custom) control heartbeat, collection cadence, enabled modules, action gates, and update policy. Includes a dashboard editor and tag-based assignment.
 - **Remote install (Linux)** — install an agent on a fresh Linux host over key-based SSH, with prerequisite checks, job log, and one-time enrollment.
 - **Telemetry history** — bounded per-heartbeat samples with configurable retention and a downsampled history API for trend queries.
@@ -169,9 +170,9 @@ npx playwright install chromium
 npm run test:visual
 ```
 
-The Python suite has **260 tests** (259 run on Linux; one Windows-only junction test is skipped there and runs on the Windows CI job). It covers password/session/CSRF security, the API RBAC and authentication contract, local and AD login, session revocation, user disable/reset, failed-login audit, enrollment, heartbeat, command dispatch/idempotency/cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication, WoL, audit logging, agent parsers, executor behavior, config handling, the Tier 0 package store, server update checks, agent self-update on Linux and Windows, package inventory/desired-state sync, agent profiles, revisioned inventory, Docker detection/inventory/actions/exec/cleanup/API gating, Telegram notification evaluation/deduplication/retry, and key-based SSH remote install.
+The Python suite has **279 tests** (278 run on Linux; one Windows-only junction test is skipped there and runs on the Windows CI job). It covers password/session/CSRF security, the API RBAC and authentication contract, local and AD login, session revocation, user disable/reset, failed-login audit, enrollment, heartbeat, command dispatch/idempotency/cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication, WoL, audit logging, agent parsers, executor behavior, config handling, the Tier 0 package store, server update checks, agent self-update on Linux and Windows, package inventory/desired-state sync, agent profiles, revisioned inventory, Docker detection/inventory/actions/exec/cleanup/API gating, Compose storage/revisions/deploy/bundle/gating, Telegram notification evaluation/deduplication/retry, and key-based SSH remote install.
 
-The jsdom smoke test loads the real dashboard and verifies the fleet, live SSE fallback, drawer, paginated history, trends, timeline, alert lifecycle, bulk actions, saved views, policy/user/session dialogs, GPU process list, remote terminal, and Docker Hosts list/detail/refresh/empty plus inspect, logs, exec, remove, cleanup, and offline-disabled states. The **11 Playwright + axe-core tests** cover dark/light themes at desktop and mobile widths, login, dashboard, drawer tabs, command-palette keyboard flow, focus trap/return, Docker Hosts inspect/cleanup confirmation, and serious/critical accessibility violations.
+The jsdom smoke test loads the real dashboard and verifies the fleet, live SSE fallback, drawer, paginated history, trends, timeline, alert lifecycle, bulk actions, saved views, policy/user/session dialogs, GPU process list, remote terminal, Docker Hosts list/detail/refresh/empty plus inspect, logs, exec, remove, cleanup, offline-disabled, and Compose Files list/editor/revisions/deploy/deployment-history states. The **13 Playwright + axe-core tests** cover dark/light themes at desktop and mobile widths, login, dashboard, drawer tabs, command-palette keyboard flow, focus trap/return, Docker Hosts inspect/cleanup confirmation, Compose Files deploy controls, and serious/critical accessibility violations.
 
 A real end-to-end server/agent smoke test is described in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#validation), and the Raspberry Pi run is recorded in [docs/TESTING.md](docs/TESTING.md#manual-live-validation). See [docs/TESTING.md](docs/TESTING.md) for the full coverage gaps.
 
@@ -209,6 +210,12 @@ All server configuration is environment variables. The common ones:
 | `SEXTANT_DOCKER_ENABLED` | `1` | Enable the Docker Hosts API/page; agent Docker access still requires local/profile opt-in |
 | `SEXTANT_DOCKER_INVENTORY_MAX_BYTES` | `2000000` | Maximum Docker inventory upload size |
 | `SEXTANT_DOCKER_INVENTORY_STALE_SECONDS` | `900` | Docker inventory stale badge threshold |
+| `SEXTANT_DOCKER_COMPOSE_DIR` | `$DATA_DIR/docker/compose` | Compose library root; fixed read-only in the UI when set |
+| `SEXTANT_DOCKER_MAX_FILE_BYTES` | `262144` | Per Compose file limit |
+| `SEXTANT_DOCKER_MAX_FILES` | `16` | Files per Compose stack |
+| `SEXTANT_DOCKER_MAX_TOTAL_BYTES` | `1048576` | Total Compose file-set limit |
+| `SEXTANT_DOCKER_MAX_BUNDLE_BYTES` | `4194304` | Deployment bundle limit |
+| `SEXTANT_DOCKER_DEPLOYMENT_RETENTION_DAYS` | `90` | Deployment/log retention |
 | `SEXTANT_STORE_ENABLED` | `1` | Enable the package store |
 | `SEXTANT_STORE_MAX_BLOB_MB` | `512` | Per-artifact upload limit |
 | `SEXTANT_STORE_MAX_TOTAL_GB` | `20` | Total store quota |
@@ -228,7 +235,7 @@ See [deploy/sextant.env.example](deploy/sextant.env.example) for a deployment te
 - [Deployment](docs/DEPLOYMENT.md)
 - [Agent installation and operation](docs/AGENTS.md)
 - [Discovery plan](docs/DISCOVERY.md)
-- [Docker management plan — D1/D2 implemented](docs/DOCKER_MANAGEMENT.md)
+- [Docker management plan — D1–D3 implemented](docs/DOCKER_MANAGEMENT.md)
 - [Package management plan](docs/PACKAGE_MANAGEMENT.md)
 - [Package store plan](docs/PACKAGE_STORE.md)
 - [Agent self-update plan](docs/SELF_UPDATE.md)
@@ -245,7 +252,7 @@ See [deploy/sextant.env.example](deploy/sextant.env.example) for a deployment te
 
 - **Remote control is shell + service + power control**, not pixel-level remote desktop or keyboard/mouse injection.
 - **GPU telemetry currently uses `nvidia-smi`.** Windows falls back to WMI GPU names without utilization data. AMD ROCm is not collected.
-- **Docker management is D1+D2.** Docker Hosts supports allowlisted container actions, inspect/logs, one-shot exec, image/volume/network removal, and cleanup; interactive console, Compose deployment, and recreate/clone are not implemented yet. Docker is Linux-only; Windows agents report `unsupported_os` and never appear as Docker hosts.
+- **Docker management is D1–D3.** Docker Hosts supports allowlisted container actions, inspect/logs, one-shot exec, image/volume/network removal, and cleanup. Compose Files supports image-based Compose stacks, immutable revisions, deploy/update/down/rollback, and deployment history. Interactive console, build contexts, and recreate/clone are not implemented. Docker is Linux-only; Windows agents report `unsupported_os` and never appear as Docker hosts.
 - **Wake-on-LAN is layer-2 local.** A server packet reaches its own broadcast domain. Use a directed broadcast or a separate relay for other VLANs; agents do not act as WoL relays.
 - **AD group mapping checks direct `memberOf` membership.** Nested group expansion is not implemented.
 - **Single node.** SQLite and the in-process login limiter target a home/lab/small-office deployment, not a multi-region cluster.

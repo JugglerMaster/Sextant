@@ -245,15 +245,16 @@ Effort: small–medium.
 
 The current automated coverage and the remaining gaps are listed in [TESTING.md](TESTING.md).
 
-### 17. Docker host and Compose management (D1/D2 implemented, D3–D5 proposed)
+### 17. Docker host and Compose management (D1–D3 implemented, D4–D5 proposed)
 
 See [Docker management](DOCKER_MANAGEMENT.md) for the full plan.
 
-D1 and D2 are implemented: Linux agents opt into Docker discovery, upload a
-bounded inventory, and the Docker Hosts page supports allowlisted container
-actions, inspect/logs, one-shot exec, image/volume/network removal, cleanup, and
-audit/events. Interactive console, Compose deployment, and recreate/clone remain
-future phases.
+D1–D3 are implemented: Linux agents opt into Docker discovery, upload a bounded
+inventory, and the Docker Hosts page supports allowlisted container actions,
+inspect/logs, one-shot exec, image/volume/network removal, cleanup, and
+audit/events. Compose Files adds a server-side flat Compose library, immutable
+revisions, deploy/update/down/rollback to one host, deployment history, and
+bundle delivery. Interactive console and recreate/clone remain future phases.
 
 **Why:** Docker is now the deployment unit for many services, but the console
 cannot discover engines, inspect containers, clean up stale resources, or deploy

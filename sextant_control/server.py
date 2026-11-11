@@ -29,6 +29,7 @@ from . import updates
 from .config import Settings
 from .db import Database, DEFAULT_PROFILES, dumps, loads, parse_iso, utcnow, utcnow_iso
 from .docker_rules import DOCKER_MUTATION_ACTIONS
+from .docker_store import ComposeLibrary, DockerStoreError
 from .ldap_auth import authenticate_ldap
 from .notifications import NotificationError, NotificationService
 from .models import (
@@ -45,8 +46,12 @@ from .models import (
     CommandResultIn,
     DockerActionIn,
     DockerCleanupIn,
+    DockerDeployIn,
     DockerExecIn,
     DockerInventoryIn,
+    DockerSettingsIn,
+    DockerStackIn,
+    DockerStackPatchIn,
     EnrollmentTokenIn,
     HeartbeatIn,
     LoginIn,
@@ -83,9 +88,12 @@ from .views import (
     bounded_json,
     command_to_dict,
     docker_container_to_dict,
+    docker_deployment_to_dict,
     docker_host_to_dict,
     docker_image_to_dict,
     docker_network_to_dict,
+    docker_stack_revision_to_dict,
+    docker_stack_to_dict,
     docker_volume_to_dict,
     role_at_least,
     session_to_dict,
@@ -640,6 +648,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     artifact_store.ensure()
     artifact_store.cleanup_temp()
     app.state.store = artifact_store
+    stored_compose_dir = db.get_docker_compose_setting()
+    if settings.docker_compose_dir_from_env or not stored_compose_dir:
+        compose_root = settings.docker_compose_root
+        db.set_docker_compose_setting(str(compose_root))
+    else:
+        compose_root = Path(stored_compose_dir)
+    compose_store = ComposeLibrary(
+        compose_root,
+        max_file_bytes=settings.docker_max_file_bytes,
+        max_files=settings.docker_max_files,
+        max_total_bytes=settings.docker_max_total_bytes,
+        max_bundle_bytes=settings.docker_max_bundle_bytes,
+    )
+    compose_store.ensure()
+    compose_store.cleanup_temp()
+    app.state.compose_store = compose_store
+    db.prune_docker_deployments(settings.docker_deployment_retention_days)
+    for stack_row in db.list_docker_stacks():
+        revisions = db.list_docker_stack_revisions(stack_row["id"])
+        keep = {str(row["revision_hash"]) for row in revisions[:11]}
+        keep.add(str(stack_row["current_revision_hash"]))
+        keep |= db.docker_deployment_revision_hashes(stack_row["id"])
+        compose_store.prune_revisions(str(stack_row["slug"]), keep)
     app.state.update_cache = {"at": 0.0, "data": None}
     dashboard_state = _DashboardState()
     app.state.dashboard_state = dashboard_state
@@ -728,6 +759,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def get_store(request: Request) -> ArtifactStore:
         return request.app.state.store
+
+    def get_compose_store(request: Request) -> ComposeLibrary:
+        return request.app.state.compose_store
 
     def get_notifications(request: Request) -> NotificationService:
         return request.app.state.notifications
@@ -912,6 +946,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     docker_gate = "allow_docker_exec"
                 elif docker_action == "cleanup":
                     docker_gate = "allow_docker_prune"
+                elif docker_action.startswith("compose."):
+                    docker_gate = "allow_docker_compose"
                 if (
                     str(agent["os"]).lower() != "linux"
                     or not _docker_module_enabled(profile_row)
@@ -1892,6 +1928,439 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         command["queued"] = True
         return command
 
+    def _prune_stack_revisions(
+        database: Database,
+        compose_store: ComposeLibrary,
+        stack_row: sqlite3.Row,
+    ) -> None:
+        revisions = database.list_docker_stack_revisions(stack_row["id"])
+        keep = {str(row["revision_hash"]) for row in revisions[:11]}
+        keep.add(str(stack_row["current_revision_hash"]))
+        keep |= database.docker_deployment_revision_hashes(stack_row["id"])
+        try:
+            compose_store.prune_revisions(str(stack_row["slug"]), keep)
+        except DockerStoreError:
+            logger.warning("Compose revision pruning failed for %s", stack_row["slug"], exc_info=True)
+
+    def _stack_detail(
+        database: Database,
+        compose_store: ComposeLibrary,
+        stack_row: sqlite3.Row,
+        *,
+        include_contents: bool,
+    ) -> dict[str, Any]:
+        files = compose_store.read_current(str(stack_row["slug"]))
+        payload = docker_stack_to_dict(stack_row)
+        payload["files"] = [
+            {"name": name, "size": len(data)} for name, data in sorted(files.items())
+        ]
+        payload["contents"] = (
+            {name: data.decode("utf-8") for name, data in sorted(files.items())}
+            if include_contents
+            else None
+        )
+        payload["revisions"] = [
+            docker_stack_revision_to_dict(row, include_files=True)
+            for row in database.list_docker_stack_revisions(stack_row["id"])
+        ]
+        return payload
+
+    def _default_project(slug: str) -> str:
+        return f"sextant_{slug}"[:63]
+
+    @app.get("/api/docker/stacks")
+    def list_docker_stacks(
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        del user
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        return {"stacks": [docker_stack_to_dict(row) for row in database.list_docker_stacks()]}
+
+    @app.get("/api/docker/stacks/{stack_id}")
+    def get_docker_stack(
+        stack_id: str,
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        compose_store: ComposeLibrary = Depends(get_compose_store),
+    ) -> dict[str, Any]:
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        stack = database.get_docker_stack(stack_id)
+        if stack is None:
+            raise HTTPException(status_code=404, detail="Compose stack not found.")
+        return {
+            "stack": _stack_detail(
+                database,
+                compose_store,
+                stack,
+                include_contents=role_at_least(user, "admin"),
+            )
+        }
+
+    @app.post("/api/docker/stacks")
+    def create_docker_stack(
+        payload: DockerStackIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        compose_store: ComposeLibrary = Depends(get_compose_store),
+    ) -> dict[str, Any]:
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        if database.get_docker_stack(payload.slug) is not None:
+            raise HTTPException(status_code=409, detail="A Compose stack with that slug already exists.")
+        try:
+            revision_hash, manifest = compose_store.save_revision(payload.slug, payload.files)
+            stack = database.create_docker_stack(
+                payload.slug,
+                payload.name,
+                payload.description,
+                revision_hash,
+                user["username"],
+            )
+            database.add_docker_stack_revision(
+                stack["id"],
+                revision_hash,
+                manifest,
+                payload.message,
+                user["username"],
+            )
+        except DockerStoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        database.audit(
+            actor=user["username"],
+            action="docker.stack_created",
+            target=stack["id"],
+            detail={
+                "slug": payload.slug,
+                "name": payload.name,
+                "revision_hash": revision_hash,
+                "files": sorted(payload.files),
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        _prune_stack_revisions(database, compose_store, stack)
+        return {"stack": _stack_detail(database, compose_store, stack, include_contents=True)}
+
+    @app.put("/api/docker/stacks/{stack_id}")
+    def update_docker_stack(
+        stack_id: str,
+        payload: DockerStackPatchIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        compose_store: ComposeLibrary = Depends(get_compose_store),
+    ) -> dict[str, Any]:
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        stack = database.get_docker_stack(stack_id)
+        if stack is None:
+            raise HTTPException(status_code=404, detail="Compose stack not found.")
+        try:
+            if payload.files is not None:
+                revision_hash, manifest = compose_store.save_revision(str(stack["slug"]), payload.files)
+            else:
+                revision_hash, manifest = compose_store.save_revision(
+                    str(stack["slug"]), compose_store.read_current(str(stack["slug"]))
+                )
+        except DockerStoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        name = payload.name if payload.name is not None else str(stack["name"])
+        description = (
+            payload.description if payload.description is not None else str(stack["description"])
+        )
+        database.update_docker_stack(
+            stack["id"],
+            name=name,
+            description=description,
+            current_revision_hash=revision_hash,
+        )
+        database.add_docker_stack_revision(
+            stack["id"],
+            revision_hash,
+            manifest,
+            payload.message,
+            user["username"],
+        )
+        database.audit(
+            actor=user["username"],
+            action="docker.stack_updated",
+            target=stack["id"],
+            detail={
+                "slug": stack["slug"],
+                "revision_hash": revision_hash,
+                "files": sorted(payload.files or {}),
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        updated = database.get_docker_stack(stack["id"])
+        assert updated is not None
+        _prune_stack_revisions(database, compose_store, updated)
+        return {"stack": _stack_detail(database, compose_store, updated, include_contents=True)}
+
+    @app.delete("/api/docker/stacks/{stack_id}")
+    def delete_docker_stack(
+        stack_id: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        compose_store: ComposeLibrary = Depends(get_compose_store),
+    ) -> Response:
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        stack = database.get_docker_stack(stack_id)
+        if stack is None:
+            raise HTTPException(status_code=404, detail="Compose stack not found.")
+        if database.docker_stack_has_active_deployments(stack["id"]):
+            raise HTTPException(status_code=409, detail="Bring the stack down before deleting it.")
+        try:
+            compose_store.delete_stack(str(stack["slug"]))
+        except DockerStoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        database.delete_docker_stack(stack["id"])
+        database.audit(
+            actor=user["username"],
+            action="docker.stack_deleted",
+            target=stack["id"],
+            detail={"slug": stack["slug"]},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return Response(status_code=204)
+
+    @app.post("/api/docker/stacks/{stack_id}/deploy")
+    def deploy_docker_stack(
+        stack_id: str,
+        payload: DockerDeployIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        stack = database.get_docker_stack(stack_id)
+        if stack is None:
+            raise HTTPException(status_code=404, detail="Compose stack not found.")
+        host_row, _agent_row, _profile_row, capabilities = _docker_context(
+            database, payload.agent_id, config
+        )
+        if not host_row["available"]:
+            raise HTTPException(status_code=409, detail="Docker is not currently reachable on this host.")
+        if not capabilities["compose"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Compose deployment is disabled by the agent profile or server policy.",
+            )
+        action = payload.action
+        active = database.active_docker_deployment(
+            agent_id=payload.agent_id,
+            project_name=payload.project_name,
+            stack_id=stack["id"],
+        )
+        if action == "up":
+            revision_hash = payload.revision_hash or str(stack["current_revision_hash"])
+            project_name = payload.project_name or _default_project(str(stack["slug"]))
+            pull_before_up = bool(payload.pull_before_up)
+            remove_volumes = False
+        else:
+            if active is None:
+                raise HTTPException(status_code=409, detail="No active deployment for this stack on the selected host.")
+            revision_hash = str(active["revision_hash"])
+            project_name = payload.project_name or str(active["project_name"])
+            pull_before_up = False
+            remove_volumes = bool(payload.remove_volumes) if action == "down" else False
+        if not re.match(r"^[a-z0-9][a-z0-9_-]{0,62}$", project_name):
+            raise HTTPException(status_code=400, detail="Invalid Compose project name.")
+        revision = database.get_docker_stack_revision(stack["id"], revision_hash)
+        if revision is None:
+            raise HTTPException(status_code=404, detail="Stack revision not found.")
+        if action == "up":
+            collision = database.docker_project_in_use(
+                agent_id=payload.agent_id, project_name=project_name
+            )
+            if collision is not None and collision["stack_id"] != stack["id"]:
+                raise HTTPException(status_code=409, detail="Compose project name is already active on this host.")
+            for container in database.list_docker_containers(payload.agent_id):
+                if (
+                    container["compose_project"] == project_name
+                    and (active is None or active["project_name"] != project_name)
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Compose project name collides with an external project on this host.",
+                    )
+        deployment = database.create_docker_deployment(
+            stack_id=stack["id"],
+            agent_id=payload.agent_id,
+            revision_hash=revision_hash,
+            project_name=project_name,
+            action=action,
+            command_id="",
+            actor=user["username"],
+            pull_before_up=pull_before_up,
+            remove_volumes=remove_volumes,
+        )
+        try:
+            command = queue_command(
+                payload.agent_id,
+                "docker",
+                {
+                    "action": f"compose.{action}",
+                    "deployment_id": deployment["id"],
+                    "stack_id": stack["id"],
+                    "revision_hash": revision_hash,
+                    "project_name": project_name,
+                },
+                user,
+                request,
+                database,
+                config,
+                audit_action="docker.deploy_requested",
+                extra_detail={
+                    "deployment_id": deployment["id"],
+                    "stack_id": stack["id"],
+                    "slug": stack["slug"],
+                    "revision_hash": revision_hash,
+                    "project_name": project_name,
+                    "action": action,
+                },
+            )
+        except Exception:
+            database.delete_docker_deployment(deployment["id"])
+            raise
+        database.set_docker_deployment_command(deployment["id"], command["id"])
+        deployment = database.get_docker_deployment(deployment["id"])
+        command["queued"] = True
+        return {
+            "deployment": docker_deployment_to_dict(deployment),
+            "command": command,
+        }
+
+    @app.get("/api/docker/deployments")
+    def list_docker_deployments(
+        agent_id: str = "",
+        stack_id: str = "",
+        limit: int = 100,
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        del user
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        rows = database.list_docker_deployments(
+            agent_id=agent_id[:64],
+            stack_id=stack_id[:64],
+            limit=max(1, min(int(limit), 500)),
+        )
+        return {"deployments": [docker_deployment_to_dict(row) for row in rows]}
+
+    @app.get("/api/docker/deployments/{deployment_id}")
+    def get_docker_deployment(
+        deployment_id: str,
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        del user
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        deployment = database.get_docker_deployment(deployment_id)
+        if deployment is None:
+            raise HTTPException(status_code=404, detail="Docker deployment not found.")
+        return {"deployment": docker_deployment_to_dict(deployment)}
+
+    @app.get("/api/docker/settings")
+    def get_docker_settings(
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        compose_store: ComposeLibrary = Depends(get_compose_store),
+    ) -> dict[str, Any]:
+        del user, database
+        return {
+            "compose_dir": str(compose_store.root),
+            "source": "env" if config.docker_compose_dir_from_env else "database",
+            "editable": not config.docker_compose_dir_from_env,
+            "max_file_bytes": config.docker_max_file_bytes,
+            "max_files": config.docker_max_files,
+            "max_total_bytes": config.docker_max_total_bytes,
+            "max_bundle_bytes": config.docker_max_bundle_bytes,
+            "deployment_retention_days": config.docker_deployment_retention_days,
+            "counts": compose_store.counts(),
+        }
+
+    @app.patch("/api/docker/settings")
+    def update_docker_settings(
+        payload: DockerSettingsIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        compose_store: ComposeLibrary = Depends(get_compose_store),
+    ) -> dict[str, Any]:
+        if config.docker_compose_dir_from_env:
+            raise HTTPException(status_code=409, detail="Compose directory is fixed by SEXTANT_DOCKER_COMPOSE_DIR.")
+        try:
+            counts = compose_store.migrate_to(Path(payload.compose_dir))
+        except DockerStoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        database.set_docker_compose_setting(str(compose_store.root))
+        database.audit(
+            actor=user["username"],
+            action="docker.compose_dir_updated",
+            target=str(compose_store.root),
+            detail=counts,
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return {
+            "compose_dir": str(compose_store.root),
+            "source": "database",
+            "editable": True,
+            "counts": compose_store.counts(),
+        }
+
+    @app.get("/api/agent/{agent_id}/docker/deployments/{deployment_id}/bundle")
+    def download_docker_deployment_bundle(
+        agent_id: str,
+        deployment_id: str,
+        agent: dict[str, Any] = Depends(agent_auth),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        compose_store: ComposeLibrary = Depends(get_compose_store),
+    ) -> Response:
+        del agent
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        deployment = database.get_docker_deployment(deployment_id)
+        if deployment is None or deployment["agent_id"] != agent_id:
+            raise HTTPException(status_code=404, detail="Docker deployment not found.")
+        if deployment["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail="Docker deployment was cancelled.")
+        stack = database.get_docker_stack(str(deployment["stack_id"]))
+        if stack is None:
+            raise HTTPException(status_code=404, detail="Compose stack not found.")
+        try:
+            data = compose_store.build_bundle(str(stack["slug"]), str(deployment["revision_hash"]))
+        except DockerStoreError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        headers = {
+            "X-Bundle-Sha256": hashlib.sha256(data).hexdigest(),
+            "X-Compose-Revision": str(deployment["revision_hash"]),
+            "X-Compose-Pull": "1" if deployment["pull_before_up"] else "0",
+            "X-Compose-Remove-Volumes": "1" if deployment["remove_volumes"] else "0",
+            "Content-Length": str(len(data)),
+            "Cache-Control": "no-store",
+        }
+        return Response(content=data, media_type="application/gzip", headers=headers)
+
     @app.get("/api/events")
     async def dashboard_events(
         request: Request,
@@ -2575,6 +3044,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                    WHERE id = ? AND status = 'queued'""",
                 (utcnow_iso(), "Cancelled by operator before dispatch.", command_id),
             )
+            if row["kind"] == "docker":
+                args = loads(row["args"], {})
+                if isinstance(args, dict) and str(args.get("action", "")).startswith("compose."):
+                    conn.execute(
+                        """UPDATE docker_deployments
+                           SET status = 'cancelled', finished_at = ?, error = ?
+                           WHERE command_id = ? AND status IN ('queued', 'running')""",
+                        (
+                            utcnow_iso(),
+                            "Cancelled by operator before dispatch.",
+                            command_id,
+                        ),
+                    )
             database.audit(
                 actor=user["username"],
                 action="command.cancelled",
@@ -3480,6 +3962,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "created_at": row["created_at"],
                         }
                     )
+                    if row["kind"] == "docker":
+                        args = loads(row["args"], {})
+                        if isinstance(args, dict) and str(args.get("action", "")).startswith("compose."):
+                            conn.execute(
+                                """UPDATE docker_deployments
+                                   SET status = 'running', started_at = COALESCE(started_at, ?)
+                                   WHERE command_id = ? AND status IN ('queued', 'dispatched')""",
+                                (stamp, row["id"]),
+                            )
             current_agent = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
             _reconcile_agent_alerts(
                 database, current_agent, config, now, conn, at=event_at
@@ -3777,6 +4268,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     result_detail["target"] = docker_args["volume_name"]
                 elif docker_args.get("network_id"):
                     result_detail["target"] = docker_args["network_id"]
+                if docker_args.get("deployment_id"):
+                    result_detail["deployment_id"] = docker_args["deployment_id"]
+                if docker_args.get("project_name"):
+                    result_detail["project_name"] = docker_args["project_name"]
                 database.audit(
                     actor=row["created_by"],
                     action="docker.action_result",
@@ -3792,6 +4287,57 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         f"Docker {docker_action} {final_status}",
                         result_detail,
                         conn=conn,
+                    )
+        if row["kind"] == "docker":
+            docker_args = loads(row["args"], {})
+            if isinstance(docker_args, dict) and str(docker_args.get("action", "")).startswith("compose."):
+                deployment = database.get_docker_deployment_by_command(command_id)
+                if deployment is not None:
+                    action = str(deployment["action"])
+                    active: bool | None = None
+                    if final_status == "succeeded" and action == "up":
+                        database.deactivate_docker_deployments(
+                            agent_id=deployment["agent_id"],
+                            stack_id=deployment["stack_id"],
+                            except_id=deployment["id"],
+                        )
+                        active = True
+                    elif final_status == "succeeded" and action == "down":
+                        database.deactivate_docker_deployments(
+                            agent_id=deployment["agent_id"],
+                            stack_id=deployment["stack_id"],
+                            project_name=deployment["project_name"],
+                        )
+                        active = False
+                    database.update_docker_deployment(
+                        deployment["id"],
+                        status=final_status,
+                        log=f"{stdout}\n{stderr}".strip(),
+                        error=payload.error,
+                        finished=True,
+                        active=active,
+                    )
+                    deployment_detail = {
+                        "deployment_id": deployment["id"],
+                        "stack_id": deployment["stack_id"],
+                        "agent_id": deployment["agent_id"],
+                        "revision_hash": deployment["revision_hash"],
+                        "project_name": deployment["project_name"],
+                        "action": action,
+                        "status": final_status,
+                    }
+                    database.audit(
+                        actor=row["created_by"],
+                        action="docker.deployment_result",
+                        target=deployment["id"],
+                        detail=deployment_detail,
+                    )
+                    database.record_agent_event(
+                        agent_id,
+                        "docker.deployment",
+                        "success" if final_status == "succeeded" else "warning",
+                        f"Compose {action} {final_status}: {deployment['project_name']}",
+                        deployment_detail,
                     )
         notify_dashboard()
         return {"command": command_to_dict(updated)}
@@ -4809,6 +5355,11 @@ def _docker_capabilities(agent_row: Any, profile_row: Any, config: Settings) -> 
             allowed
             and policy.get("allow_docker_prune", True)
             and actions["allow_docker_prune"]
+        ),
+        "compose": bool(
+            allowed
+            and policy.get("allow_docker_compose", True)
+            and actions["allow_docker_compose"]
         ),
     }
 

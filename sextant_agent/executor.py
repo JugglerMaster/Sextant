@@ -36,6 +36,7 @@ def run_capture(
     max_output: int = 200_000,
     env: dict[str, str] | None = None,
     on_chunk: ChunkCallback | None = None,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
     cap = max(1024, int(max_output))
     try:
@@ -45,6 +46,7 @@ def run_capture(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
+            cwd=cwd,
             **_popen_kwargs(),
         )
     except OSError as exc:

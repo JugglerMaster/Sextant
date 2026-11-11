@@ -8,13 +8,17 @@ environment variables.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import platform
 import re
 import shutil
+import tarfile
+import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from .config import AgentConfig
@@ -63,6 +67,7 @@ _CONTAINER_LIFECYCLE_ACTIONS = {
     "container.unpause",
     "container.kill",
 }
+_COMPOSE_ACTIONS = {"compose.up", "compose.down", "compose.restart", "compose.pull"}
 _MUTATION_ACTIONS = _CONTAINER_LIFECYCLE_ACTIONS | {
     "container.rename",
     "container.remove",
@@ -72,7 +77,7 @@ _MUTATION_ACTIONS = _CONTAINER_LIFECYCLE_ACTIONS | {
     "volume.remove",
     "network.remove",
     "cleanup",
-}
+} | _COMPOSE_ACTIONS
 _CLEANUP_SCOPES = {
     "stopped_containers",
     "dangling_images",
@@ -282,6 +287,43 @@ def _network_row(raw: dict[str, Any]) -> dict[str, Any] | None:
         "labels": _parse_labels(raw.get("Labels")),
         "container_count": _int(raw.get("Containers")),
     }
+
+
+_AGENT_COMPOSE_NAMES = {"compose.yaml", "compose.yml"}
+_AGENT_FILE_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_AGENT_PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+_AGENT_BUILD_RE = re.compile(r"(?m)^\s*build\s*:")
+
+
+def _compose_hash(files: dict[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        data = files[name]
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(str(len(data)).encode("ascii"))
+        digest.update(b"\x00")
+        digest.update(data)
+    return digest.hexdigest()
+
+
+def _validate_compose_files(files: dict[str, bytes]) -> None:
+    names = sorted(files)
+    if len([name for name in names if name in _AGENT_COMPOSE_NAMES]) != 1:
+        raise ValueError("bundle must contain exactly one compose.yaml or compose.yml")
+    for name in names:
+        if not _AGENT_FILE_RE.match(name) or name in {".", ".."}:
+            raise ValueError("bundle contains an invalid file name")
+        if name in _AGENT_COMPOSE_NAMES or name == ".env":
+            continue
+        if name.startswith(".") or not name.endswith((".yaml", ".yml")):
+            raise ValueError("bundle contains a non-Compose file")
+        if _AGENT_BUILD_RE.search(files[name].decode("utf-8", errors="replace")):
+            raise ValueError("v1 supports image-based Compose only; build: services are not supported.")
+    for name in names:
+        if name in _AGENT_COMPOSE_NAMES or name.endswith((".yaml", ".yml")):
+            if _AGENT_BUILD_RE.search(files[name].decode("utf-8", errors="replace")):
+                raise ValueError("v1 supports image-based Compose only; build: services are not supported.")
 
 
 def _apply_inventory_usage(
@@ -556,12 +598,14 @@ class DockerCollector:
         env: dict[str, str],
         max_output: int,
         timeout: int | None = None,
+        cwd: str | None = None,
     ) -> dict[str, Any]:
         return run_capture(
             [command, *args],
             max(5, min(int(timeout or self.config.docker_timeout), 300)),
             max_output=max_output,
             env=env,
+            cwd=cwd,
         )
 
     @staticmethod
@@ -800,6 +844,13 @@ class DockerCollector:
             self.enabled()
             and bool(self.config.allow_docker_prune)
             and self._policy_flag("allow_docker_prune")
+        )
+
+    def compose_enabled(self) -> bool:
+        return (
+            self.enabled()
+            and bool(self.config.allow_docker_compose)
+            and self._policy_flag("allow_docker_compose")
         )
 
     @staticmethod
@@ -1154,6 +1205,171 @@ class DockerCollector:
                 error=f"{len(errors)} container removal(s) failed.",
             )
         return self._action_result("succeeded", exit_code=0, stdout=stdout)
+
+    # --- Compose deployment ---------------------------------------------
+    def execute_compose(
+        self,
+        action: str,
+        args: dict[str, Any],
+        bundle: bytes,
+        headers: dict[str, str],
+    ) -> dict[str, Any]:
+        if platform.system() != "Linux":
+            return self._action_result("failed", error="Compose deployment is Linux-only.")
+        if action not in _COMPOSE_ACTIONS:
+            return self._action_result("failed", error="Unsupported Compose action.")
+        if not self.compose_enabled():
+            return self._action_result(
+                "failed",
+                error="Compose deployment is disabled by local config, profile, or server policy.",
+            )
+        command = self._docker_binary()
+        if not command:
+            return self._action_result("failed", error="Docker CLI is not installed.")
+        revision_hash = str(args.get("revision_hash", "") or "")
+        project = str(args.get("project_name", "") or "")
+        deployment_id = str(args.get("deployment_id", "") or "")
+        if not re.match(r"^[a-f0-9]{64}$", revision_hash):
+            return self._action_result("failed", error="Invalid Compose revision hash.")
+        if not _AGENT_PROJECT_RE.match(project):
+            return self._action_result("failed", error="Invalid Compose project name.")
+        if not re.match(r"^dep_[A-Za-z0-9]+$", deployment_id):
+            return self._action_result("failed", error="Invalid deployment ID.")
+        expected_bundle_hash = headers.get("x-bundle-sha256", "")
+        if not expected_bundle_hash or hashlib.sha256(bundle).hexdigest() != expected_bundle_hash:
+            return self._action_result("failed", error="Compose bundle SHA-256 verification failed.")
+        expected_size = headers.get("content-length", "")
+        try:
+            if expected_size and int(expected_size) != len(bundle):
+                return self._action_result("failed", error="Compose bundle size verification failed.")
+        except ValueError:
+            return self._action_result("failed", error="Compose bundle size header is invalid.")
+
+        locked = self._mutation_lock.acquire(blocking=False)
+        if not locked:
+            return self._action_result("failed", error="Another Docker mutation is already running on this host.")
+        try:
+            try:
+                files = self._extract_compose_bundle(bundle, revision_hash)
+            except (ValueError, tarfile.TarError, OSError) as exc:
+                return self._action_result("failed", error=f"Compose bundle rejected: {exc}")
+            root = Path(self.config.docker_compose_dir or "/var/lib/sextant-agent/docker/stacks").expanduser()
+            if not root.is_absolute():
+                return self._action_result("failed", error="docker_compose_dir must be absolute.")
+            root = root.resolve(strict=False)
+            if root == Path("/"):
+                return self._action_result("failed", error="docker_compose_dir cannot be /.")
+            try:
+                root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                root.chmod(0o700)
+            except OSError as exc:
+                return self._action_result("failed", error=f"Could not create Compose directory: {exc}")
+            project_dir = root / project
+            final_dir = project_dir / revision_hash
+            try:
+                project_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+                project_dir.chmod(0o700)
+            except OSError as exc:
+                return self._action_result("failed", error=f"Could not create project directory: {exc}")
+            if not final_dir.exists():
+                temp_dir = Path(tempfile.mkdtemp(prefix=".rev-", dir=root))
+                try:
+                    for name, data in files.items():
+                        target = temp_dir / name
+                        with target.open("xb") as handle:
+                            handle.write(data)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        os.chmod(target, 0o600)
+                    os.chmod(temp_dir, 0o700)
+                    os.replace(temp_dir, final_dir)
+                finally:
+                    if temp_dir.exists():
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+            compose_file = "compose.yaml" if "compose.yaml" in files else "compose.yml"
+            base = [command, "compose", "-p", project, "-f", compose_file]
+            env = self._docker_env()
+            config = self._compose_run(base + ["config", "--quiet"], env, final_dir, 60)
+            if config["status"] != "succeeded":
+                return self._compose_aggregate("failed", config, error="Compose config validation failed.")
+            if action == "compose.down":
+                down_args = base + ["down"]
+                if headers.get("x-compose-remove-volumes") == "1":
+                    down_args.append("--volumes")
+                return self._compose_run(down_args, env, final_dir)
+            if action == "compose.up":
+                parts = []
+                if headers.get("x-compose-pull") == "1":
+                    pull = self._compose_run(base + ["pull"], env, final_dir)
+                    parts.append(pull)
+                    if pull["status"] != "succeeded":
+                        return self._compose_aggregate("failed", *parts)
+                up = self._compose_run(base + ["up", "-d", "--remove-orphans"], env, final_dir)
+                parts.append(up)
+                return self._compose_aggregate(up["status"], *parts)
+            if action == "compose.restart":
+                restart = self._compose_run(base + ["restart"], env, final_dir)
+                return restart
+            pull = self._compose_run(base + ["pull"], env, final_dir)
+            return pull
+        finally:
+            self._mutation_lock.release()
+
+    def _extract_compose_bundle(self, bundle: bytes, revision_hash: str) -> dict[str, bytes]:
+        files: dict[str, bytes] = {}
+        total = 0
+        with tarfile.open(fileobj=io.BytesIO(bundle), mode="r:gz") as archive:
+            members = archive.getmembers()
+            if len(members) > 16:
+                raise ValueError("too many bundle entries")
+            for member in members:
+                if not member.isfile() or member.issym() or member.islnk():
+                    raise ValueError("bundle may contain regular files only")
+                name = member.name
+                if not _AGENT_FILE_RE.match(name) or name in {".", ".."} or "/" in name or "\\" in name:
+                    raise ValueError("bundle contains a path traversal or invalid name")
+                if member.size > 262144:
+                    raise ValueError("bundle entry exceeds the file size limit")
+                total += member.size
+                if total > 1_048_576:
+                    raise ValueError("bundle exceeds the total size limit")
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise ValueError("bundle entry could not be read")
+                data = extracted.read(member.size + 1)
+                if len(data) != member.size:
+                    raise ValueError("bundle entry size mismatch")
+                files[name] = data
+        _validate_compose_files(files)
+        if _compose_hash(files) != revision_hash:
+            raise ValueError("bundle revision hash mismatch")
+        return files
+
+    def _compose_run(self, args: list[str], env: dict[str, str], cwd: Path, timeout: int = 300) -> dict[str, Any]:
+        return self._run(
+            args[0],
+            args[1:],
+            env=env,
+            max_output=MAX_COMMAND_OUTPUT,
+            timeout=timeout,
+            cwd=str(cwd),
+        )
+
+    @staticmethod
+    def _compose_aggregate(status: str, *parts: dict[str, Any], error: str = "") -> dict[str, Any]:
+        stdout = "\n".join(str(part.get("stdout", "")) for part in parts if part.get("stdout"))
+        stderr = "\n".join(str(part.get("stderr", "")) for part in parts if part.get("stderr"))
+        exit_code = next((part.get("exit_code") for part in reversed(parts) if part.get("exit_code") is not None), None)
+        errors = [str(part.get("error", "")) for part in parts if part.get("error")]
+        if error:
+            errors.append(error)
+        return {
+            "status": status,
+            "exit_code": exit_code,
+            "stdout": stdout[:MAX_COMMAND_OUTPUT],
+            "stderr": stderr[:MAX_COMMAND_OUTPUT],
+            "error": "\n".join(errors)[:4000],
+        }
 
     def reset(self) -> None:
         self._status = None

@@ -49,6 +49,7 @@ class AgentConfig:
     docker_command: str = "docker"
     docker_timeout: int = 60
     docker_inventory_interval: int = 300
+    docker_compose_dir: str = "/var/lib/sextant-agent/docker/stacks"
     max_output_bytes: int = 200_000
 
     def validate(self) -> None:
@@ -68,6 +69,9 @@ class AgentConfig:
         self.docker_inventory_interval = max(60, min(int(self.docker_inventory_interval), 86400))
         self.docker_socket = str(self.docker_socket or "").strip()[:512]
         self.docker_command = str(self.docker_command or "docker").strip()[:512] or "docker"
+        self.docker_compose_dir = (
+            str(self.docker_compose_dir or "/var/lib/sextant-agent/docker/stacks").strip()[:1024]
+        )
         self.max_output_bytes = max(1024, min(int(self.max_output_bytes), 1_000_000))
 
     def redacted(self) -> dict[str, Any]:

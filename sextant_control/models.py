@@ -13,6 +13,8 @@ from .docker_rules import (
     NETWORK_ID_PATTERN,
     RENAME_PATTERN,
     RESTART_POLICY_PATTERN,
+    REVISION_HASH_PATTERN,
+    STACK_SLUG_PATTERN,
     USER_PATTERN,
     VOLUME_NAME_PATTERN,
     WORKDIR_PATTERN,
@@ -490,6 +492,57 @@ class DockerCleanupIn(BaseModel):
         "build_cache",
     ]
     include_compose: bool = False
+
+
+class DockerStackIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    slug: str = Field(pattern=STACK_SLUG_PATTERN)
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    files: dict[str, str] = Field(min_length=1, max_length=16)
+    message: str = Field(default="", max_length=2000)
+
+    @field_validator("files")
+    @classmethod
+    def _files(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > 16:
+            raise ValueError("at most 16 files are allowed")
+        for name, content in value.items():
+            if not name or len(name) > 128:
+                raise ValueError("invalid file name")
+            if len(content.encode("utf-8")) > 1_000_000:
+                raise ValueError(f"{name} is too large")
+        return value
+
+
+class DockerStackPatchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    files: dict[str, str] | None = Field(default=None, min_length=1, max_length=16)
+    message: str = Field(default="", max_length=2000)
+
+
+class DockerDeployIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_id: str = Field(min_length=4, max_length=64, pattern=r"^agt_[A-Za-z0-9]+$")
+    revision_hash: str = Field(default="", max_length=64)
+    project_name: str = Field(default="", max_length=63, pattern=r"^(?:[a-z0-9][a-z0-9_-]{0,62})?$")
+    action: Literal["up", "down", "restart", "pull"] = "up"
+    pull_before_up: bool = False
+    remove_volumes: bool = False
+
+    @field_validator("revision_hash")
+    @classmethod
+    def _revision_hash(cls, value: str) -> str:
+        if value and not re.match(REVISION_HASH_PATTERN, value):
+            raise ValueError("invalid revision hash")
+        return value
+
+
+class DockerSettingsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    compose_dir: str = Field(min_length=1, max_length=1024)
 
 
 class DockerInventoryIn(BaseModel):

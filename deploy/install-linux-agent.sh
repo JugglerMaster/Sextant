@@ -104,6 +104,9 @@ fi
 if [[ -n "${DOCKER_COMMAND:-}" ]]; then
   ENROLL_ARGS+=(--docker-command "$DOCKER_COMMAND")
 fi
+if [[ -n "${DOCKER_COMPOSE_DIR:-}" ]]; then
+  ENROLL_ARGS+=(--docker-compose-dir "$DOCKER_COMPOSE_DIR")
+fi
 if [[ "${NO_SELF_UPDATE:-0}" == "1" ]]; then
   ENROLL_ARGS+=(--no-self-update)
 fi

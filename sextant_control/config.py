@@ -99,6 +99,13 @@ class Settings:
     docker_enabled: bool = True
     docker_inventory_max_bytes: int = 2_000_000
     docker_inventory_stale_seconds: int = 900
+    docker_compose_dir: str = ""
+    docker_compose_dir_from_env: bool = False
+    docker_max_file_bytes: int = 262144
+    docker_max_files: int = 16
+    docker_max_total_bytes: int = 1_048_576
+    docker_max_bundle_bytes: int = 4_194_304
+    docker_deployment_retention_days: int = 90
     ssh_key_path: str = ""
     ssh_install_enabled: bool = True
     extra: dict = field(default_factory=dict)
@@ -114,6 +121,12 @@ class Settings:
     @property
     def bootstrap_file(self) -> Path:
         return self.data_dir / "bootstrap-admin.txt"
+
+    @property
+    def docker_compose_root(self) -> Path:
+        if self.docker_compose_dir:
+            return Path(self.docker_compose_dir).expanduser().resolve()
+        return (self.data_dir / "docker" / "compose").resolve()
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
@@ -209,6 +222,21 @@ class Settings:
             ),
             docker_inventory_stale_seconds=max(
                 60, _int(env.get("SEXTANT_DOCKER_INVENTORY_STALE_SECONDS"), 900, 60)
+            ),
+            docker_compose_dir=env.get("SEXTANT_DOCKER_COMPOSE_DIR", "").strip(),
+            docker_compose_dir_from_env=bool(env.get("SEXTANT_DOCKER_COMPOSE_DIR", "").strip()),
+            docker_max_file_bytes=max(
+                1024, _int(env.get("SEXTANT_DOCKER_MAX_FILE_BYTES"), 262144, 1024)
+            ),
+            docker_max_files=max(1, min(64, _int(env.get("SEXTANT_DOCKER_MAX_FILES"), 16, 1))),
+            docker_max_total_bytes=max(
+                1024, _int(env.get("SEXTANT_DOCKER_MAX_TOTAL_BYTES"), 1_048_576, 1024)
+            ),
+            docker_max_bundle_bytes=max(
+                1024, _int(env.get("SEXTANT_DOCKER_MAX_BUNDLE_BYTES"), 4_194_304, 1024)
+            ),
+            docker_deployment_retention_days=max(
+                1, _int(env.get("SEXTANT_DOCKER_DEPLOYMENT_RETENTION_DAYS"), 90, 1)
             ),
             ssh_key_path=env.get("SEXTANT_SSH_KEY_PATH", "").strip() or str(data_dir / "ssh" / "install_key"),
             ssh_install_enabled=_bool(env.get("SEXTANT_SSH_INSTALL_ENABLED"), True),

@@ -5,6 +5,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+STACK_SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{1,63}$"
+PROJECT_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,62}$"
+REVISION_HASH_PATTERN = r"^[a-f0-9]{64}$"
 CONTAINER_ID_PATTERN = r"^[a-f0-9]{12,64}$"
 IMAGE_ID_PATTERN = r"^(?:sha256:)?[a-f0-9]{12,64}$"
 NETWORK_ID_PATTERN = r"^[a-f0-9]{12,64}$"
@@ -16,6 +19,9 @@ RESTART_POLICY_PATTERN = r"^(?:no|always|unless-stopped|on-failure(?::[0-9]{1,5}
 MEMORY_PATTERN = r"^[0-9]{1,12}[bkmg]?$"
 CPUS_PATTERN = r"^[0-9]{1,4}(?:\.[0-9]{1,4})?$"
 
+STACK_SLUG_RE = re.compile(STACK_SLUG_PATTERN)
+PROJECT_NAME_RE = re.compile(PROJECT_NAME_PATTERN)
+REVISION_HASH_RE = re.compile(REVISION_HASH_PATTERN)
 CONTAINER_ID_RE = re.compile(CONTAINER_ID_PATTERN)
 IMAGE_ID_RE = re.compile(IMAGE_ID_PATTERN)
 NETWORK_ID_RE = re.compile(NETWORK_ID_PATTERN)
@@ -48,12 +54,14 @@ IMAGE_ACTIONS = {"image.remove"}
 VOLUME_ACTIONS = {"volume.remove"}
 NETWORK_ACTIONS = {"network.remove"}
 CLEANUP_ACTIONS = {"cleanup"}
+COMPOSE_ACTIONS = {"compose.up", "compose.down", "compose.restart", "compose.pull"}
 DOCKER_ACTIONS = (
     CONTAINER_ACTIONS
     | IMAGE_ACTIONS
     | VOLUME_ACTIONS
     | NETWORK_ACTIONS
     | CLEANUP_ACTIONS
+    | COMPOSE_ACTIONS
     | {"inventory.refresh"}
 )
 DOCKER_MUTATION_ACTIONS = (
@@ -63,6 +71,7 @@ DOCKER_MUTATION_ACTIONS = (
     | VOLUME_ACTIONS
     | NETWORK_ACTIONS
     | CLEANUP_ACTIONS
+    | COMPOSE_ACTIONS
 )
 DOCKER_CLEANUP_SCOPES = {
     "stopped_containers",
@@ -227,6 +236,30 @@ def normalize_docker_command_args(args: dict[str, Any]) -> dict[str, Any]:
         if not NETWORK_ID_RE.match(network_id):
             raise ValueError("invalid Docker network ID")
         return {"action": action, "network_id": network_id}
+    if action in COMPOSE_ACTIONS:
+        _check_keys(
+            args,
+            {"action", "deployment_id", "stack_id", "revision_hash", "project_name"},
+        )
+        deployment_id = _text(args, "deployment_id", 64)
+        stack_id = _text(args, "stack_id", 64)
+        revision_hash = _text(args, "revision_hash", 64)
+        project_name = _text(args, "project_name", 63)
+        if not re.match(r"^dep_[A-Za-z0-9]+$", deployment_id):
+            raise ValueError("invalid deployment ID")
+        if not re.match(r"^stk_[A-Za-z0-9]+$", stack_id):
+            raise ValueError("invalid stack ID")
+        if not REVISION_HASH_RE.match(revision_hash):
+            raise ValueError("invalid revision hash")
+        if not PROJECT_NAME_RE.match(project_name):
+            raise ValueError("invalid Compose project name")
+        return {
+            "action": action,
+            "deployment_id": deployment_id,
+            "stack_id": stack_id,
+            "revision_hash": revision_hash,
+            "project_name": project_name,
+        }
     if action == "cleanup":
         _check_keys(args, {"action", "scope", "include_compose"})
         scope = _text(args, "scope", 64).lower()

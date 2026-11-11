@@ -35,6 +35,14 @@ const state = {
   dockerActionBusy: false,
   dockerDialogTrigger: null,
   dockerCleanup: null,
+  composeStacks: [],
+  composeStackId: null,
+  composeDetail: null,
+  composeTab: "files",
+  composeDraftFiles: {},
+  composeFile: "compose.yaml",
+  composeSettings: null,
+  composeLoading: false,
   fleetFilters: { status: "all", profile: "", tag: "" },
   fleetRenderLimit: 60,
   agentCards: new Map(),
@@ -65,6 +73,7 @@ const PAGE_META = {
   overview: ["Fleet", "Live machines and health at a glance."],
   wake: ["Wake targets", "Send Wake-on-LAN packets to machines without agents."],
   "docker-hosts": ["Docker Hosts", "Select a host to inspect its cached Docker inventory."],
+  "compose-files": ["Compose Files", "Compose stack files, immutable revisions, and deployments."],
   enroll: ["Enrollment", "Issue one-time tokens and onboard agents."],
   audit: ["Audit log", "Who did what, from where, and when."],
   users: ["Users", "Local accounts and role-based access."],
@@ -542,6 +551,9 @@ function showLogin(message = "") {
   state.user = null;
   state.dockerHostId = null;
   state.dockerHostDetail = null;
+  state.composeStackId = null;
+  state.composeDetail = null;
+  state.composeDraftFiles = {};
   state.csrf = null;
   state.detailId = null;
   state.detailAgent = null;
@@ -740,6 +752,7 @@ function navigate(page, load = true) {
     loadDockerHosts();
     if (state.dockerHostId) loadDockerHostDetail(state.dockerHostId, true);
   }
+  if (page === "compose-files") loadComposeFiles();
   if (page === "enroll") loadEnrollmentTokens();
   if (page === "audit") loadAudit();
   if (page === "users") loadUsers();
@@ -4270,6 +4283,7 @@ function renderDockerTab() {
   if (state.dockerTab === "images") return renderDockerImages(body, detail);
   if (state.dockerTab === "volumes") return renderDockerVolumes(body, detail);
   if (state.dockerTab === "networks") return renderDockerNetworks(body, detail);
+  if (state.dockerTab === "stacks") return renderDockerHostStacks(body, detail);
   renderDockerOverview(body, detail);
 }
 
@@ -4831,6 +4845,63 @@ function renderDockerNetworks(body, detail) {
   body.append(section("Docker host", "Networks", ...children));
 }
 
+function renderDockerHostStacks(body, detail) {
+  const host = h("div", { class: "empty-inline" }, "Loading Compose projects…");
+  body.append(section("Docker host", "Compose stacks", host));
+  api(`/api/docker/deployments?agent_id=${encodeURIComponent(state.dockerHostId)}&limit=100`)
+    .then((data) => {
+      clear(host);
+      const active = (data.deployments || []).filter((deployment) => deployment.active);
+      const managedProjects = new Set(active.map((deployment) => deployment.project_name));
+      const managedRows = active.map((deployment) =>
+        h(
+          "tr",
+          {},
+          h("td", {}, h("strong", {}, deployment.stack_name || deployment.stack_slug || "—")),
+          h("td", {}, deployment.project_name),
+          h("td", { class: "mono" }, short(deployment.revision_hash, 16)),
+          h("td", {}, deployment.action),
+          h("td", {}, deployment.status),
+          h("td", {}, button("Open", "button-secondary button-small", () => {
+            navigate("compose-files");
+            openComposeStack(deployment.stack_id);
+          })),
+        ),
+      );
+      const projects = new Map();
+      for (const container of detail.containers || []) {
+        const project = container.compose_project || "";
+        if (!project || managedProjects.has(project)) continue;
+        if (!projects.has(project)) projects.set(project, []);
+        projects.get(project).push(container);
+      }
+      const externalRows = [...projects.entries()].map(([project, containers]) =>
+        h(
+          "tr",
+          {},
+          h("td", {}, h("strong", {}, project)),
+          h("td", {}, `${containers.length} container${containers.length === 1 ? "" : "s"}`),
+          h("td", {}, statusPill("external", "warning")),
+          h("td", {}, "Read-only in Sextant"),
+        ),
+      );
+      host.append(
+        h("h3", {}, "Managed stacks"),
+        managedRows.length
+          ? h("div", { class: "table-wrap" }, h("table", { class: "data-table" }, h("thead", {}, h("tr", {}, h("th", {}, "Stack"), h("th", {}, "Project"), h("th", {}, "Revision"), h("th", {}, "Action"), h("th", {}, "Status"), h("th", {}, ""))), h("tbody", {}, ...managedRows)))
+          : h("div", { class: "empty-inline" }, "No active Sextant Compose deployment on this host."),
+        h("h3", {}, "External Compose projects"),
+        externalRows.length
+          ? h("div", { class: "table-wrap" }, h("table", { class: "data-table" }, h("thead", {}, h("tr", {}, h("th", {}, "Project"), h("th", {}, "Containers"), h("th", {}, "State"), h("th", {}, "Management"))), h("tbody", {}, ...externalRows)))
+          : h("div", { class: "empty-inline" }, "No external Compose projects detected in the cached inventory."),
+      );
+    })
+    .catch((error) => {
+      clear(host);
+      host.append(h("div", { class: "empty-inline" }, error.message));
+    });
+}
+
 async function refreshDockerHost() {
   const agentId = state.dockerHostId;
   if (!agentId) return;
@@ -4875,6 +4946,509 @@ function startDockerRefreshPoll(agentId, baseline) {
     state.dockerRefreshTimer = setTimeout(tick, 3000);
   };
   state.dockerRefreshTimer = setTimeout(tick, 1200);
+}
+
+function composeAdmin() {
+  return Boolean(state.permissions.admin);
+}
+
+async function loadComposeFiles(silent = false) {
+  if (state.composeLoading) return;
+  state.composeLoading = true;
+  try {
+    const [stacks, settings] = await Promise.all([
+      api("/api/docker/stacks"),
+      state.permissions.admin ? api("/api/docker/settings") : Promise.resolve(null),
+    ]);
+    state.composeStacks = stacks.stacks || [];
+    state.composeSettings = settings;
+    renderComposeStackList();
+    renderComposeSettingsPanel();
+    if (state.composeStackId && !state.composeStacks.some((stack) => stack.id === state.composeStackId)) {
+      closeComposeStack();
+    }
+  } catch (error) {
+    if (!silent) toast(error.message, "error");
+    setText("compose-status", error.message);
+  } finally {
+    state.composeLoading = false;
+  }
+}
+
+function renderComposeStackList() {
+  const container = $("compose-stack-list");
+  const empty = $("compose-empty");
+  if (!container || !empty) return;
+  clear(container);
+  const stacks = state.composeStacks || [];
+  empty.hidden = stacks.length > 0;
+  setText(
+    "compose-status",
+    stacks.length
+      ? `${stacks.length} Compose stack${stacks.length === 1 ? "" : "s"}. Select one to view revisions or deploy.`
+      : "No Compose stacks yet.",
+  );
+  for (const stack of stacks) {
+    const selected = stack.id === state.composeStackId;
+    container.append(
+      h(
+        "div",
+        { class: "list-row" },
+        h(
+          "div",
+          {},
+          h("strong", {}, stack.name, " ", selected ? statusPill("selected", "online") : null),
+          h("p", { class: "form-hint" }, `${stack.slug} · revision ${short(stack.current_revision_hash, 12)} · ${stack.revision_count} revisions · ${stack.deployed_host_count} host${stack.deployed_host_count === 1 ? "" : "s"}`),
+          h("p", { class: "form-hint" }, `Updated ${relativeTime(stack.updated_at)} by ${stack.created_by}`),
+        ),
+        h(
+          "div",
+          { class: "list-row-actions" },
+          button(selected ? "Selected" : "Open", selected ? "button-ghost button-small" : "button-secondary button-small", () => openComposeStack(stack.id)),
+          composeAdmin()
+            ? button("Delete", "button-danger button-small", () => deleteComposeStack(stack), Boolean(stack.deployed_host_count))
+            : null,
+        ),
+      ),
+    );
+  }
+}
+
+function renderComposeSettingsPanel() {
+  const container = $("compose-settings");
+  if (!container || !state.permissions.admin) return;
+  clear(container);
+  if (!state.composeSettings) {
+    container.append(h("span", {}, "Loading storage settings…"));
+    return;
+  }
+  const settings = state.composeSettings;
+  const pathInput = h("input", { type: "text", value: settings.compose_dir || "", maxlength: "1024", disabled: !settings.editable });
+  container.append(
+    h("p", {}, `Effective path: ${settings.compose_dir}`),
+    h("p", {}, `Source: ${settings.source === "env" ? "environment (read-only)" : "Sextant database"}`),
+    h("p", {}, `${settings.counts?.stacks || 0} stacks · ${settings.counts?.revisions || 0} revision snapshots`),
+    h("div", { class: "section-toolbar" }, h("label", { class: "field" }, h("span", {}, "Compose directory"), pathInput), button("Save path", "button-secondary button-small", async () => {
+      try {
+        await api("/api/docker/settings", { method: "PATCH", body: { compose_dir: pathInput.value.trim() } });
+        toast("Compose storage path updated.");
+        await loadComposeFiles(true);
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    }, !settings.editable)),
+  );
+}
+
+function closeComposeStack() {
+  state.composeStackId = null;
+  state.composeDetail = null;
+  state.composeDraftFiles = {};
+  const detail = $("compose-stack-detail");
+  if (detail) detail.hidden = true;
+  renderComposeStackList();
+}
+
+async function openComposeStack(stackId) {
+  state.composeStackId = stackId;
+  state.composeTab = "files";
+  renderComposeStackList();
+  const detail = $("compose-stack-detail");
+  if (detail) detail.hidden = false;
+  setText("compose-stack-title", "Loading Compose stack…");
+  setText("compose-stack-meta", "Fetching revisions and files.");
+  try {
+    const data = await api(`/api/docker/stacks/${encodeURIComponent(stackId)}`);
+    if (state.composeStackId !== stackId) return;
+    state.composeDetail = data.stack;
+    state.composeDraftFiles = data.stack.contents ? { ...data.stack.contents } : {};
+    const names = Object.keys(state.composeDraftFiles);
+    state.composeFile = names.includes("compose.yaml")
+      ? "compose.yaml"
+      : names.includes("compose.yml")
+        ? "compose.yml"
+        : names.sort()[0] || "compose.yaml";
+    renderComposeDetail();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function renderComposeDetail() {
+  const stack = state.composeDetail;
+  if (!stack) return;
+  setText("compose-stack-title", stack.name);
+  setText("compose-stack-eyebrow", stack.slug);
+  setText("compose-stack-meta", `Current revision ${short(stack.current_revision_hash, 16)} · ${stack.revisions.length} revisions · ${stack.deployed_host_count} deployed host${stack.deployed_host_count === 1 ? "" : "s"}`);
+  const notice = $("compose-stack-notice");
+  if (notice) {
+    clear(notice);
+    notice.hidden = true;
+    if (!composeAdmin()) {
+      notice.hidden = false;
+      notice.append(h("p", {}, "Compose file contents and .env values are admin-only. You can deploy an existing revision."));
+    }
+  }
+  const deploy = $("compose-deploy-current");
+  if (deploy) {
+    deploy.disabled = !state.permissions.operate || !stack.revisions.length;
+  }
+  document.querySelectorAll("#compose-tabs .tab").forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.composeTab === state.composeTab);
+  });
+  renderComposeTab();
+}
+
+function renderComposeTab() {
+  const body = $("compose-body");
+  if (!body || !state.composeDetail) return;
+  clear(body);
+  if (state.composeTab === "revisions") return renderComposeRevisions(body);
+  if (state.composeTab === "deployments") return renderComposeDeployments(body);
+  renderComposeFiles(body);
+}
+
+function renderComposeFiles(body) {
+  const stack = state.composeDetail;
+  if (!composeAdmin()) {
+    body.append(
+      section("Compose stack", "Files", h("div", { class: "empty-inline" }, "Admins can view Compose file contents. Deploy an existing revision below.")),
+      h("div", { class: "section-toolbar" }, button("Deploy current revision", "button-primary", () => deployComposeDialog(stack, stack.current_revision_hash), !state.permissions.operate)),
+    );
+    return;
+  }
+  const names = Object.keys(state.composeDraftFiles).sort();
+  if (!names.includes(state.composeFile)) state.composeFile = names[0] || "compose.yaml";
+  const fileList = h("div", { class: "compose-file-list" });
+  for (const name of names) {
+    fileList.append(
+      button(name, `button-ghost button-small${name === state.composeFile ? " is-active" : ""}`, () => {
+        state.composeFile = name;
+        renderComposeTab();
+      }),
+    );
+  }
+  const editor = h("textarea", { class: "compose-editor", spellcheck: "false" });
+  editor.value = state.composeDraftFiles[state.composeFile] || "";
+  editor.addEventListener("input", () => {
+    state.composeDraftFiles[state.composeFile] = editor.value;
+  });
+  const name = h("input", { type: "text", maxlength: "120", value: stack.name });
+  const description = h("input", { type: "text", maxlength: "2000", value: stack.description || "" });
+  body.append(
+    section(
+      "Compose stack",
+      "Files",
+      h("div", { class: "form-grid" }, h("label", { class: "field" }, h("span", {}, "Name"), name), h("label", { class: "field" }, h("span", {}, "Description"), description)),
+      h("p", { class: "form-hint" }, `Files are stored under ${state.composeSettings?.compose_dir || "the configured Compose directory"}. Revisions are immutable; saving creates a new one.`),
+      fileList,
+      h("div", { class: "section-toolbar" },
+        button("Add override", "button-ghost button-small", () => addComposeOverrideDialog()),
+        button("Remove file", "button-danger button-small", () => {
+          if (!["compose.yaml", "compose.yml"].includes(state.composeFile)) {
+            delete state.composeDraftFiles[state.composeFile];
+            state.composeFile = Object.keys(state.composeDraftFiles).sort()[0] || "compose.yaml";
+            renderComposeTab();
+          }
+        }, ["compose.yaml", "compose.yml", ".env"].includes(state.composeFile)),
+      ),
+      editor,
+      h("div", { class: "section-toolbar" },
+        button("Save new revision", "button-primary", () => saveComposeStack(name.value.trim(), description.value.trim()), !name.value.trim() || state.composeBusy),
+        button("Deploy current revision", "button-secondary", () => deployComposeDialog(stack, stack.current_revision_hash), !state.permissions.operate),
+      ),
+    ),
+  );
+}
+
+function addComposeOverrideDialog() {
+  openDockerDialog("Add Compose override", "Compose file", (body) => {
+    const name = h("input", { type: "text", maxlength: "128", placeholder: "override.yaml" });
+    const form = h("form", { class: "form-stack" }, h("label", { class: "field" }, h("span", {}, "File name"), name), h("p", { class: "form-hint" }, "Flat YAML only. use override.yaml or override.yml."));
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const value = name.value.trim();
+      if (!value || !/^[A-Za-z0-9._-]{1,128}\.(ya?ml)$/.test(value) || value.startsWith("compose.")) {
+        return setText("docker-dialog-error", "Enter a valid override.yaml or override.yml name.");
+      }
+      state.composeDraftFiles[value] = "services: {}\n";
+      state.composeFile = value;
+      closeDockerDialog();
+      renderComposeTab();
+    });
+    body.append(form);
+  }, (actions) => {
+    actions.append(button("Add file", "button-primary", () => $("docker-dialog-body").querySelector("form")?.requestSubmit()));
+  });
+}
+
+async function saveComposeStack(name, description) {
+  const stack = state.composeDetail;
+  if (!stack || state.composeBusy) return;
+  state.composeBusy = true;
+  try {
+    const payload = { name, description, files: state.composeDraftFiles, message: "UI edit" };
+    const data = await api(`/api/docker/stacks/${encodeURIComponent(stack.id)}`, { method: "PUT", body: payload });
+    state.composeDetail = data.stack;
+    state.composeDraftFiles = data.stack.contents ? { ...data.stack.contents } : {};
+    toast("Compose revision created.");
+    await loadComposeFiles(true);
+    renderComposeDetail();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.composeBusy = false;
+  }
+}
+
+function newComposeStackDialog() {
+  openDockerDialog("New Compose stack", "Compose Files", (body) => {
+    const slug = h("input", { type: "text", maxlength: "64", placeholder: "web" });
+    const name = h("input", { type: "text", maxlength: "120", placeholder: "Web stack" });
+    const description = h("input", { type: "text", maxlength: "2000" });
+    const compose = h("textarea", { class: "compose-editor", spellcheck: "false" });
+    compose.value = "services:\n  web:\n    image: nginx:latest\n";
+    const form = h(
+      "form",
+      { class: "form-stack" },
+      h("div", { class: "form-grid" }, h("label", { class: "field" }, h("span", {}, "Slug"), slug), h("label", { class: "field" }, h("span", {}, "Name"), name)),
+      h("label", { class: "field" }, h("span", {}, "Description"), description),
+      h("label", { class: "field" }, h("span", {}, "compose.yaml"), compose),
+    );
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const data = await api("/api/docker/stacks", {
+          method: "POST",
+          body: { slug: slug.value.trim(), name: name.value.trim(), description: description.value.trim(), files: { "compose.yaml": compose.value }, message: "Created in UI" },
+        });
+        closeDockerDialog();
+        toast("Compose stack created.");
+        await loadComposeFiles(true);
+        await openComposeStack(data.stack.id);
+      } catch (error) {
+        setText("docker-dialog-error", error.message);
+      }
+    });
+    body.append(form);
+  }, (actions) => {
+    actions.append(button("Create stack", "button-primary", () => $("docker-dialog-body").querySelector("form")?.requestSubmit()));
+  });
+}
+
+async function deleteComposeStack(stack) {
+  const confirmed = await confirmAction(`Delete ${stack.name}?`, "This removes the stack and its revision files. Active deployments must be down first.", "Delete stack");
+  if (!confirmed) return;
+  try {
+    await api(`/api/docker/stacks/${encodeURIComponent(stack.id)}`, { method: "DELETE" });
+    toast("Compose stack deleted.");
+    closeComposeStack();
+    await loadComposeFiles(true);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function renderComposeRevisions(body) {
+  const stack = state.composeDetail;
+  const rows = (stack.revisions || []).map((revision) =>
+    h(
+      "tr",
+      {},
+      h("td", { class: "mono" }, short(revision.revision_hash, 16)),
+      h("td", {}, revision.created_at ? localTime(revision.created_at) : "—"),
+      h("td", {}, revision.message || "—"),
+      h("td", {}, revision.created_by),
+      h("td", {}, (revision.files || []).map((file) => file.name).join(", ")),
+      h("td", {}, h("div", { class: "docker-row-actions" },
+        button("Deploy", "button-secondary button-small", () => deployComposeDialog(stack, revision.revision_hash), !state.permissions.operate),
+        revision.revision_hash !== stack.current_revision_hash
+          ? button("Roll back", "button-ghost button-small", () => deployComposeDialog(stack, revision.revision_hash), !state.permissions.operate)
+          : null,
+      )),
+    ),
+  );
+  body.append(
+    section(
+      "Compose stack",
+      "Revisions",
+      rows.length
+        ? h("div", { class: "table-wrap" }, h("table", { class: "data-table" }, h("thead", {}, h("tr", {}, h("th", {}, "Revision"), h("th", {}, "Created"), h("th", {}, "Message"), h("th", {}, "By"), h("th", {}, "Files"), h("th", {}, "Actions"))), h("tbody", {}, ...rows)))
+        : h("div", { class: "empty-inline" }, "No revisions found."),
+    ),
+  );
+}
+
+async function renderComposeDeployments(body) {
+  const stack = state.composeDetail;
+  const host = h("div", { class: "empty-inline" }, "Loading deployments…");
+  body.append(section("Compose stack", "Deployments", host));
+  try {
+    const data = await api(`/api/docker/deployments?stack_id=${encodeURIComponent(stack.id)}&limit=100`);
+    clear(host);
+    const rows = (data.deployments || []).map((deployment) =>
+      h(
+        "tr",
+        {},
+        h("td", {}, deployment.action),
+        h("td", {}, deployment.agent_name || deployment.agent_id),
+        h("td", {}, deployment.project_name),
+        h("td", { class: "mono" }, short(deployment.revision_hash, 12)),
+        h("td", {}, (() => {
+          const state = deployment.drift
+            ? "drift"
+            : deployment.active && deployment.status === "succeeded"
+              ? "deployed"
+              : deployment.status;
+          return statusPill(
+            state,
+            state === "failed" ? "critical" : state === "drift" ? "warning" : state === "deployed" ? "online" : "neutral",
+          );
+        })()),
+        h("td", {}, deployment.created_by),
+        h("td", {}, deployment.created_at ? relativeTime(deployment.created_at) : "—"),
+        h("td", {}, h("div", { class: "docker-row-actions" },
+          button("Log", "button-ghost button-small", () => showComposeDeploymentLog(deployment)),
+          deployment.status === "queued" && deployment.command_id
+            ? button("Cancel", "button-ghost button-small", () => cancelComposeDeployment(deployment))
+            : null,
+          deployment.active && deployment.action === "up"
+            ? button("Down", "button-danger button-small", () => openComposeDownDialog(deployment))
+            : null,
+          deployment.active && deployment.action === "up"
+            ? button("Restart", "button-ghost button-small", () => composeExistingAction(deployment, "restart"))
+            : null,
+          deployment.active && deployment.action === "up"
+            ? button("Pull", "button-ghost button-small", () => composeExistingAction(deployment, "pull"))
+            : null,
+        )),
+      ),
+    );
+    host.append(
+      rows.length
+        ? h("div", { class: "table-wrap" }, h("table", { class: "data-table" }, h("thead", {}, h("tr", {}, h("th", {}, "Action"), h("th", {}, "Host"), h("th", {}, "Project"), h("th", {}, "Revision"), h("th", {}, "Status"), h("th", {}, "Actor"), h("th", {}, "When"), h("th", {}, "Actions"))), h("tbody", {}, ...rows)))
+        : h("div", { class: "empty-inline" }, "No deployments for this stack yet."),
+    );
+  } catch (error) {
+    clear(host);
+    host.append(h("div", { class: "empty-inline" }, error.message));
+  }
+}
+
+function showComposeDeploymentLog(deployment) {
+  api(`/api/docker/deployments/${encodeURIComponent(deployment.id)}`)
+    .then((data) => {
+      openDockerDialog(`${deployment.action} · ${deployment.project_name}`, "Deployment log", (body) => {
+        body.append(
+          h("div", { class: "compose-meta-grid" },
+            infoTile("Status", deployment.status),
+            infoTile("Host", deployment.agent_name || deployment.agent_id),
+            infoTile("Revision", short(deployment.revision_hash, 16)),
+            infoTile("Started", deployment.started_at ? localTime(deployment.started_at) : "—"),
+            infoTile("Finished", deployment.finished_at ? localTime(deployment.finished_at) : "—"),
+          ),
+          h("pre", { class: "terminal docker-dialog-output" }, data.deployment.log || data.deployment.error || "(no log)"),
+        );
+      });
+    })
+    .catch((error) => toast(error.message, "error"));
+}
+
+async function cancelComposeDeployment(deployment) {
+  try {
+    await api(`/api/commands/${encodeURIComponent(deployment.command_id)}/cancel`, { method: "POST", body: {} });
+    toast("Compose deployment cancelled.");
+    renderComposeTab();
+    await loadComposeFiles(true);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function composeExistingAction(deployment, action) {
+  return composeDeploy(deployment.stack_id, deployment.agent_id, deployment.revision_hash, deployment.project_name, action, false);
+}
+
+function openComposeDownDialog(deployment) {
+  openDockerDialog(`Down · ${deployment.project_name}`, "Compose down", (body) => {
+    const removeVolumes = h("input", { type: "checkbox" });
+    body.append(
+      h("p", { class: "form-hint" }, "Stops and removes the selected Compose project. Volumes are retained unless explicitly selected."),
+      h("label", { class: "checkbox-row" }, removeVolumes, h("span", {}, "Also remove named volumes (destructive)")),
+    );
+    body.append(button("Confirm down", "button-danger", () => {
+      closeDockerDialog();
+      composeDeploy(deployment.stack_id, deployment.agent_id, deployment.revision_hash, deployment.project_name, "down", removeVolumes.checked);
+    }));
+  });
+}
+
+function deployComposeDialog(stack, revisionHash) {
+  api("/api/docker/hosts")
+    .then((data) => {
+      const hosts = (data.hosts || []).filter((host) => host.available && host.capabilities?.compose !== false);
+      openDockerDialog(`Deploy ${stack.name}`, "Compose deployment", (body) => {
+        if (!hosts.length) {
+          body.append(h("div", { class: "empty-inline" }, "No Docker host currently allows Compose deployment."));
+          return;
+        }
+        const host = h("select", {}, ...hosts.map((item) => h("option", { value: item.agent_id }, `${item.name} (${item.hostname})`)));
+        const revision = h("select", {}, ...(stack.revisions || []).map((item) => h("option", { value: item.revision_hash }, `${short(item.revision_hash, 16)} · ${item.created_at ? localTime(item.created_at) : ""}`)));
+        if (revisionHash) revision.value = revisionHash;
+        const project = h("input", { type: "text", maxlength: "63", value: `sextant_${stack.slug}`.slice(0, 63) });
+        const pull = h("input", { type: "checkbox" });
+        const form = h(
+          "form",
+          { class: "form-stack" },
+          h("label", { class: "field" }, h("span", {}, "Docker host"), host),
+          h("label", { class: "field" }, h("span", {}, "Revision"), revision),
+          h("label", { class: "field" }, h("span", {}, "Project name"), project),
+          h("label", { class: "checkbox-row" }, pull, h("span", {}, "Pull images before up")),
+          h("p", { class: "form-hint" }, "Deploys the selected immutable revision to one host. The previous active deployment stays active if this fails."),
+        );
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          closeDockerDialog();
+          composeDeploy(stack.id, host.value, revision.value, project.value.trim(), "up", false, pull.checked);
+        });
+        body.append(form);
+      }, (actions) => {
+        actions.append(button("Deploy", "button-primary", () => $("docker-dialog-body").querySelector("form")?.requestSubmit(), !state.permissions.operate));
+      });
+    })
+    .catch((error) => toast(error.message, "error"));
+}
+
+async function composeDeploy(stackId, agentId, revisionHash, projectName, action, removeVolumes = false, pullBeforeUp = false) {
+  const status = $("compose-status");
+  if (status) status.textContent = `Queuing Compose ${action}…`;
+  try {
+    const data = await api(`/api/docker/stacks/${encodeURIComponent(stackId)}/deploy`, {
+      method: "POST",
+      body: {
+        agent_id: agentId,
+        revision_hash: revisionHash,
+        project_name: projectName,
+        action,
+        pull_before_up: pullBeforeUp,
+        remove_volumes: removeVolumes,
+      },
+    });
+    if (status) status.textContent = `Compose ${action} queued for ${data.deployment.agent_name || agentId}.`;
+    toast(`Compose ${action} queued.`);
+    if (state.composeStackId === stackId) {
+      if (state.composeTab !== "deployments") {
+        state.composeTab = "deployments";
+        renderComposeDetail();
+      } else {
+        renderComposeTab();
+      }
+    }
+    await loadComposeFiles(true);
+  } catch (error) {
+    if (status) status.textContent = error.message;
+    toast(error.message, "error");
+  }
 }
 
 function renderSecurity() {
@@ -5212,6 +5786,20 @@ function wireEvents() {
         tab.classList.toggle("is-active", tab === el);
       });
       renderDockerTab();
+    });
+  });
+  $("compose-new")?.addEventListener("click", newComposeStackDialog);
+  $("compose-close")?.addEventListener("click", closeComposeStack);
+  $("compose-deploy-current")?.addEventListener("click", () => {
+    if (state.composeDetail) deployComposeDialog(state.composeDetail, state.composeDetail.current_revision_hash);
+  });
+  document.querySelectorAll("#compose-tabs .tab").forEach((el) => {
+    el.addEventListener("click", () => {
+      state.composeTab = el.dataset.composeTab;
+      document.querySelectorAll("#compose-tabs .tab").forEach((tab) => {
+        tab.classList.toggle("is-active", tab === el);
+      });
+      renderComposeTab();
     });
   });
 

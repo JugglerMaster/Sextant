@@ -175,6 +175,37 @@ There is no pixel-level remote desktop or input injection in this version. “Re
   one-command-per-heartbeat queue. Cached inventory remains visible while
   offline, but mutations are rejected or queued according to that policy.
 
+## Compose library (D3)
+
+- **Admin-managed files.** Only admins can create/edit/delete Compose stacks.
+  Operators can deploy existing revisions; viewers see metadata only. `.env`
+  content is never returned to operators/viewers and is never written to audit
+  details.
+- **Path safety.** The Compose root must be absolute, resolved, non-root, and
+  free of symlink components. Files are flat, validated names only; traversal,
+  absolute paths, subdirectories, devices, non-regular files, and symlinks are
+  rejected. Writes use temp files and atomic replace with `0600` files and
+  `0700` directories.
+- **Content safety.** V1 accepts image-based Compose only and rejects `build:`
+  services. Stack files are UTF-8, size/count/total capped, and hashed
+  deterministically. Revisions are immutable once written.
+- **Bundle safety.** The agent downloads only its own deployment bundle with
+  bearer auth. The server sends bundle/revision hashes and size headers; the
+  agent verifies both the archive SHA-256/size and the extracted revision hash,
+  and rejects traversal, symlinks, hardlinks, non-regular entries, and oversize
+  entries. It extracts into a managed directory and runs Compose there.
+- **Deployment isolation.** Project names are validated and unique per host;
+  collisions with active or external Compose projects are rejected. One active
+  Docker mutation is allowed per host. `down` removes volumes only when explicitly
+  requested; failed deploys leave the previous active revision intact.
+- **Settings.** When `SEXTANT_DOCKER_COMPOSE_DIR` is set, the path is fixed and
+  the API/UI refuse edits. Database-managed migration copies the library to an
+  empty target, verifies every revision hash, then switches the setting; a
+  non-empty non-Sextant target is refused.
+- **Audit.** Stack create/update/delete, deploy requests/results, settings
+  migration, and cancellation are audited. File bytes, `.env` values, and
+  bundle contents are not audited. Deployment logs are bounded.
+
 ## Transport and deployment
 
 - Run behind HTTPS. The supplied deployment uses nginx with TLS 1.2/1.3 and HTTP→HTTPS redirect.

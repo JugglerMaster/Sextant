@@ -259,6 +259,24 @@ class AgentRunner:
                     "stderr": "",
                     "error": "Docker inventory could not be collected or uploaded.",
                 }
+        elif action.startswith("compose."):
+            deployment_id = str(args.get("deployment_id", "") or "")
+            try:
+                bundle, headers = self.client.download_bundle(
+                    f"/api/agent/{self.config.agent_id}/docker/deployments/{deployment_id}/bundle",
+                    max_bytes=4 * 1024 * 1024,
+                )
+                result = self.docker.execute_compose(action, args, bundle, headers)
+            except Exception as exc:
+                result = {
+                    "status": "failed",
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "error": f"Compose bundle download failed: {exc}",
+                }
+            if result.get("status") == "succeeded":
+                self._upload_docker_inventory(force=True)
         else:
             result = self.docker.execute_action(action, args)
             if result.get("status") == "succeeded" and action in DOCKER_MUTATION_ACTIONS:

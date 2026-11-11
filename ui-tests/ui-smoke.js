@@ -260,6 +260,61 @@ const dockerDetail = {
 const dockerCommandResults = {};
 let dockerCommandSeq = 0;
 
+const composeRevision = "e".repeat(64);
+const composeStack = {
+  id: "stk_web",
+  slug: "web",
+  name: "Web stack",
+  description: "Compose web stack",
+  current_revision_hash: composeRevision,
+  created_by: "admin",
+  created_at: "2026-11-06T07:00:00Z",
+  updated_at: "2026-11-06T08:00:00Z",
+  archived_at: null,
+  deployed_host_count: 1,
+  revision_count: 1,
+  files: [{ name: ".env", size: 19 }, { name: "compose.yaml", size: 74 }],
+  contents: {
+    "compose.yaml": "services:\n  web:\n    image: nginx:latest\n",
+    ".env": "TOKEN=secret-value\n",
+  },
+  revisions: [
+    {
+      id: "rev_web",
+      stack_id: "stk_web",
+      revision_hash: composeRevision,
+      message: "initial",
+      created_by: "admin",
+      created_at: "2026-11-06T08:00:00Z",
+      files: [{ name: ".env", size: 19 }, { name: "compose.yaml", size: 74 }],
+    },
+  ],
+};
+const composeDeployments = [
+  {
+    id: "dep_web",
+    stack_id: "stk_web",
+    agent_id: "agt_demo",
+    revision_hash: composeRevision,
+    project_name: "sextant_web",
+    action: "up",
+    status: "succeeded",
+    command_id: "cmd_compose",
+    active: true,
+    pull_before_up: true,
+    remove_volumes: false,
+    created_by: "admin",
+    created_at: "2026-11-06T08:00:00Z",
+    started_at: "2026-11-06T08:00:01Z",
+    finished_at: "2026-11-06T08:00:10Z",
+    error: "",
+    log: "Container web-1 Started",
+    stack_name: "Web stack",
+    stack_slug: "web",
+    agent_name: "Studio PC",
+  },
+];
+
 const responses = {
   "/api/auth/config": { status: 200, body: { ldap_enabled: false, version: "0.3.0", public_url: "" } },
   "/api/me": { status: 401, body: { detail: "Authentication required." } },
@@ -348,6 +403,24 @@ const responses = {
   "/api/profile-tags": { status: 200, body: { assignments: [] } },
   "/api/docker/hosts": { status: 200, body: { server_time: "2026-11-06T08:00:30Z", stale_seconds: 900, hosts: [dockerHost] } },
   "/api/docker/hosts/agt_demo": { status: 200, body: dockerDetail },
+  "/api/docker/stacks": { status: 200, body: { stacks: [composeStack] } },
+  "/api/docker/stacks/stk_web": { status: 200, body: { stack: composeStack } },
+  "/api/docker/deployments": { status: 200, body: { deployments: composeDeployments } },
+  "/api/docker/deployments/dep_web": { status: 200, body: { deployment: composeDeployments[0] } },
+  "/api/docker/settings": {
+    status: 200,
+    body: {
+      compose_dir: "/var/lib/sextant/docker/compose",
+      source: "database",
+      editable: true,
+      max_file_bytes: 262144,
+      max_files: 16,
+      max_total_bytes: 1048576,
+      max_bundle_bytes: 4194304,
+      deployment_retention_days: 90,
+      counts: { stacks: 1, revisions: 1 },
+    },
+  },
   "/api/docker/hosts/agt_demo/cleanup": {
     status: 200,
     body: {
@@ -535,6 +608,8 @@ window.fetch = async (path, options = {}) => {
     response = { status: 200, body: { mac: agent.mac, sent: 3 } };
   } else if (method === "GET" && key === "/api/docker/hosts" && window.__dockerEmpty) {
     response = { status: 200, body: { server_time: "2026-11-06T08:00:30Z", stale_seconds: 900, hosts: [] } };
+  } else if (method === "GET" && key === "/api/docker/stacks" && window.__composeEmpty) {
+    response = { status: 200, body: { stacks: [] } };
   } else if (method === "POST" && key === "/api/docker/hosts/agt_demo/refresh") {
     dockerHost.inventory_at = "2026-11-06T08:01:00Z";
     dockerHost.collected_at = "2026-11-06T08:01:00Z";
@@ -568,6 +643,57 @@ window.fetch = async (path, options = {}) => {
   } else if (method === "GET" && key.startsWith("/api/commands/cmd_docker_")) {
     const commandId = key.slice("/api/commands/".length);
     response = { status: 200, body: { command: dockerCommandResults[commandId] } };
+  } else if (method === "POST" && key === "/api/docker/stacks/stk_web/deploy") {
+    const deployment = {
+      ...composeDeployments[0],
+      id: `dep_${composeDeployments.length + 1}`,
+      action: body?.action || "up",
+      status: "queued",
+      active: false,
+      project_name: body?.project_name || "sextant_web",
+      revision_hash: body?.revision_hash || composeRevision,
+      created_at: "2026-11-06T08:05:00Z",
+      started_at: null,
+      finished_at: null,
+    };
+    composeDeployments.unshift(deployment);
+    response = {
+      status: 200,
+      body: {
+        deployment,
+        command: { id: "cmd_compose", kind: "docker", args: { action: `compose.${deployment.action}` }, status: "queued", queued: true },
+      },
+    };
+  } else if (method === "PUT" && key === "/api/docker/stacks/stk_web") {
+    const next = {
+      ...composeStack,
+      name: body?.name || composeStack.name,
+      description: body?.description || composeStack.description,
+      contents: body?.files || composeStack.contents,
+      files: Object.keys(body?.files || composeStack.contents).sort().map((name) => ({ name, size: String((body?.files || composeStack.contents)[name]).length })),
+      current_revision_hash: "f".repeat(64),
+      revision_count: (composeStack.revision_count || 1) + 1,
+      revisions: [
+        {
+          id: "rev_web_2",
+          stack_id: "stk_web",
+          revision_hash: "f".repeat(64),
+          message: body?.message || "UI edit",
+          created_by: "admin",
+          created_at: "2026-11-06T08:05:00Z",
+          files: [{ name: "compose.yaml", size: 74 }],
+        },
+        ...(composeStack.revisions || []),
+      ],
+    };
+    Object.assign(composeStack, next);
+    responses["/api/docker/stacks/stk_web"] = { status: 200, body: { stack: composeStack } };
+    responses["/api/docker/stacks"] = { status: 200, body: { stacks: [composeStack] } };
+    response = { status: 200, body: { stack: composeStack } };
+  } else if (method === "POST" && key === "/api/docker/stacks") {
+    response = { status: 200, body: { stack: { ...composeStack, id: "stk_new", slug: body?.slug || "new", name: body?.name || "New stack" } } };
+  } else if (method === "DELETE" && key === "/api/docker/stacks/stk_web") {
+    response = { status: 204, body: null };
   } else {
     response = responses[key] || { status: 404, body: { detail: `No mock for ${key}` } };
   }
@@ -1346,6 +1472,70 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     throw new Error("Docker host list did not recover after empty state");
   }
 
+  window.document.querySelector('[data-page="compose-files"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  const composeList = window.document.getElementById("compose-stack-list");
+  if (!composeList.textContent.includes("Web stack")) throw new Error("Compose stack list did not render");
+  if (!window.document.getElementById("compose-settings").textContent.includes("/var/lib/sextant/docker/compose")) {
+    throw new Error("Compose storage settings did not render");
+  }
+  findButton(composeList, "Open").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  if (window.document.getElementById("compose-stack-detail").hidden) throw new Error("Compose stack detail did not open");
+  if (!window.document.getElementById("compose-stack-title").textContent.includes("Web stack")) {
+    throw new Error("Compose stack title is wrong");
+  }
+  const composeEditor = window.document.querySelector("#compose-body .compose-editor");
+  if (!composeEditor || !composeEditor.value.includes("nginx:latest")) {
+    throw new Error("Compose editor did not load compose.yaml");
+  }
+  findButton(window.document.querySelector(".compose-file-list"), ".env").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(10);
+  if (!window.document.querySelector("#compose-body .compose-editor").value.includes("secret-value")) {
+    throw new Error("Admin Compose .env editor did not render");
+  }
+  findButton(window.document.querySelector(".compose-file-list"), "compose.yaml").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  window.document.querySelector('[data-compose-tab="revisions"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  if (!window.document.getElementById("compose-body").textContent.includes(composeRevision.slice(0, 12))) {
+    throw new Error("Compose revisions did not render");
+  }
+  findButton(window.document.getElementById("compose-body"), "Deploy").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
+  if (!window.document.getElementById("docker-dialog").open) throw new Error("Compose deploy dialog did not open");
+  if (!window.document.getElementById("docker-dialog").textContent.includes("Project name")) {
+    throw new Error("Compose deploy form is missing project name");
+  }
+  findButton(window.document.getElementById("docker-dialog"), "Deploy").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(120);
+  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/docker/stacks/stk_web/deploy")) {
+    throw new Error("Compose deploy was not sent");
+  }
+  if (!window.document.getElementById("compose-body").textContent.includes("queued")) {
+    throw new Error("Compose deployment history did not render");
+  }
+  window.document.querySelector('[data-compose-tab="files"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  const newEditor = window.document.querySelector("#compose-body .compose-editor");
+  newEditor.value = "services:\n  web:\n    image: nginx:1.27\n";
+  newEditor.dispatchEvent(new window.Event("input", { bubbles: true }));
+  findButton(window.document.getElementById("compose-body"), "Save new revision").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(100);
+  if (!window.__requests.some((request) => request.method === "PUT" && request.path === "/api/docker/stacks/stk_web")) {
+    throw new Error("Compose revision save was not sent");
+  }
+  window.document.getElementById("compose-new").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  if (!window.document.getElementById("docker-dialog").open) throw new Error("New Compose stack dialog did not open");
+  findButton(window.document.getElementById("docker-dialog"), "Close").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+  window.__composeEmpty = true;
+  window.document.querySelector('[data-page="overview"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  window.document.querySelector('[data-page="compose-files"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  if (window.document.getElementById("compose-empty").hidden) throw new Error("Compose empty state did not render");
+  window.__composeEmpty = false;
+
   const themeToggle = window.document.getElementById("theme-toggle");
   if (!themeToggle) throw new Error("theme toggle missing");
   if (window.document.documentElement.dataset.theme !== "dark") throw new Error("dark theme should be the default");
@@ -1415,7 +1605,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty plus inspect/logs/exec/remove/cleanup/offline states, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty plus inspect/logs/exec/remove/cleanup/offline states, Compose Files list/editor/revisions/deploy/deployment history, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

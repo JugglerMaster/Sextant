@@ -611,6 +611,74 @@ inventory; the agent resolves it again with `docker inspect`. Every request and
 result is audited. Result output is returned through the normal command
 endpoint, and completed mutations create `docker.action` agent events.
 
+### Compose library and deployments
+
+| Method | Path | Role | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/docker/stacks` | viewer+ | Stack metadata, revision count, deployed host count |
+| `GET` | `/api/docker/stacks/{id}` | viewer+ | Stack metadata/revisions; admin also gets file contents |
+| `POST` | `/api/docker/stacks` | admin | Create a stack and first immutable revision |
+| `PUT` | `/api/docker/stacks/{id}` | admin | Save files as a new immutable revision |
+| `DELETE` | `/api/docker/stacks/{id}` | admin | Delete only when no active deployment remains |
+| `POST` | `/api/docker/stacks/{id}/deploy` | operator+ | Deploy up/down/restart/pull to one host |
+| `GET` | `/api/docker/deployments?agent_id=&stack_id=&limit=` | viewer+ | Deployment history |
+| `GET` | `/api/docker/deployments/{id}` | viewer+ | One deployment with bounded log |
+| `GET` | `/api/docker/settings` | admin | Effective Compose dir, source, limits, counts |
+| `PATCH` | `/api/docker/settings` | admin | Migrate/change Compose dir when not fixed by env |
+
+Create/update body:
+
+```json
+{
+  "slug": "web",
+  "name": "Web stack",
+  "description": "Public web",
+  "files": {
+    "compose.yaml": "services:\n  web:\n    image: nginx:latest\n",
+    ".env": "TOKEN=..."
+  },
+  "message": "initial"
+}
+```
+
+Flat files only: exactly one `compose.yaml`/`compose.yml`, optional `.env`, and
+`*.yaml`/`*.yml` overrides. `build:` services, traversal, symlinks, oversized
+files, and non-Compose extensions are rejected. `.env` content is admin-only;
+operators/viewers receive file names and revision metadata but no contents.
+
+Deploy body:
+
+```json
+{
+  "agent_id": "agt_123",
+  "revision_hash": "…64 hex…",
+  "project_name": "sextant_web",
+  "action": "up",
+  "pull_before_up": true,
+  "remove_volumes": false
+}
+```
+
+The project name is unique per host among active Sextant deployments and must
+not collide with an external Compose project. Down/restart/pull use the active
+deployment when no revision is supplied. `remove_volumes` only affects `down`
+and is never enabled by default.
+
+The command carries only the deployment/stack IDs, revision hash, and project
+name. The agent downloads the exact revision bundle:
+
+```http
+GET /api/agent/agt_123/docker/deployments/dep_123/bundle
+Authorization: Bearer sextant_agent_...
+```
+
+The response is a gzip/tar bundle with `X-Bundle-Sha256`,
+`X-Compose-Revision`, `X-Compose-Pull`, and `X-Compose-Remove-Volumes`
+headers. The agent verifies the bundle hash/size and extracted revision hash
+before running Compose. Failed deploys leave the previous active deployment
+intact. A queued deployment can be cancelled through the normal command cancel
+route.
+
 ## Package management
 
 | Method | Route | Role | Purpose |
@@ -813,6 +881,7 @@ These paths bypass browser CSRF and use the agent bearer token.
 | `POST` | `/api/agent/enroll` | enrollment token in body | Exchange one-time token for agent credentials |
 | `POST` | `/api/agent/{id}/heartbeat` | Bearer | Upload telemetry + Docker summary, fetch queued commands |
 | `POST` | `/api/agent/{id}/docker/inventory` | Bearer | Upload a bounded full Docker inventory |
+| `GET` | `/api/agent/{id}/docker/deployments/{deployment_id}/bundle` | Bearer | Download the exact Compose revision bundle for a deployment owned by that agent |
 | `POST` | `/api/agent/{id}/commands/{command_id}/output` | Bearer | Upload an incremental stdout/stderr chunk |
 | `POST` | `/api/agent/{id}/commands/{command_id}/result` | Bearer | Upload the authoritative final command result |
 

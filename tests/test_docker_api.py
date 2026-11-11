@@ -123,7 +123,14 @@ def inventory_payload(**overrides) -> dict:
     return payload
 
 
-def enable_docker_profile(client, admin, *, exec_allowed=False, prune_allowed=False) -> None:
+def enable_docker_profile(
+    client,
+    admin,
+    *,
+    exec_allowed=False,
+    prune_allowed=False,
+    compose_allowed=False,
+) -> None:
     profiles = client.get("/api/profiles").json()["profiles"]
     profile = next(item for item in profiles if item["slug"] == "workstation")
     settings = deepcopy(profile["settings"])
@@ -131,6 +138,7 @@ def enable_docker_profile(client, admin, *, exec_allowed=False, prune_allowed=Fa
     settings.setdefault("actions", {})["allow_docker"] = True
     settings.setdefault("actions", {})["allow_docker_exec"] = exec_allowed
     settings.setdefault("actions", {})["allow_docker_prune"] = prune_allowed
+    settings.setdefault("actions", {})["allow_docker_compose"] = compose_allowed
     response = client.patch(
         f"/api/profiles/{profile['id']}",
         json={"settings": settings},
@@ -701,6 +709,319 @@ def test_docker_result_audit_and_event(client, admin, app):
     assert "command" not in result_audit["detail"]
 
 
+def compose_files(compose: str | None = None, env: str = "SECRET_TOKEN=never-return-this\n") -> dict[str, str]:
+    return {
+        "compose.yaml": compose or "services:\n  web:\n    image: nginx:latest\n    ports:\n      - '8080:80'\n",
+        ".env": env,
+    }
+
+
+def create_stack(client, admin, slug: str = "web", files: dict | None = None):
+    return client.post(
+        "/api/docker/stacks",
+        json={
+            "slug": slug,
+            "name": f"{slug.title()} stack",
+            "description": "test stack",
+            "files": files or compose_files(),
+            "message": "initial",
+        },
+        headers=headers(admin),
+    )
+
+
+def deploy_stack(
+    client,
+    admin,
+    stack_id: str,
+    agent_id: str,
+    *,
+    revision_hash: str = "",
+    project_name: str = "",
+    action: str = "up",
+    pull_before_up: bool = False,
+    remove_volumes: bool = False,
+):
+    return client.post(
+        f"/api/docker/stacks/{stack_id}/deploy",
+        json={
+            "agent_id": agent_id,
+            "revision_hash": revision_hash,
+            "project_name": project_name,
+            "action": action,
+            "pull_before_up": pull_before_up,
+            "remove_volumes": remove_volumes,
+        },
+        headers=headers(admin),
+    )
+
+
+def finish_docker_command(client, admin, agent, command_id: str, *, status="succeeded", stdout="ok"):
+    heartbeat(admin, agent, sample_metrics(docker=docker_summary()))
+    return client.post(
+        f"/api/agent/{agent['agent_id']}/commands/{command_id}/result",
+        json={"status": status, "exit_code": 0 if status == "succeeded" else 1, "stdout": stdout, "stderr": ""},
+        headers={"Authorization": f"Bearer {agent['agent_token']}"},
+    )
+
+
+def test_docker_stack_crud_and_env_redaction(app, client, admin):
+    enable_docker_profile(client, admin)
+    created = create_stack(client, admin)
+    assert created.status_code == 200, created.text
+    stack = created.json()["stack"]
+    assert stack["slug"] == "web"
+    assert stack["current_revision_hash"]
+    assert stack["contents"][".env"] == "SECRET_TOKEN=never-return-this\n"
+
+    listed = client.get("/api/docker/stacks")
+    assert listed.status_code == 200
+    assert listed.json()["stacks"][0]["deployed_host_count"] == 0
+
+    client.post(
+        "/api/users",
+        json={"username": "compose-viewer", "role": "viewer", "password": "viewer password 123"},
+        headers=headers(admin),
+    )
+    client.post(
+        "/api/users",
+        json={"username": "compose-operator", "role": "operator", "password": "operator password 123"},
+        headers=headers(admin),
+    )
+    with TestClient(app) as viewer_client:
+        viewer = login(viewer_client, "compose-viewer", "viewer password 123")
+        viewer_detail = viewer_client.get(f"/api/docker/stacks/{stack['id']}")
+        assert viewer_detail.status_code == 200
+        assert viewer_detail.json()["stack"]["contents"] is None
+        assert viewer_detail.json()["stack"]["files"]
+        assert "SECRET_TOKEN" not in viewer_detail.text
+        denied = viewer_client.post("/api/docker/stacks", json={"slug": "nope", "name": "Nope", "files": compose_files()}, headers=headers(viewer))
+        assert denied.status_code == 403
+    with TestClient(app) as operator_client:
+        operator = login(operator_client, "compose-operator", "operator password 123")
+        operator_detail = operator_client.get(f"/api/docker/stacks/{stack['id']}")
+        assert operator_detail.status_code == 200
+        assert operator_detail.json()["stack"]["contents"] is None
+        assert "SECRET_TOKEN" not in operator_detail.text
+        denied = operator_client.put(
+            f"/api/docker/stacks/{stack['id']}",
+            json={"name": "Nope"},
+            headers=headers(operator),
+        )
+        assert denied.status_code == 403
+
+    updated = client.put(
+        f"/api/docker/stacks/{stack['id']}",
+        json={"name": "Web v2", "files": compose_files("services:\n  web:\n    image: nginx:1.27\n"), "message": "update"},
+        headers=headers(admin),
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["stack"]["name"] == "Web v2"
+    assert len(updated.json()["stack"]["revisions"]) == 2
+    assert updated.json()["stack"]["current_revision_hash"] != stack["current_revision_hash"]
+
+    deleted = client.delete(f"/api/docker/stacks/{stack['id']}", headers=headers(admin))
+    assert deleted.status_code == 204
+    assert client.get(f"/api/docker/stacks/{stack['id']}").status_code == 404
+
+
+def test_docker_deploy_bundle_collision_and_history(client, admin):
+    enable_docker_profile(client, admin, compose_allowed=True)
+    agent = enroll_agent(admin)
+    assert upload_inventory(client, admin, agent).status_code == 200
+    created = create_stack(client, admin)
+    stack = created.json()["stack"]
+    revision = stack["current_revision_hash"]
+
+    deployed = deploy_stack(
+        client,
+        admin,
+        stack["id"],
+        agent["agent_id"],
+        revision_hash=revision,
+        project_name="webapp",
+        pull_before_up=True,
+    )
+    assert deployed.status_code == 200, deployed.text
+    body = deployed.json()
+    deployment = body["deployment"]
+    command = body["command"]
+    assert deployment["action"] == "up"
+    assert deployment["status"] == "queued"
+    assert set(command["args"]) == {"action", "deployment_id", "stack_id", "revision_hash", "project_name"}
+    assert command["args"]["project_name"] == "webapp"
+
+    history = client.get(f"/api/docker/deployments?stack_id={stack['id']}")
+    assert history.status_code == 200
+    assert history.json()["deployments"][0]["id"] == deployment["id"]
+
+    bundle = client.get(
+        f"/api/agent/{agent['agent_id']}/docker/deployments/{deployment['id']}/bundle",
+        headers={"Authorization": f"Bearer {agent['agent_token']}"},
+    )
+    assert bundle.status_code == 200
+    assert bundle.content.startswith(b"\x1f\x8b")
+    assert bundle.headers["x-bundle-sha256"]
+    assert bundle.headers["x-compose-pull"] == "1"
+    assert bundle.headers["x-compose-revision"] == revision
+
+    other = enroll_agent(admin, hostname="other-docker", machine_id="other-docker")
+    denied_bundle = client.get(
+        f"/api/agent/{other['agent_id']}/docker/deployments/{deployment['id']}/bundle",
+        headers={"Authorization": f"Bearer {other['agent_token']}"},
+    )
+    assert denied_bundle.status_code == 404
+
+    second = create_stack(client, admin, slug="second", files=compose_files())
+    assert second.status_code == 200
+    collision = deploy_stack(
+        client,
+        admin,
+        second.json()["stack"]["id"],
+        agent["agent_id"],
+        project_name="webapp",
+    )
+    assert collision.status_code == 409
+    assert "already active" in collision.json()["detail"].lower()
+
+    finished = finish_docker_command(
+        client, admin, agent, command["id"], stdout="Container webapp-web-1 Started"
+    )
+    assert finished.status_code == 200, finished.text
+    deployment_detail = client.get(f"/api/docker/deployments/{deployment['id']}")
+    assert deployment_detail.status_code == 200
+    assert deployment_detail.json()["deployment"]["status"] == "succeeded"
+    assert deployment_detail.json()["deployment"]["active"] is True
+
+    client.put(
+        f"/api/docker/stacks/{stack['id']}",
+        json={"files": compose_files("services:\n  web:\n    image: nginx:1.27\n"), "message": "newer"},
+        headers=headers(admin),
+    )
+    drifted = client.get(f"/api/docker/deployments?stack_id={stack['id']}")
+    drifted_row = next(item for item in drifted.json()["deployments"] if item["id"] == deployment["id"])
+    assert drifted_row["drift"] is True
+
+    down = deploy_stack(
+        client,
+        admin,
+        stack["id"],
+        agent["agent_id"],
+        project_name="webapp",
+        action="down",
+    )
+    assert down.status_code == 200, down.text
+    failed = finish_docker_command(
+        client, admin, agent, down.json()["command"]["id"], status="failed", stdout=""
+    )
+    assert failed.status_code == 200
+    assert client.get(f"/api/docker/deployments/{deployment['id']}").json()["deployment"]["active"] is True
+    assert client.get(f"/api/docker/deployments/{down.json()['deployment']['id']}").json()["deployment"]["status"] == "failed"
+
+    blocked_delete = client.delete(f"/api/docker/stacks/{stack['id']}", headers=headers(admin))
+    assert blocked_delete.status_code == 409
+
+
+def test_docker_deploy_rejects_external_project_collision(client, admin):
+    enable_docker_profile(client, admin, compose_allowed=True)
+    agent = enroll_agent(admin)
+    payload = inventory_payload(
+        containers=[
+            container_row(
+                1,
+                labels={"com.docker.compose.project": "externalapp"},
+                compose_project="externalapp",
+                compose_service="web",
+            )
+        ]
+    )
+    assert upload_inventory(client, admin, agent, payload).status_code == 200
+    stack = create_stack(client, admin).json()["stack"]
+    response = deploy_stack(
+        client, admin, stack["id"], agent["agent_id"], project_name="externalapp"
+    )
+    assert response.status_code == 409
+    assert "external" in response.json()["detail"].lower()
+
+
+def test_docker_deployment_cancel_and_rbac(app, client, admin):
+    enable_docker_profile(client, admin, compose_allowed=True)
+    agent = enroll_agent(admin)
+    assert upload_inventory(client, admin, agent).status_code == 200
+    stack = create_stack(client, admin).json()["stack"]
+    deployed = deploy_stack(client, admin, stack["id"], agent["agent_id"], project_name="cancelapp")
+    assert deployed.status_code == 200
+    command_id = deployed.json()["command"]["id"]
+    deployment_id = deployed.json()["deployment"]["id"]
+
+    client.post(
+        "/api/users",
+        json={"username": "compose-deploy-viewer", "role": "viewer", "password": "viewer password 123"},
+        headers=headers(admin),
+    )
+    with TestClient(app) as viewer_client:
+        viewer = login(viewer_client, "compose-deploy-viewer", "viewer password 123")
+        denied = viewer_client.post(
+            f"/api/docker/stacks/{stack['id']}/deploy",
+            json={"agent_id": agent["agent_id"], "action": "up"},
+            headers=headers(viewer),
+        )
+        assert denied.status_code == 403
+
+    cancelled = client.post(f"/api/commands/{command_id}/cancel", json={}, headers=headers(admin))
+    assert cancelled.status_code == 200
+    assert client.get(f"/api/docker/deployments/{deployment_id}").json()["deployment"]["status"] == "cancelled"
+
+
+def test_docker_settings_and_env_lock(settings):
+    app = create_app(replace(settings, docker_compose_dir="", docker_compose_dir_from_env=False))
+    with TestClient(app) as client:
+        admin = login(client)
+        enabled = client.get("/api/docker/settings", headers=headers(admin))
+        assert enabled.status_code == 200
+        data = enabled.json()
+        assert data["editable"] is True
+        assert data["source"] == "database"
+        client.post(
+            "/api/users",
+            json={"username": "compose-settings-viewer", "role": "viewer", "password": "viewer password 123"},
+            headers=headers(admin),
+        )
+        with TestClient(app) as viewer_client:
+            viewer = login(viewer_client, "compose-settings-viewer", "viewer password 123")
+            assert viewer_client.get("/api/docker/settings", headers=headers(viewer)).status_code == 403
+
+        moved = settings.data_dir / "moved-compose"
+        patched = client.patch(
+            "/api/docker/settings",
+            json={"compose_dir": str(moved)},
+            headers=headers(admin),
+        )
+        assert patched.status_code == 200, patched.text
+        assert patched.json()["compose_dir"] == str(moved)
+        assert moved.exists()
+
+    locked = create_app(
+        replace(
+            settings,
+            docker_compose_dir=str(settings.data_dir / "locked-compose"),
+            docker_compose_dir_from_env=True,
+        )
+    )
+    with TestClient(locked) as client:
+        admin = login(client)
+        locked_settings = client.get("/api/docker/settings", headers=headers(admin))
+        assert locked_settings.status_code == 200
+        assert locked_settings.json()["editable"] is False
+        assert locked_settings.json()["source"] == "env"
+        denied = client.patch(
+            "/api/docker/settings",
+            json={"compose_dir": str(settings.data_dir / "other")},
+            headers=headers(admin),
+        )
+        assert denied.status_code == 409
+
+
 def test_docker_detail_includes_capabilities_and_no_env_values(client, admin):
     enable_docker_profile(client, admin, exec_allowed=True, prune_allowed=False)
     agent = enroll_agent(admin)
@@ -708,7 +1029,7 @@ def test_docker_detail_includes_capabilities_and_no_env_values(client, admin):
     detail = client.get(f"/api/docker/hosts/{agent['agent_id']}")
     assert detail.status_code == 200
     capabilities = detail.json()["host"]["capabilities"]
-    assert capabilities == {"mutate": True, "exec": True, "prune": False}
+    assert capabilities == {"mutate": True, "exec": True, "prune": False, "compose": False}
     serialized = detail.text.lower()
     assert "secret" not in serialized
     assert "env" not in serialized

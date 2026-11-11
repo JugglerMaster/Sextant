@@ -150,6 +150,21 @@ class AgentClient:
             timeout=max(30, self.config.timeout),
         )
 
+    def download_bundle(self, path: str, max_bytes: int = 4 * 1024 * 1024) -> tuple[bytes, dict[str, str]]:
+        headers = {
+            "Accept": "application/gzip",
+            "User-Agent": f"sextant-agent/{__version__}",
+        }
+        if self.config.agent_token:
+            headers["Authorization"] = f"Bearer {self.config.agent_token}"
+        request = urllib.request.Request(self.base + path, headers=headers)
+        with self._opener.open(request, timeout=max(60, self.config.timeout)) as response:
+            data = response.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise ConnectionError("Docker deployment bundle exceeds the size limit.")
+            response_headers = {key.lower(): value for key, value in response.headers.items()}
+            return data, response_headers
+
     def download(self, path: str, destination, max_bytes: int = 200 * 1024 * 1024) -> int:
         headers = {
             "Accept": "application/octet-stream",

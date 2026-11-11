@@ -411,6 +411,55 @@ CREATE TABLE IF NOT EXISTS docker_networks (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (agent_id, network_id)
 );
+
+CREATE TABLE IF NOT EXISTS docker_settings (
+    id TEXT PRIMARY KEY CHECK (id = 'docker'),
+    compose_dir TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS docker_stacks (
+    id TEXT PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    current_revision_hash TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS docker_stack_revisions (
+    id TEXT PRIMARY KEY,
+    stack_id TEXT NOT NULL REFERENCES docker_stacks(id) ON DELETE CASCADE,
+    revision_hash TEXT NOT NULL,
+    files TEXT NOT NULL DEFAULT '[]',
+    message TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(stack_id, revision_hash)
+);
+
+CREATE TABLE IF NOT EXISTS docker_deployments (
+    id TEXT PRIMARY KEY,
+    stack_id TEXT NOT NULL REFERENCES docker_stacks(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    revision_hash TEXT NOT NULL DEFAULT '',
+    project_name TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL DEFAULT 'up',
+    status TEXT NOT NULL DEFAULT 'queued',
+    command_id TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 0,
+    pull_before_up INTEGER NOT NULL DEFAULT 0,
+    remove_volumes INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    error TEXT NOT NULL DEFAULT '',
+    log TEXT NOT NULL DEFAULT ''
+);
 """
 
 INDEXES = """
@@ -444,6 +493,12 @@ CREATE INDEX IF NOT EXISTS idx_docker_containers_agent ON docker_containers(agen
 CREATE INDEX IF NOT EXISTS idx_docker_images_agent ON docker_images(agent_id);
 CREATE INDEX IF NOT EXISTS idx_docker_volumes_agent ON docker_volumes(agent_id);
 CREATE INDEX IF NOT EXISTS idx_docker_networks_agent ON docker_networks(agent_id);
+CREATE INDEX IF NOT EXISTS idx_docker_stacks_slug ON docker_stacks(slug);
+CREATE INDEX IF NOT EXISTS idx_docker_revisions_stack ON docker_stack_revisions(stack_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_docker_deployments_agent ON docker_deployments(agent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_docker_deployments_stack ON docker_deployments(stack_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_docker_deployments_active ON docker_deployments(agent_id, project_name, active);
+CREATE INDEX IF NOT EXISTS idx_docker_deployments_command ON docker_deployments(command_id);
 """
 
 DEFAULT_PROFILES = [
@@ -614,7 +669,7 @@ class Database:
             if old_version < 7:
                 self._ensure_docker_profile_defaults(conn)
             conn.executescript(INDEXES)
-            conn.execute("PRAGMA user_version=8")
+            conn.execute("PRAGMA user_version=9")
             conn.execute("UPDATE agents SET profile_id = 'prof_workstation' WHERE profile_id = ''")
         try:
             self.path.chmod(0o600)
@@ -2716,6 +2771,361 @@ class Database:
                     (agent_id,),
                 ).fetchall()
             )
+
+    # ---- Docker Compose library ----------------------------------------
+
+    def get_docker_compose_setting(self) -> str:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT compose_dir FROM docker_settings WHERE id = 'docker'"
+            ).fetchone()
+            return str(row["compose_dir"]) if row is not None else ""
+
+    def set_docker_compose_setting(self, compose_dir: str, *, conn: sqlite3.Connection | None = None) -> None:
+        sql = """INSERT INTO docker_settings (id, compose_dir, updated_at)
+                 VALUES ('docker', ?, ?)
+                 ON CONFLICT(id) DO UPDATE SET compose_dir = excluded.compose_dir,
+                   updated_at = excluded.updated_at"""
+        params = (compose_dir, utcnow_iso())
+        if conn is not None:
+            conn.execute(sql, params)
+            return
+        with self.connection() as own:
+            own.execute(sql, params)
+
+    def create_docker_stack(
+        self,
+        slug: str,
+        name: str,
+        description: str,
+        current_revision_hash: str,
+        actor: str,
+    ) -> sqlite3.Row:
+        now = utcnow_iso()
+        stack_id = "stk_" + secrets.token_hex(10)
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT INTO docker_stacks
+                   (id, slug, name, description, current_revision_hash, created_by, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (stack_id, slug, name, description, current_revision_hash, actor, now, now),
+            )
+            return conn.execute("SELECT * FROM docker_stacks WHERE id = ?", (stack_id,)).fetchone()
+
+    def get_docker_stack(self, value: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM docker_stacks WHERE id = ? OR slug = ? COLLATE NOCASE",
+                (value, value),
+            ).fetchone()
+
+    def list_docker_stacks(self) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """SELECT s.*,
+                         (SELECT COUNT(DISTINCT d.agent_id) FROM docker_deployments d
+                          WHERE d.stack_id = s.id AND d.active = 1) AS deployed_host_count,
+                         (SELECT COUNT(*) FROM docker_stack_revisions r
+                          WHERE r.stack_id = s.id) AS revision_count
+                       FROM docker_stacks s
+                       WHERE s.archived_at IS NULL
+                       ORDER BY s.name COLLATE NOCASE"""
+                ).fetchall()
+            )
+
+    def update_docker_stack(
+        self,
+        stack_id: str,
+        *,
+        name: str,
+        description: str,
+        current_revision_hash: str,
+    ) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE docker_stacks
+                   SET name = ?, description = ?, current_revision_hash = ?, updated_at = ?
+                   WHERE id = ?""",
+                (name, description, current_revision_hash, utcnow_iso(), stack_id),
+            )
+
+    def delete_docker_stack(self, stack_id: str) -> None:
+        with self.connection() as conn:
+            conn.execute("DELETE FROM docker_stacks WHERE id = ?", (stack_id,))
+
+    def add_docker_stack_revision(
+        self,
+        stack_id: str,
+        revision_hash: str,
+        files: list[dict[str, Any]],
+        message: str,
+        actor: str,
+    ) -> sqlite3.Row:
+        now = utcnow_iso()
+        revision_id = "rev_" + secrets.token_hex(10)
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO docker_stack_revisions
+                   (id, stack_id, revision_hash, files, message, created_by, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (revision_id, stack_id, revision_hash, dumps(files), message[:2000], actor, now),
+            )
+            return conn.execute(
+                "SELECT * FROM docker_stack_revisions WHERE stack_id = ? AND revision_hash = ?",
+                (stack_id, revision_hash),
+            ).fetchone()
+
+    def list_docker_stack_revisions(self, stack_id: str) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """SELECT * FROM docker_stack_revisions
+                       WHERE stack_id = ? ORDER BY created_at DESC, id DESC""",
+                    (stack_id,),
+                ).fetchall()
+            )
+
+    def get_docker_stack_revision(self, stack_id: str, revision_hash: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                """SELECT * FROM docker_stack_revisions
+                   WHERE stack_id = ? AND revision_hash = ?""",
+                (stack_id, revision_hash),
+            ).fetchone()
+
+    def create_docker_deployment(
+        self,
+        *,
+        stack_id: str,
+        agent_id: str,
+        revision_hash: str,
+        project_name: str,
+        action: str,
+        command_id: str,
+        actor: str,
+        pull_before_up: bool = False,
+        remove_volumes: bool = False,
+        status: str = "queued",
+    ) -> sqlite3.Row:
+        now = utcnow_iso()
+        deployment_id = "dep_" + secrets.token_hex(10)
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT INTO docker_deployments
+                   (id, stack_id, agent_id, revision_hash, project_name, action, status,
+                    command_id, active, pull_before_up, remove_volumes, created_by, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)""",
+                (
+                    deployment_id,
+                    stack_id,
+                    agent_id,
+                    revision_hash,
+                    project_name,
+                    action,
+                    status,
+                    command_id,
+                    int(pull_before_up),
+                    int(remove_volumes),
+                    actor,
+                    now,
+                ),
+            )
+            return conn.execute(
+                "SELECT * FROM docker_deployments WHERE id = ?", (deployment_id,)
+            ).fetchone()
+
+    def get_docker_deployment(self, deployment_id: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM docker_deployments WHERE id = ?", (deployment_id,)
+            ).fetchone()
+
+    def get_docker_deployment_by_command(self, command_id: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM docker_deployments WHERE command_id = ?", (command_id,)
+            ).fetchone()
+
+    def delete_docker_deployment(self, deployment_id: str) -> None:
+        with self.connection() as conn:
+            conn.execute("DELETE FROM docker_deployments WHERE id = ?", (deployment_id,))
+
+    def docker_project_in_use(
+        self,
+        *,
+        agent_id: str,
+        project_name: str,
+        exclude_id: str = "",
+    ) -> sqlite3.Row | None:
+        params: list[Any] = [agent_id, project_name]
+        sql = """SELECT * FROM docker_deployments
+                 WHERE agent_id = ? AND project_name = ? AND action = 'up'
+                   AND (active = 1 OR status IN ('queued', 'dispatched', 'running'))"""
+        if exclude_id:
+            sql += " AND id != ?"
+            params.append(exclude_id)
+        sql += " ORDER BY created_at DESC LIMIT 1"
+        with self.connection() as conn:
+            return conn.execute(sql, tuple(params)).fetchone()
+
+    def docker_stack_has_active_deployments(self, stack_id: str) -> bool:
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT 1 FROM docker_deployments
+                   WHERE stack_id = ?
+                     AND (active = 1 OR status IN ('queued', 'dispatched', 'running'))
+                   LIMIT 1""",
+                (stack_id,),
+            ).fetchone()
+            return row is not None
+
+    def set_docker_deployment_command(self, deployment_id: str, command_id: str) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE docker_deployments SET command_id = ? WHERE id = ?",
+                (command_id, deployment_id),
+            )
+
+    def list_docker_deployments(
+        self,
+        *,
+        agent_id: str = "",
+        stack_id: str = "",
+        limit: int = 100,
+    ) -> list[sqlite3.Row]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if agent_id:
+            clauses.append("d.agent_id = ?")
+            params.append(agent_id)
+        if stack_id:
+            clauses.append("d.stack_id = ?")
+            params.append(stack_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        limit = max(1, min(int(limit), 500))
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    f"""SELECT d.*, s.name AS stack_name, s.slug AS stack_slug,
+                               s.current_revision_hash AS stack_current_revision_hash,
+                               a.name AS agent_name
+                        FROM docker_deployments d
+                        JOIN docker_stacks s ON s.id = d.stack_id
+                        JOIN agents a ON a.id = d.agent_id
+                        {where}
+                        ORDER BY d.created_at DESC, d.id DESC LIMIT ?""",
+                    (*params, limit),
+                ).fetchall()
+            )
+
+    def update_docker_deployment(
+        self,
+        deployment_id: str,
+        *,
+        status: str,
+        log: str = "",
+        error: str = "",
+        started: bool = False,
+        finished: bool = False,
+        active: bool | None = None,
+    ) -> sqlite3.Row | None:
+        now = utcnow_iso()
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM docker_deployments WHERE id = ?", (deployment_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                """UPDATE docker_deployments SET
+                     status = ?, log = ?, error = ?,
+                     started_at = COALESCE(?, started_at),
+                     finished_at = COALESCE(?, finished_at),
+                     active = COALESCE(?, active)
+                   WHERE id = ?""",
+                (
+                    status,
+                    log[:200_000],
+                    error[:4000],
+                    now if started else None,
+                    now if finished else None,
+                    None if active is None else int(active),
+                    deployment_id,
+                ),
+            )
+            return conn.execute(
+                "SELECT * FROM docker_deployments WHERE id = ?", (deployment_id,)
+            ).fetchone()
+
+    def active_docker_deployment(
+        self,
+        *,
+        agent_id: str,
+        project_name: str = "",
+        stack_id: str = "",
+    ) -> sqlite3.Row | None:
+        clauses = ["agent_id = ?", "active = 1"]
+        params: list[Any] = [agent_id]
+        if project_name:
+            clauses.append("project_name = ?")
+            params.append(project_name)
+        if stack_id:
+            clauses.append("stack_id = ?")
+            params.append(stack_id)
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM docker_deployments WHERE " + " AND ".join(clauses) +
+                " ORDER BY created_at DESC, id DESC LIMIT 1",
+                tuple(params),
+            ).fetchone()
+
+    def deactivate_docker_deployments(
+        self,
+        *,
+        agent_id: str,
+        stack_id: str = "",
+        project_name: str = "",
+        except_id: str = "",
+    ) -> int:
+        clauses = ["agent_id = ?", "active = 1"]
+        params: list[Any] = [agent_id]
+        if stack_id:
+            clauses.append("stack_id = ?")
+            params.append(stack_id)
+        if project_name:
+            clauses.append("project_name = ?")
+            params.append(project_name)
+        if except_id:
+            clauses.append("id != ?")
+            params.append(except_id)
+        with self.connection() as conn:
+            cur = conn.execute(
+                "UPDATE docker_deployments SET active = 0 WHERE " + " AND ".join(clauses),
+                tuple(params),
+            )
+            return int(cur.rowcount)
+
+    def prune_docker_deployments(self, retention_days: int = 90) -> int:
+        days = max(1, min(3650, int(retention_days)))
+        cutoff = (utcnow() - timedelta(days=days)).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self.connection() as conn:
+            cur = conn.execute(
+                """DELETE FROM docker_deployments
+                   WHERE active = 0
+                     AND status IN ('succeeded', 'failed', 'cancelled')
+                     AND COALESCE(finished_at, created_at) < ?""",
+                (cutoff,),
+            )
+            return int(cur.rowcount)
+
+    def docker_deployment_revision_hashes(self, stack_id: str) -> set[str]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT revision_hash FROM docker_deployments WHERE stack_id = ?",
+                (stack_id,),
+            ).fetchall()
+            return {str(row["revision_hash"]) for row in rows if row["revision_hash"]}
 
     def audit(
         self,

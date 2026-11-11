@@ -91,7 +91,7 @@ Ranges:
 | `docker_inventory_seconds` | 60–86400 |
 | `max_output_bytes` | 1,024–1,000,000 |
 
-Modules disable collection or action paths. Disabling telemetry still leaves the heartbeat/liveness channel working but sends empty metrics. Disabling `package_management` forces package actions off even if `allow_packages` is true. Docker is off by default in both built-in profiles: enable `modules.docker` **and** `actions.allow_docker`, then install/enroll the Linux agent with `ALLOW_DOCKER=1`. Local agent config remains a hard ceiling. D2 uses `allow_docker_exec` for one-shot exec and `allow_docker_prune` for cleanup; `allow_docker_compose` remains reserved for D3.
+Modules disable collection or action paths. Disabling telemetry still leaves the heartbeat/liveness channel working but sends empty metrics. Disabling `package_management` forces package actions off even if `allow_packages` is true. Docker is off by default in both built-in profiles: enable `modules.docker` **and** `actions.allow_docker`, then install/enroll the Linux agent with `ALLOW_DOCKER=1`. Local agent config remains a hard ceiling. D2 uses `allow_docker_exec` for one-shot exec and `allow_docker_prune` for cleanup; D3 uses `allow_docker_compose` for Compose deploy/down/restart/pull. Enabling Compose therefore requires local `allow_docker_compose`, the profile module, and profile `allow_docker_compose`.
 
 ---
 

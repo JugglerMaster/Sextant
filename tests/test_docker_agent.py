@@ -49,6 +49,12 @@ if args[:2] == ["compose", "version"]:
         raise SystemExit(1)
     print("2.32.4")
     raise SystemExit(0)
+if args[:1] == ["compose"]:
+    if os.environ.get("FAKE_COMPOSE_FAIL"):
+        print("compose operation failed", file=sys.stderr)
+        raise SystemExit(1)
+    print("compose ok")
+    raise SystemExit(0)
 if args[:1] == ["ps"]:
     count = int(os.environ.get("FAKE_DOCKER_CONTAINERS", "2"))
     for index in range(count):

@@ -22,6 +22,7 @@ There is no agent listener and no third-party relay.
 | Remote install | `sextant_control/remote_install.py` | Key-based SSH install for Linux, job log, one-time enrollment. |
 | Agent | `sextant_agent/` | Heartbeat, telemetry collectors, package inventory/actions, Docker detection/inventory, self-update, queued command execution, result posting. |
 | Docker inventory | `sextant_agent/docker.py`, server Docker routes | Local Docker CLI probe, bounded inventory, allowlisted actions, one-shot exec, cleanup, SQLite cache. |
+| Compose library | `sextant_control/docker_store.py` | Flat Compose files, deterministic immutable revisions, atomic writes, bundles, migration, revision retention. |
 | Deployment assets | `deploy/` | systemd units, nginx config, Linux/Windows installers, env template. |
 
 ## Request and command flow
@@ -77,6 +78,9 @@ Key properties:
 | `package_inventory_state` | Last package inventory hash and full-refresh timestamp |
 | `docker_hosts` | Per-agent Docker summary: availability/reason, engine/Compose versions, counts, freshness |
 | `docker_containers`, `docker_images`, `docker_volumes`, `docker_networks` | Latest bounded Docker inventory per agent, replaced atomically |
+| `docker_settings` | Effective Compose library path |
+| `docker_stacks`, `docker_stack_revisions` | Compose stack metadata and immutable revision manifests; file bytes live on disk |
+| `docker_deployments` | Per-host Compose deploy/update/down/restart/pull history, command link, active revision, bounded log |
 | `agent_profiles` | Server-managed behavior profiles (cadence, modules, action gates, update policy) |
 | `profile_tag_assignments` | Tag → profile assignments (applied to matching agents) |
 | `enrollment_tokens` | One-time token hashes with expiry and use metadata |
@@ -195,6 +199,22 @@ Requests and results are audited; completed mutations create `docker.action`
 agent events. Cleanup previews use cached inventory only and never include a
 combined prune-everything or default volume action.
 
+D3 adds the server-side Compose library under `SEXTANT_DOCKER_COMPOSE_DIR`
+(default `$SEXTANT_DATA_DIR/docker/compose`). Flat files are validated and
+stored with atomic `0600` writes; a deterministic hash over sorted names,
+lengths, and bytes names each immutable revision, whose bytes live under
+`.sextant/revisions/<slug>/<hash>/`. SQLite stores stack metadata, revision
+manifests, and deployment history only. `.env` content is admin-only in API
+responses and is never audited. Deployment creates one command containing only
+deployment/stack IDs, revision hash, and project name. The agent downloads a
+gzip/tar bundle with bearer auth, verifies the bundle SHA-256/size and extracted
+revision hash, rejects traversal/symlinks/hardlinks/oversize entries and
+`build:` services, then runs Compose in the extracted revision directory.
+Successful `up` activates the new revision and deactivates the previous one;
+failed deploys leave the previous active deployment intact. Revision retention
+keeps the current revision, the last ten, and revisions referenced by retained
+deployments.
+
 ### Alerts
 
 Alert conditions are computed at read time from the latest heartbeat telemetry:
@@ -248,7 +268,7 @@ The server must be on the same layer-2 broadcast domain as the target (or have a
 | `shell` | `shell`: bash/powershell/cmd, `command`, `timeout` 5–300s | Local shell, bounded streaming output, process-tree kill on timeout or output cap |
 | `service` | `action`: start/stop/restart/enable/disable/status, `name` | systemctl or PowerShell service cmdlets |
 | `power` | `action`: shutdown/reboot/cancel, `delay` 0–600s | `shutdown`/`shutdown.exe` |
-| `docker` | `inventory.refresh`, allowlisted container/image/volume/network actions, one-shot exec, cleanup scopes | argv-only Docker CLI action; target re-resolved with `docker inspect`; exec/cleanup gates and per-host mutation guard |
+| `docker` | `inventory.refresh`, allowlisted container/image/volume/network actions, one-shot exec, cleanup scopes, Compose up/down/restart/pull | argv-only Docker CLI action; target re-resolved with `docker inspect`; exec/cleanup/compose gates and per-host mutation guard |
 | `refresh` | none | No-op result; prompts the UI to refresh after the next heartbeat |
 
 The server validates service names and power actions, but `shell` is intentionally arbitrary. Agent-local flags can disable shell, power, or service execution entirely.
@@ -282,6 +302,6 @@ The app server binds loopback by default in the provided unit. nginx terminates 
 - No nested AD group resolution.
 - No MFA in the app itself (deferred; see the roadmap).
 - NVIDIA-only utilization telemetry.
-- Docker management is D1+D2 and Linux-only: container actions, logs, one-shot exec, cleanup, and inspect are implemented; interactive console, Compose deployment, and recreate/clone are not. The server never mounts or connects to a Docker socket.
+- Docker management is D1–D3 and Linux-only: container actions, logs, one-shot exec, cleanup, inspect, and image-based Compose deployment are implemented; interactive console, build contexts, and recreate/clone are not. The server never mounts or connects to a Docker socket.
 - WoL is limited to the server's broadcast domain.
 - Windows agents require Python 3.11+.

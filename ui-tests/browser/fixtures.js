@@ -263,6 +263,62 @@ const dockerDetail = {
   ],
 };
 
+const composeRevision = "e".repeat(64);
+const composeStack = {
+  id: "stk_web",
+  slug: "web",
+  name: "Web stack",
+  description: "Compose web stack",
+  current_revision_hash: composeRevision,
+  created_by: "admin",
+  created_at: "2026-11-06T07:00:00Z",
+  updated_at: "2026-11-06T08:00:00Z",
+  archived_at: null,
+  deployed_host_count: 1,
+  revision_count: 1,
+  files: [{ name: ".env", size: 19 }, { name: "compose.yaml", size: 74 }],
+  contents: {
+    "compose.yaml": "services:\n  web:\n    image: nginx:latest\n",
+    ".env": "TOKEN=secret-value\n",
+  },
+  revisions: [
+    {
+      id: "rev_web",
+      stack_id: "stk_web",
+      revision_hash: composeRevision,
+      message: "initial",
+      created_by: "admin",
+      created_at: "2026-11-06T08:00:00Z",
+      files: [{ name: ".env", size: 19 }, { name: "compose.yaml", size: 74 }],
+    },
+  ],
+};
+
+const composeDeployments = [
+  {
+    id: "dep_web",
+    stack_id: "stk_web",
+    agent_id: "agt_build",
+    revision_hash: composeRevision,
+    project_name: "sextant_web",
+    action: "up",
+    status: "succeeded",
+    command_id: "cmd_compose",
+    active: true,
+    pull_before_up: true,
+    remove_volumes: false,
+    created_by: "admin",
+    created_at: "2026-11-06T08:00:00Z",
+    started_at: "2026-11-06T08:00:01Z",
+    finished_at: "2026-11-06T08:00:10Z",
+    error: "",
+    log: "Container web-1 Started",
+    stack_name: "Web stack",
+    stack_slug: "web",
+    agent_name: "Build Server",
+  },
+];
+
 const dockerCleanup = {
   server_time: "2026-11-06T08:05:00Z",
   host: dockerHost,
@@ -529,6 +585,34 @@ function createApi(session) {
     }
     if (key === "/api/docker/hosts/agt_build/cleanup") {
       return { status: 200, body: dockerCleanup };
+    }
+    if (key === "/api/docker/stacks") {
+      return { status: 200, body: { stacks: [composeStack] } };
+    }
+    if (key === "/api/docker/stacks/stk_web") {
+      return { status: 200, body: { stack: composeStack } };
+    }
+    if (key === "/api/docker/deployments") {
+      return { status: 200, body: { deployments: composeDeployments } };
+    }
+    if (key === "/api/docker/deployments/dep_web") {
+      return { status: 200, body: { deployment: composeDeployments[0] } };
+    }
+    if (key === "/api/docker/settings") {
+      return {
+        status: 200,
+        body: {
+          compose_dir: "/var/lib/sextant/docker/compose",
+          source: "database",
+          editable: true,
+          max_file_bytes: 262144,
+          max_files: 16,
+          max_total_bytes: 1048576,
+          max_bundle_bytes: 4194304,
+          deployment_retention_days: 90,
+          counts: { stacks: 1, revisions: 1 },
+        },
+      };
     }
     if (
       method === "POST" &&

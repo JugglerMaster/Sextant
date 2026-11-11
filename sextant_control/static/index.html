@@ -109,6 +109,10 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10v10H4zM14 12h6M17 9l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>Remote install</span>
         </button>
+        <button class="nav-item" data-page="compose-files" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h9l3 3h4v13H4zM7 11h10M7 15h10M7 7h5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Compose Files</span>
+        </button>
         <button class="nav-item" data-page="security" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.6-2.8 8-7 10-4.2-2-7-5.4-7-10V6z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M9 12l2 2 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>Security</span>
@@ -299,8 +303,46 @@
               <button class="tab" data-docker-tab="images" type="button">Images</button>
               <button class="tab" data-docker-tab="volumes" type="button">Volumes</button>
               <button class="tab" data-docker-tab="networks" type="button">Networks</button>
+              <button class="tab" data-docker-tab="stacks" type="button">Stacks</button>
             </nav>
             <div id="docker-host-body" aria-live="polite"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="page" id="page-compose-files" hidden>
+        <div class="panel-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">Compose</p><h2>Compose Files</h2></div>
+              <button class="button button-primary button-small nav-admin" id="compose-new" type="button">New stack</button>
+            </div>
+            <p class="form-hint" id="compose-status" aria-live="polite">Select a stack to inspect its revisions.</p>
+            <div id="compose-stack-list" class="list-stack"></div>
+            <div class="empty-state" id="compose-empty" hidden>
+              <span class="empty-icon" aria-hidden="true">▤</span>
+              <h3>No Compose stacks yet</h3>
+              <p>Admins can create a stack from flat compose.yaml, .env, and YAML override files. Operators can deploy existing revisions to Docker Hosts.</p>
+            </div>
+            <div class="panel-head panel-head-spaced nav-admin"><div><p class="eyebrow">Storage</p><h3>Compose directory</h3></div></div>
+            <div id="compose-settings" class="form-hint nav-admin">Loading storage settings…</div>
+          </article>
+          <article class="panel panel-span" id="compose-stack-detail" hidden>
+            <div class="panel-head">
+              <div><p class="eyebrow" id="compose-stack-eyebrow">Selected stack</p><h2 id="compose-stack-title">Compose stack</h2></div>
+              <div class="list-row-actions">
+                <button class="button button-secondary button-small" id="compose-deploy-current" type="button">Deploy</button>
+                <button class="button button-ghost button-small" id="compose-close" type="button">Close</button>
+              </div>
+            </div>
+            <p class="form-hint" id="compose-stack-meta"></p>
+            <div class="callout" id="compose-stack-notice" hidden></div>
+            <nav class="tabs" id="compose-tabs" aria-label="Compose stack tabs">
+              <button class="tab is-active" data-compose-tab="files" type="button">Files</button>
+              <button class="tab" data-compose-tab="revisions" type="button">Revisions</button>
+              <button class="tab" data-compose-tab="deployments" type="button">Deployments</button>
+            </nav>
+            <div id="compose-body" aria-live="polite"></div>
           </article>
         </div>
       </section>

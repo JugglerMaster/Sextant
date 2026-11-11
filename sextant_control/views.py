@@ -387,6 +387,79 @@ def docker_network_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def docker_stack_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "slug": row["slug"],
+        "name": row["name"],
+        "description": row["description"],
+        "current_revision_hash": row["current_revision_hash"],
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "archived_at": row["archived_at"],
+        "deployed_host_count": int(row["deployed_host_count"]) if "deployed_host_count" in row.keys() else 0,
+        "revision_count": int(row["revision_count"]) if "revision_count" in row.keys() else 0,
+    }
+
+
+def docker_stack_revision_to_dict(
+    row: sqlite3.Row,
+    *,
+    include_files: bool = False,
+) -> dict[str, Any]:
+    result = {
+        "id": row["id"],
+        "stack_id": row["stack_id"],
+        "revision_hash": row["revision_hash"],
+        "message": row["message"],
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "files": loads(row["files"], []),
+    }
+    if not include_files:
+        result["files"] = [
+            {"name": item.get("name"), "size": item.get("size")}
+            for item in result["files"]
+            if isinstance(item, dict)
+        ]
+    return result
+
+
+def docker_deployment_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    result = {
+        "id": row["id"],
+        "stack_id": row["stack_id"],
+        "agent_id": row["agent_id"],
+        "revision_hash": row["revision_hash"],
+        "project_name": row["project_name"],
+        "action": row["action"],
+        "status": row["status"],
+        "command_id": row["command_id"],
+        "active": bool(row["active"]),
+        "pull_before_up": bool(row["pull_before_up"]),
+        "remove_volumes": bool(row["remove_volumes"]),
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "error": row["error"],
+        "log": row["log"],
+    }
+    if "stack_name" in row.keys():
+        result["stack_name"] = row["stack_name"]
+        result["stack_slug"] = row["stack_slug"]
+    if "stack_current_revision_hash" in row.keys():
+        result["drift"] = bool(
+            result["active"]
+            and result["revision_hash"]
+            and result["revision_hash"] != row["stack_current_revision_hash"]
+        )
+    if "agent_name" in row.keys():
+        result["agent_name"] = row["agent_name"]
+    return result
+
+
 def agent_event_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": int(row["id"]),
