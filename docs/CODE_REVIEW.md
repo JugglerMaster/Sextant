@@ -81,7 +81,7 @@
 - Dashboard is XSS-resistant by construction (`textContent`, no `innerHTML`) and has a strict CSP.
 - Server unit is genuinely hardened; agent execution is bounded at the server (length/timeout/policy/queue caps).
 - The agent is stdlib-only.
-- 294 tests (293 passed on Linux, one Windows-only junction test skipped), clean `pyflakes`/`compileall`/`node --check`, clean `npm audit`; 18 Chromium Playwright/axe tests pass.
+- 295 tests (294 passed on Linux, one Windows-only junction test skipped), clean `pyflakes`/`compileall`/`node --check`, clean `npm audit`; 18 Chromium Playwright/axe tests pass.
 
 ---
 
@@ -111,9 +111,9 @@ Deferred / accepted:
 
 ## 6. Verification
 
-- `pytest`: **293 passed, 1 skipped** on Linux (294 total; the skipped test is the Windows junction integration test, run by the Windows CI job). The suite now includes notifications and Docker D1–D5 coverage; see `docs/TESTING.md` for the per-file map.
+- `pytest`: **294 passed, 1 skipped** on Linux (295 total; the skipped test is the Windows junction integration test, run by the Windows CI job). The suite now includes notifications and Docker D1–D5 coverage; see `docs/TESTING.md` for the per-file map.
 - `pip check`: no broken requirements.
 - `pip-audit`: no known vulnerabilities.
 - `npm audit`: 0 vulnerabilities.
-- `pip install --require-hashes -r requirements-dev.lock` + `pip install --no-deps -e .` in a fresh venv: **293 passed, 1 skipped**.
+- `pip install --require-hashes -r requirements-dev.lock` + `pip install --no-deps -e .` in a fresh venv: **294 passed, 1 skipped**.
 - `pyflakes`, `compileall`, `node --check`, and the jsdom smoke test pass.

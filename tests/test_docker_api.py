@@ -403,6 +403,14 @@ def test_heartbeat_requests_full_inventory_when_hash_is_missing(client, admin):
     assert response["policy"]["allow_docker"] is True
 
 
+def test_enabling_docker_after_enrollment_is_not_pinned_by_initial_policy(client, admin):
+    agent = enroll_agent(admin)
+    enable_docker_profile(client, admin)
+    response = heartbeat(admin, agent, sample_metrics(docker=docker_summary()))
+    assert response["policy"]["allow_docker"] is True
+    assert response["request_docker_inventory"] == "full"
+
+
 def test_container_lifecycle_action_route(app, client, admin):
     enable_docker_profile(client, admin)
     agent = enroll_agent(admin)

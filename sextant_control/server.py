@@ -4151,6 +4151,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "allow_packages": False,
                 }
             )
+            # Per-agent policy is an additional restriction layer, not a copy of
+            # the profile. Keep Docker gates open by default so enabling Docker
+            # in a profile later is not silently blocked by an enrollment-time
+            # snapshot. The profile still enforces its own Docker gates.
+            policy_defaults = loads(default_policy, {})
+            if not isinstance(policy_defaults, dict):
+                policy_defaults = {}
+            for docker_gate in (
+                "allow_docker",
+                "allow_docker_exec",
+                "allow_docker_compose",
+                "allow_docker_prune",
+            ):
+                policy_defaults[docker_gate] = True
+            default_policy = dumps(policy_defaults)
             agent_id = existing["id"] if existing else "agt_" + secrets.token_hex(12)
             agent_token = new_token("sextant_agent_")
             update = conn.execute(
