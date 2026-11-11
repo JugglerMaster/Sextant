@@ -174,7 +174,7 @@ See [deploy/runner-control.env.example](deploy/runner-control.env.example) for a
 - **Package store is Tier 0.** SHA-256 integrity, no signatures or CA; a compromised server can replace artifacts and hashes.
 - **Package management UI is functional.** The Packages tab has an interactive inventory table (search/sort/pagination), a desired-state rule editor, heartbeat/inventory age, and sync.
 - **Data freshness is shown on cards and in the drawer.** Heartbeat and inventory age are visible, with cadence-aware stale badges.
-- **Table controls are partial.** Packages, Startup, and Audit have search/sort/pagination; Services and Users have search, counts, and filtering, but only Services has bounded “show more” paging. History has search and counts.
+- **Table controls are partial.** Packages, Startup, and Audit have search/sort/pagination; Services and Users have search, counts, and filtering, but only Services has bounded “show more” paging. History is server-paginated and filterable with CSV export.
 - **Fleet operations** — status/profile/tag filters, named saved views, bulk refresh/wake/reboot/shutdown/service/profile actions, an alert center with acknowledge/snooze, cadence-aware stale badges, 24h sparklines, detail charts, and CSV export.
 - **Live updates use SSE with polling fallback.** The dashboard streams `/api/events`; command status/result streams use `/api/commands/{id}/events`. Agents still upload one final command result, so raw incremental stdout is not implemented.
 - **Package management is enabled by default.** Both the profile and agent-local flags must allow it; disable either side to opt out.

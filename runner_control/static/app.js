@@ -10,6 +10,7 @@ const state = {
   detailTab: "overview",
   trendRange: "24",
   agentCommands: {},
+  commandHistory: {},
   serviceFilters: {},
   terminals: {},
   resetUser: null,
@@ -39,6 +40,9 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const SERVICE_PAGE_SIZE = 50;
 const SERVICE_STATUS_FILTERS = ["all", "running", "stopped", "failed", "watched"];
+const HISTORY_PAGE_SIZES = [25, 50, 100];
+const HISTORY_STATUS_FILTERS = ["all", "queued", "dispatched", "succeeded", "failed", "cancelled"];
+const HISTORY_SEARCH_DELAY = 300;
 const FLEET_STATUS_VALUES = ["all", "online", "offline", "alerts"];
 const ADMIN_PAGES = ["enroll", "audit", "users", "profiles", "remote-install"];
 const THEME_KEY = "rc.theme";
@@ -2516,66 +2520,204 @@ async function pollCommandFallback(agentId, commandId) {
   if (state.detailAgent?.id === agentId) renderTerminalDom(state.detailAgent);
 }
 
+function historyState(agentId) {
+  if (!state.commandHistory[agentId]) {
+    state.commandHistory[agentId] = {
+      q: "",
+      status: "all",
+      limit: 50,
+      offset: 0,
+      commands: [],
+      total: 0,
+      loaded: false,
+      loading: false,
+      error: "",
+      seq: 0,
+      timer: null,
+      paint: null,
+    };
+  }
+  return state.commandHistory[agentId];
+}
+
+function historyQuery(hist) {
+  const params = new URLSearchParams();
+  params.set("limit", String(hist.limit));
+  params.set("offset", String(hist.offset));
+  if (hist.status && hist.status !== "all") params.set("status", hist.status);
+  if (hist.q) params.set("q", hist.q);
+  return params;
+}
+
+function historyExportUrl(agentId, hist) {
+  const params = new URLSearchParams();
+  params.set("agent_id", agentId);
+  if (hist.status && hist.status !== "all") params.set("status", hist.status);
+  if (hist.q) params.set("q", hist.q);
+  return `/api/export/commands.csv?${params.toString()}`;
+}
+
+async function loadCommandHistory(agentId) {
+  const hist = historyState(agentId);
+  const seq = hist.seq + 1;
+  hist.seq = seq;
+  hist.loading = true;
+  hist.error = "";
+  hist.paint?.();
+  let retry = false;
+  try {
+    const data = await api(`/api/agents/${encodeURIComponent(agentId)}/commands?${historyQuery(hist).toString()}`);
+    if (seq !== hist.seq || state.detailId !== agentId) return;
+    hist.commands = Array.isArray(data.commands) ? data.commands : [];
+    hist.total = Number(data.total ?? hist.commands.length);
+    hist.loaded = true;
+    if (hist.total > 0 && hist.offset >= hist.total) {
+      hist.offset = Math.max(0, Math.floor((hist.total - 1) / hist.limit) * hist.limit);
+      retry = true;
+    }
+  } catch (error) {
+    if (seq !== hist.seq || state.detailId !== agentId) return;
+    hist.error = error.message;
+  } finally {
+    if (seq === hist.seq) {
+      hist.loading = false;
+      if (state.detailAgent?.id === agentId && state.detailTab === "history") hist.paint?.();
+      if (hist.error) toast(hist.error, "error");
+    }
+  }
+  if (retry) loadCommandHistory(agentId);
+}
+
+function commandHistoryRow(agent, command) {
+  const output = h("div", { class: "command-output" });
+  if (command.stdout) output.append(h("div", {}, command.stdout));
+  if (command.stderr) output.append(h("div", { class: "err" }, command.stderr));
+  if (command.error) output.append(h("div", { class: "err" }, command.error));
+  if (command.output_truncated) output.append(h("div", { class: "form-hint" }, "History preview only. Use GET /api/commands/{id} for full output."));
+  if (!command.stdout && !command.stderr && !command.error) output.append(h("div", {}, "No output."));
+  const actionButtons = [];
+  if (state.permissions.operate && command.status === "queued") {
+    actionButtons.push(button("Cancel", "button-ghost", () => cancelCommand(agent.id, command.id)));
+  }
+  if (state.permissions.operate && ["failed", "cancelled"].includes(command.status)) {
+    actionButtons.push(button("Retry", "button-secondary", () => retryCommand(agent.id, command.id)));
+  }
+  const actionWrap = h("div", { class: "command-summary-actions" }, ...actionButtons);
+  if (actionButtons.length) {
+    actionWrap.addEventListener("click", (event) => event.stopPropagation());
+  }
+  return h(
+    "details",
+    { class: "command-row" },
+    h(
+      "summary",
+      {},
+      h(
+        "div",
+        { class: "command-summary-main" },
+        statusPill(command.status, command.status === "succeeded" ? "online" : command.status === "failed" ? "critical" : "neutral"),
+        h("strong", {}, short(commandDescription(command), 100)),
+        h("small", {}, localTime(command.created_at)),
+      ),
+      h("div", { class: "command-summary-tail" }, actionWrap, h("span", { class: "form-hint" }, `${command.exit_code ?? "—"}`)),
+    ),
+    output,
+  );
+}
+
 function renderHistory(body) {
   const agent = state.detailAgent;
-  const commands = state.agentCommands[agent.id];
-  const refresh = button("Refresh history", "button-secondary button-small", () => loadAgentDetail(agent.id));
-  if (!commands) {
-    body.append(section("History", "Command history", h("div", { class: "empty-inline" }, "Loading command history…")));
-    loadAgentDetail(agent.id);
-    return;
-  }
-  if (!commands.length) {
-    body.append(section("History", "Command history", h("div", { class: "empty-inline" }, "No commands have been sent to this machine.")));
-    return;
-  }
-  const rows = commands.map((command) => {
-    const output = h("div", { class: "command-output" });
-    if (command.stdout) output.append(h("div", {}, command.stdout));
-    if (command.stderr) output.append(h("div", { class: "err" }, command.stderr));
-    if (command.error) output.append(h("div", { class: "err" }, command.error));
-    if (command.output_truncated) output.append(h("div", { class: "form-hint" }, "History preview only. Use GET /api/commands/{id} for full output."));
-    if (!command.stdout && !command.stderr && !command.error) output.append(h("div", {}, "No output."));
-    const actionButtons = [];
-    if (state.permissions.operate && command.status === "queued") {
-      actionButtons.push(button("Cancel", "button-ghost", () => cancelCommand(agent.id, command.id)));
-    }
-    if (state.permissions.operate && ["failed", "cancelled"].includes(command.status)) {
-      actionButtons.push(button("Retry", "button-secondary", () => retryCommand(agent.id, command.id)));
-    }
-    const actionWrap = h("div", { class: "command-summary-actions" }, ...actionButtons);
-    if (actionButtons.length) {
-      actionWrap.addEventListener("click", (event) => event.stopPropagation());
-    }
-    return h(
-      "details",
-      { class: "command-row" },
-      h(
-        "summary",
-        {},
-        h(
-          "div",
-          { class: "command-summary-main" },
-          statusPill(command.status, command.status === "succeeded" ? "online" : command.status === "failed" ? "critical" : "neutral"),
-          h("strong", {}, short(commandDescription(command), 100)),
-          h("small", {}, localTime(command.created_at)),
-        ),
-        h("div", { class: "command-summary-tail" }, actionWrap, h("span", { class: "form-hint" }, `${command.exit_code ?? "—"}`)),
-      ),
-      output,
-    );
+  const hist = historyState(agent.id);
+  const list = h("div", { class: "service-list" });
+  const count = h("span", { class: "form-hint", "data-history-count": "true" });
+  const exportLink = h(
+    "a",
+    {
+      class: "button button-secondary button-small",
+      href: historyExportUrl(agent.id, hist),
+      download: "runner-control-commands.csv",
+      "data-history-export": "true",
+    },
+    "Export CSV",
+  );
+  const prev = button(
+    "Previous",
+    "button-secondary button-small",
+    () => {
+      if (hist.offset <= 0) return;
+      hist.offset = Math.max(0, hist.offset - hist.limit);
+      loadCommandHistory(agent.id);
+    },
+    true,
+  );
+  const next = button(
+    "Next",
+    "button-secondary button-small",
+    () => {
+      if (hist.offset + hist.limit >= hist.total) return;
+      hist.offset += hist.limit;
+      loadCommandHistory(agent.id);
+    },
+    true,
+  );
+  const search = h("input", {
+    type: "search",
+    placeholder: "Search command history",
+    "aria-label": "Search command history",
+    value: hist.q,
   });
-  const list = h("div", { class: "service-list" }, ...rows);
-  const search = h("input", { type: "search", placeholder: "Filter history", "aria-label": "Filter command history" });
-  const count = h("span", { class: "form-hint" }, `${rows.length} commands`);
-  const draw = () => {
-    const query = search.value.trim().toLowerCase();
-    const filtered = rows.filter((row) => !query || row.textContent.toLowerCase().includes(query));
+  const status = h(
+    "select",
+    { "aria-label": "Filter command status" },
+    ...HISTORY_STATUS_FILTERS.map((value) =>
+      h("option", { value, selected: value === hist.status }, value === "all" ? "All statuses" : value),
+    ),
+  );
+  const pageSize = h(
+    "select",
+    { "aria-label": "Commands per page" },
+    ...HISTORY_PAGE_SIZES.map((value) =>
+      h("option", { value: String(value), selected: value === hist.limit }, String(value)),
+    ),
+  );
+  const refresh = button("Refresh history", "button-secondary button-small", () => loadCommandHistory(agent.id));
+  const paint = () => {
     clear(list);
-    list.append(...filtered);
-    count.textContent = `${filtered.length} of ${rows.length} commands`;
+    if (hist.loading && !hist.loaded) {
+      list.append(h("div", { class: "empty-inline" }, "Loading command history…"));
+    } else if (hist.error) {
+      list.append(h("div", { class: "empty-inline" }, hist.error));
+    } else if (!hist.commands.length) {
+      list.append(h("div", { class: "empty-inline" }, "No commands match these filters."));
+    } else {
+      list.append(...hist.commands.map((command) => commandHistoryRow(agent, command)));
+    }
+    const start = hist.total ? hist.offset + 1 : 0;
+    const end = hist.total ? Math.min(hist.offset + hist.commands.length, hist.total) : 0;
+    count.textContent = `${start}-${end} of ${hist.total} commands`;
+    prev.disabled = hist.loading || hist.offset <= 0;
+    next.disabled = hist.loading || hist.offset + hist.limit >= hist.total;
+    exportLink.href = historyExportUrl(agent.id, hist);
   };
-  search.addEventListener("input", draw);
+  hist.paint = paint;
+  search.addEventListener("input", () => {
+    hist.q = search.value.trim();
+    hist.offset = 0;
+    exportLink.href = historyExportUrl(agent.id, hist);
+    clearTimeout(hist.timer);
+    hist.timer = setTimeout(() => loadCommandHistory(agent.id), HISTORY_SEARCH_DELAY);
+  });
+  status.addEventListener("change", () => {
+    hist.status = status.value;
+    hist.offset = 0;
+    exportLink.href = historyExportUrl(agent.id, hist);
+    loadCommandHistory(agent.id);
+  });
+  pageSize.addEventListener("change", () => {
+    hist.limit = Number(pageSize.value);
+    hist.offset = 0;
+    loadCommandHistory(agent.id);
+  });
   body.append(
     section(
       "History",
@@ -2583,14 +2725,21 @@ function renderHistory(body) {
       h(
         "div",
         { class: "section-toolbar" },
-        h("p", {}, `Most recent ${rows.length} commands. Heartbeat: ${agent.online ? "just now" : relativeTime(agent.last_seen)}.`),
+        h("p", {}, `Retained commands. Heartbeat: ${agent.online ? "just now" : relativeTime(agent.last_seen)}.`),
         search,
+        status,
+        pageSize,
         count,
+        prev,
+        next,
+        exportLink,
         refresh,
       ),
       list,
     ),
   );
+  paint();
+  if (!hist.loaded && !hist.loading) loadCommandHistory(agent.id);
 }
 
 async function cancelCommand(agentId, commandId) {
@@ -2631,7 +2780,8 @@ async function loadAgentDetail(agentId) {
     state.detailAgent = data.agent;
     state.agentCommands[agentId] = data.commands;
     updateDrawerChrome();
-    if (["history", "trends"].includes(state.detailTab)) renderTab();
+    if (state.detailTab === "history") loadCommandHistory(agentId);
+    else if (state.detailTab === "trends") renderTab();
   } catch (error) {
     if (state.detailId === agentId) {
       closeDrawer();

@@ -57,7 +57,7 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 - Profiles editor and tag assignments.
 - Remote install page.
 - Interactive tables (Packages, Startup, Audit) with search, sort, row counts, and pagination.
-- History search and command count.
+- History server-side search, status filter, page size, Previous/Next paging, X-Y of Z count, and filter-aware CSV export.
 - Services search, status filter, row count, and bounded show-more paging.
 - Users search (username, display name, email, role, source) with a visible row count.
 - Fleet filters: status, profile, and tag (persisted in local storage).
@@ -67,7 +67,7 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 - Cadence-aware stale badges for heartbeat and inventory age.
 - Alert center with acknowledge, snooze, and clear actions for every current health alert.
 - Bulk selection with refresh-telemetry, wake, reboot, shutdown, service, and profile actions.
-- CSV export for the fleet and per-agent package inventory.
+- CSV export for the fleet, per-agent package inventory, and filtered command history.
 - Trends tab with 24h/7d detail charts and a merged command/alert timeline.
 - Light/dark theme toggle and a Ctrl/Cmd+K command palette.
 - Live dashboard updates over change-driven SSE with polling fallback.
@@ -78,14 +78,13 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 
 ### 1. Table controls
 
-Implemented for Packages, Startup, and Audit with search, sortable columns, row counts, and pagination. Services has search, a status filter, counts, and bounded show-more paging. Users has live search and a row count. History has search and counts. Remaining:
+Implemented for Packages, Startup, and Audit with search, sortable columns, row counts, and pagination. Services has search, a status filter, counts, and bounded show-more paging. Users has live search and a row count. History uses the paginated command API with debounced server-side search, a status filter, 25/50/100 page sizes, Previous/Next controls, an X-Y of Z count, and a CSV export that carries the current filters. Remaining:
 
 - full pagination/virtualization for Services and Users;
-- sort/pagination for History command details;
 - persistent filters per tab;
-- CSV/JSON export for tables.
+- CSV/JSON export for the remaining tables.
 
-Priority: History export next.
+Priority: full pagination for Services and Users next.
 
 ### 2. Data freshness
 
@@ -102,6 +101,7 @@ Priority: History export next.
 
 ### 4. History and charts
 
+- The History tab queries `GET /api/agents/{id}/commands` directly, so retained commands beyond the overview's latest-50 preview are reachable. Search is debounced and runs server-side; the status filter and page size (25/50/100) reset to the first page, Previous/Next preserve the current filters, refresh keeps the current page when possible, and Export CSV includes the active search/status filters. Command expansion, cancel, and retry remain available on each row.
 - 24-hour CPU/memory/disk/GPU sparklines are implemented.
 - The Trends tab adds 24h/7d detail charts for CPU, memory, disk, GPU utilization, and GPU temperature, plus a merged command/alert timeline.
 - Remaining: explicit gaps for offline periods and a “what changed” view.
@@ -129,10 +129,10 @@ Priority: History export next.
 | Freshness labels in Packages | Implemented |
 | Freshness on cards/drawer | Implemented with cadence + stale badges |
 | Fleet status/profile/tag filters | Implemented and persisted; named saved views in local storage |
-| Table sort/pagination | Implemented for Packages, Startup, Audit; Services bounded show-more; Users search/count; History search/count |
+| Table sort/pagination | Implemented for Packages, Startup, Audit, and History; Services bounded show-more; Users search/count |
 | Charts/sparklines | 24h sparklines plus 24h/7d detail charts and a command/alert timeline |
 | Accessibility pass | Implemented: focus trap/return, aria-sort, live regions, theme toggle, command palette; formal contrast audit pending |
 | Alert center | Implemented with acknowledge/snooze/clear |
 | Bulk actions | Implemented: refresh, wake, reboot, shutdown, service, profile |
-| Saved views/export | CSV export and named fleet views stored in local storage |
+| Saved views/export | CSV export (fleet, packages, filtered command history) and named fleet views stored in local storage |
 | SSE/WebSocket | Change-driven dashboard SSE with shared snapshot cache, periodic safety refresh, session revalidation, and polling fallback; command status/result SSE with live stdout/stderr chunks, replay, and poll fallback |

@@ -102,6 +102,26 @@ const agent = {
   ],
 };
 
+const historyCommands = [
+  { id: "cmd_queued", agent_id: "agt_demo", kind: "shell", args: { shell: "bash", command: "uptime" }, status: "queued", created_at: "2026-11-06T08:00:00Z", completed_at: null, exit_code: null, stdout: "", stderr: "", error: "", output_truncated: false },
+  { id: "cmd_failed", agent_id: "agt_demo", kind: "service", args: { action: "restart", name: "Spooler" }, status: "failed", created_at: "2026-11-06T07:59:00Z", completed_at: "2026-11-06T07:59:30Z", exit_code: 1, stdout: "", stderr: "failed to restart", error: "", output_truncated: false },
+  { id: "cmd_alpha", agent_id: "agt_demo", kind: "shell", args: { shell: "bash", command: "alpha search target" }, status: "succeeded", created_at: "2026-11-06T07:58:00Z", completed_at: "2026-11-06T07:58:10Z", exit_code: 0, stdout: "alpha output", stderr: "", error: "", output_truncated: false },
+  ...Array.from({ length: 27 }, (_, index) => ({
+    id: `cmd_retained_${index + 1}`,
+    agent_id: "agt_demo",
+    kind: "refresh",
+    args: {},
+    status: "succeeded",
+    created_at: `2026-11-06T07:${String(57 - index).padStart(2, "0")}:00Z`,
+    completed_at: `2026-11-06T07:${String(57 - index).padStart(2, "0")}:05Z`,
+    exit_code: 0,
+    stdout: "",
+    stderr: "",
+    error: "",
+    output_truncated: false,
+  })),
+];
+
 const responses = {
   "/api/auth/config": { status: 200, body: { ldap_enabled: false, version: "0.2.0", public_url: "" } },
   "/api/me": { status: 401, body: { detail: "Authentication required." } },
@@ -170,10 +190,7 @@ const responses = {
     status: 200,
     body: {
       agent,
-      commands: [
-        { id: "cmd_queued", agent_id: "agt_demo", kind: "shell", args: { shell: "bash", command: "uptime" }, status: "queued", created_at: "2026-11-06T08:00:00Z", exit_code: null, stdout: "", stderr: "", error: "" },
-        { id: "cmd_failed", agent_id: "agt_demo", kind: "service", args: { action: "restart", name: "Spooler" }, status: "failed", created_at: "2026-11-06T07:50:00Z", exit_code: 1, stdout: "", stderr: "failed", error: "", output_truncated: false },
-      ],
+      commands: historyCommands.slice(0, 2),
     },
   },
   "/api/profile-tags": { status: 200, body: { assignments: [] } },
@@ -260,7 +277,8 @@ const responses = {
 };
 
 window.fetch = async (path, options = {}) => {
-  const key = String(path).split("?")[0];
+  const url = String(path);
+  const key = url.split("?")[0];
   const method = String(options.method || "GET").toUpperCase();
   let body = null;
   if (options.body) {
@@ -271,9 +289,21 @@ window.fetch = async (path, options = {}) => {
     }
   }
   window.__requests = window.__requests || [];
-  window.__requests.push({ path: key, method, body });
+  window.__requests.push({ path: key, url, method, body });
   let response;
-  if (method === "POST" && /^\/api\/agents\/[^/]+\/commands$/.test(key)) {
+  if (method === "GET" && key === "/api/agents/agt_demo/commands") {
+    const params = new URLSearchParams(url.split("?")[1] || "");
+    const status = params.get("status") || "all";
+    const query = (params.get("q") || "").toLowerCase();
+    const limit = Number(params.get("limit") || 50);
+    const offset = Number(params.get("offset") || 0);
+    let filtered = historyCommands.filter((command) => status === "all" || command.status === status);
+    if (query) filtered = filtered.filter((command) => JSON.stringify(command).toLowerCase().includes(query));
+    response = {
+      status: 200,
+      body: { commands: filtered.slice(offset, offset + limit), total: filtered.length, limit, offset },
+    };
+  } else if (method === "POST" && /^\/api\/agents\/[^/]+\/commands$/.test(key)) {
     response = { status: 200, body: { id: "cmd_bulk", agent_id: "agt_demo", kind: body?.kind || "refresh", args: body?.args || {}, status: "queued" } };
   } else if (method === "PATCH" && key === "/api/agents/agt_demo") {
     response = { status: 200, body: { agent: { ...agent, profile_id: body?.profile === "server" ? "prof_server" : agent.profile_id } } };
@@ -661,6 +691,62 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!findButton(window.document.getElementById("drawer-body"), "Cancel")) throw new Error("queued command cancel action missing");
   if (!findButton(window.document.getElementById("drawer-body"), "Retry")) throw new Error("failed command retry action missing");
 
+  const historyBody = window.document.getElementById("drawer-body");
+  const historyCount = historyBody.querySelector("[data-history-count]");
+  const historySearch = historyBody.querySelector('input[aria-label="Search command history"]');
+  const historyStatus = historyBody.querySelector('select[aria-label="Filter command status"]');
+  const historyPageSize = historyBody.querySelector('select[aria-label="Commands per page"]');
+  const historyExport = historyBody.querySelector("[data-history-export]");
+  if (!historyCount || !historySearch || !historyStatus || !historyPageSize) {
+    throw new Error("command history controls missing");
+  }
+  if (!historyCount.textContent.includes("1-30 of 30 commands")) {
+    throw new Error(`initial history count is wrong: ${historyCount.textContent}`);
+  }
+  if (!historyExport || !historyExport.href.includes("agent_id=agt_demo")) {
+    throw new Error("command history export link missing agent filter");
+  }
+  historyPageSize.value = "25";
+  historyPageSize.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(30);
+  if (!historyCount.textContent.includes("1-25 of 30 commands")) {
+    throw new Error(`page size did not apply: ${historyCount.textContent}`);
+  }
+  findButton(historyBody, "Next").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  if (!historyCount.textContent.includes("26-30 of 30 commands")) {
+    throw new Error(`next page did not load: ${historyCount.textContent}`);
+  }
+  findButton(historyBody, "Previous").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  if (!historyCount.textContent.includes("1-25 of 30 commands")) {
+    throw new Error(`previous page did not load: ${historyCount.textContent}`);
+  }
+  historySearch.value = "alpha";
+  historySearch.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(360);
+  if (!historyCount.textContent.includes("1-1 of 1 commands")) {
+    throw new Error(`search did not filter history: ${historyCount.textContent}`);
+  }
+  const searchRequest = [...window.__requests]
+    .reverse()
+    .find((request) => request.method === "GET" && request.path === "/api/agents/agt_demo/commands");
+  if (!searchRequest || !searchRequest.url.includes("q=alpha")) throw new Error("history search query was not sent");
+  if (!historyExport.href.includes("q=alpha")) throw new Error("export link did not carry the search query");
+  historySearch.value = "";
+  historySearch.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(360);
+  historyStatus.value = "failed";
+  historyStatus.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(30);
+  if (!historyCount.textContent.includes("1-1 of 1 commands")) {
+    throw new Error(`status filter did not apply: ${historyCount.textContent}`);
+  }
+  if (!historyExport.href.includes("status=failed")) throw new Error("export link did not carry the status filter");
+  historyStatus.value = "all";
+  historyStatus.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(30);
+
   const drawerTabs = [...window.document.querySelectorAll("#drawer-tabs .tab")].map((tab) => tab.dataset.tab);
   const historyIndex = drawerTabs.indexOf("history");
   const trendsIndex = drawerTabs.indexOf("trends");
@@ -806,7 +892,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, history actions, trends charts, timeline, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

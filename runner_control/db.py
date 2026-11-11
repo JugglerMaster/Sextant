@@ -762,6 +762,60 @@ class Database:
                 return 0
             return int(cur.rowcount)
 
+    def command_history(
+        self,
+        agent_id: str | None = None,
+        limit: int | None = 50,
+        offset: int = 0,
+        status: str | None = None,
+        query: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> tuple[list[sqlite3.Row], int]:
+        """Return filtered command rows plus the unpaginated match count.
+
+        Every user-supplied value is bound as a SQL parameter. ``limit=None``
+        returns all matches, which the CSV export uses.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if agent_id:
+            clauses.append("agent_id = ?")
+            params.append(agent_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if query:
+            pattern = f"%{query}%"
+            clauses.append(
+                """(kind LIKE ? OR status LIKE ? OR stdout LIKE ? OR stderr LIKE ?
+                    OR error LIKE ? OR args LIKE ?)"""
+            )
+            params.extend([pattern] * 6)
+        if since:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        if until:
+            clauses.append("created_at <= ?")
+            params.append(until)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connection() as conn:
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS n FROM commands{where}", params
+                ).fetchone()["n"]
+            )
+            sql = f"SELECT * FROM commands{where} ORDER BY created_at DESC, rowid DESC"
+            row_params = list(params)
+            if limit is not None:
+                sql += " LIMIT ? OFFSET ?"
+                row_params.extend([max(1, int(limit)), max(0, int(offset))])
+            elif offset:
+                sql += " LIMIT -1 OFFSET ?"
+                row_params.append(max(0, int(offset)))
+            rows = conn.execute(sql, row_params).fetchall()
+        return list(rows), total
+
     def add_command_output(
         self,
         command_id: str,

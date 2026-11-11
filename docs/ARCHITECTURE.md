@@ -77,7 +77,7 @@ Key properties:
 | `audit_log` | Actor, action, target, detail JSON, source IP, time |
 | `wake_targets` | Agent-less named MAC addresses, broadcast address, port, last wake |
 
-Telemetry is stored denormalized in the agent row (`disks`, `gpus`, `services`, `startup`, `extra`) because the dashboard only needs the latest sample. A separate `telemetry_samples` table keeps one bounded row per heartbeat for trend queries; it is pruned to `RC_TELEMETRY_RETENTION_DAYS` (default 7) and can be disabled with `RC_TELEMETRY_HISTORY=0`. Command history is retained per agent (UI shows the latest 50; the API can return up to 200) and terminal commands are pruned after `RC_COMMAND_RETENTION_DAYS` (default 90). Audit rows are pruned after `RC_AUDIT_RETENTION_DAYS` (default 365).
+Telemetry is stored denormalized in the agent row (`disks`, `gpus`, `services`, `startup`, `extra`) because the dashboard only needs the latest sample. A separate `telemetry_samples` table keeps one bounded row per heartbeat for trend queries; it is pruned to `RC_TELEMETRY_RETENTION_DAYS` (default 7) and can be disabled with `RC_TELEMETRY_HISTORY=0`. Command history is retained per agent (the drawer History tab paginates and filters it server-side, with CSV export; the overview keeps a bounded latest-50 preview) and terminal commands are pruned after `RC_COMMAND_RETENTION_DAYS` (default 90). Audit rows are pruned after `RC_AUDIT_RETENTION_DAYS` (default 365).
 
 ## Authentication and authorization
 

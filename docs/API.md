@@ -113,7 +113,7 @@ The path agent ID and token must belong together. Enrollment uses a one-time enr
 | `GET` | `/api/agents/{id}/history?hours=24&points=200` | any | Downsampled telemetry history (1–720 hours, 10–1000 points) |
 | `PATCH` | `/api/agents/{id}` | admin | Edit tags, notes, watched services, action policy |
 | `POST` | `/api/agents/{id}/commands` | operator | Queue a command |
-| `GET` | `/api/agents/{id}/commands?limit=50` | any | Command history preview (1–200) |
+| `GET` | `/api/agents/{id}/commands?limit=50&offset=0` | any | Paginated command history (limit 1–200) |
 | `GET` | `/api/commands/{id}` | any | One command with full output |
 | `GET` | `/api/commands/{id}/events` | operator | SSE stream: command status/result plus incremental output until terminal |
 | `POST` | `/api/commands/{id}/cancel` | operator | Cancel a still-queued command |
@@ -270,6 +270,41 @@ Content-Type: application/json
 
 Both return the command (cancel) or the new queued command (retry).
 
+### Read command history
+
+```http
+GET /api/agents/agt_123/commands?limit=50&offset=0&status=failed&q=needle&since=2026-01-01T00:00:00Z&until=2026-01-31T23:59:59Z
+```
+
+Any authenticated role can read command history. All parameters are optional:
+
+| Parameter | Meaning |
+| --- | --- |
+| `limit` | Page size, 1–200 (default 50) |
+| `offset` | Zero-based row offset (default 0) |
+| `status` | `queued`, `dispatched`, `running`, `succeeded`, `failed`, or `cancelled` |
+| `q` | Case-insensitive text search across kind, status, stdout, stderr, error, and stored args |
+| `since` / `until` | Inclusive ISO 8601 bounds on `created_at` |
+
+The response keeps the existing `commands` key and adds pagination metadata:
+
+```json
+{
+  "commands": [{"id": "cmd_123", "status": "failed", "...": "..."}],
+  "total": 143,
+  "limit": 50,
+  "offset": 50
+}
+```
+
+`total` is the number of matching rows before pagination. Invalid ranges, statuses, and timestamps return 400; unknown agents return 404. `GET /api/agents/{id}` still includes its bounded latest-50 preview for overview/timeline use, but the History tab uses this endpoint. CSV export accepts the same filters:
+
+```http
+GET /api/export/commands.csv?agent_id=agt_123&status=failed&q=needle
+```
+
+The CSV includes `created_at`, `completed_at`, `kind`, `status`, `exit_code`, a human-readable `description`, raw `args`, `stdout`, `stderr`, `error`, `agent_id`, and `id`. Python's CSV writer quotes commas, quotes, and embedded newlines safely.
+
 ### Edit an agent policy
 
 ```http
@@ -374,6 +409,7 @@ Tag assignments:
 
 | GET | `/api/export/agents.csv` | any | Export agent inventory CSV |
 | GET | `/api/export/packages.csv?agent_id=…` | any | Export package inventory CSV (all agents if omitted) |
+| GET | `/api/export/commands.csv?agent_id=…` | any | Export filtered command history CSV (all agents if omitted) |
 
 ## Remote install (admin, Linux)
 

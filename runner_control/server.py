@@ -89,9 +89,82 @@ DASHBOARD_AUTH_RECHECK_SECONDS = 5
 DASHBOARD_CACHE_MAX_AGE_SECONDS = 9
 COMMAND_STREAM_SECONDS = 1
 COMMAND_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+COMMAND_HISTORY_STATUSES = {"queued", "dispatched", "running", "succeeded", "failed", "cancelled"}
+COMMAND_HISTORY_DEFAULT_LIMIT = 50
+COMMAND_HISTORY_MAX_LIMIT = 200
 COMMAND_OUTPUT_CHUNK_BYTES = 64 * 1024
 COMMAND_OUTPUT_REPLAY_LIMIT = 2000
 COMMAND_OUTPUT_POLL_LIMIT = 500
+
+
+def _timestamp_filter(value: str, field_name: str) -> str | None:
+    """Normalize an optional ISO timestamp to the format stored in SQLite."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    parsed = parse_iso(value)
+    if parsed is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must be a valid ISO 8601 timestamp.",
+        )
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _command_history_filters(
+    limit: int | None,
+    offset: int,
+    status: str,
+    query: str,
+    since: str,
+    until: str,
+) -> tuple[int | None, int, str | None, str | None, str | None, str | None]:
+    if limit is not None and not 1 <= int(limit) <= COMMAND_HISTORY_MAX_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"limit must be between 1 and {COMMAND_HISTORY_MAX_LIMIT}.",
+        )
+    if int(offset) < 0:
+        raise HTTPException(status_code=400, detail="offset must be zero or greater.")
+    normalized_status = (status or "").strip().lower()
+    if normalized_status == "all":
+        normalized_status = ""
+    if normalized_status and normalized_status not in COMMAND_HISTORY_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail="status must be one of " + ", ".join(sorted(COMMAND_HISTORY_STATUSES)) + ".",
+        )
+    normalized_query = (query or "").strip() or None
+    since_value = _timestamp_filter(since, "since")
+    until_value = _timestamp_filter(until, "until")
+    if since_value and until_value and since_value > until_value:
+        raise HTTPException(status_code=400, detail="since must not be after until.")
+    return (
+        None if limit is None else int(limit),
+        int(offset),
+        normalized_status or None,
+        normalized_query,
+        since_value,
+        until_value,
+    )
+
+
+def _command_csv_description(row: sqlite3.Row) -> str:
+    args = loads(row["args"], {})
+    if not isinstance(args, dict):
+        args = {}
+    kind = str(row["kind"])
+    if kind == "shell":
+        return f"{args.get('shell', 'shell')}: {args.get('command', '')}"
+    if kind == "power":
+        return f"power: {args.get('action', '?')}"
+    if kind == "service":
+        return f"service: {args.get('action', '?')} {args.get('name', '')}".strip()
+    if kind == "refresh":
+        return "refresh telemetry"
+    return kind
 
 
 def _sse_event(event: str, payload: Any) -> str:
@@ -1415,22 +1488,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/agents/{agent_id}/commands")
     def list_commands(
         agent_id: str,
-        limit: int = 50,
+        limit: int = COMMAND_HISTORY_DEFAULT_LIMIT,
+        offset: int = 0,
+        status: str = "",
+        q: str = "",
+        since: str = "",
+        until: str = "",
         user: dict[str, Any] = Depends(current_user),
         database: Database = Depends(get_db),
-        config: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         del user
-        limit = max(1, min(int(limit), 200))
+        limit, offset, status, q, since, until = _command_history_filters(
+            limit, offset, status, q, since, until
+        )
         with database.connection() as conn:
             agent = conn.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
-            if agent is None:
-                raise HTTPException(status_code=404, detail="Agent not found.")
-            rows = conn.execute(
-                "SELECT * FROM commands WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?",
-                (agent_id, limit),
-            ).fetchall()
-        return {"commands": [command_to_dict(row, full_output=False) for row in rows]}
+        if agent is None:
+            raise HTTPException(status_code=404, detail="Agent not found.")
+        rows, total = database.command_history(
+            agent_id,
+            limit=limit,
+            offset=offset,
+            status=status,
+            query=q,
+            since=since,
+            until=until,
+        )
+        return {
+            "commands": [command_to_dict(row, full_output=False) for row in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
 
     @app.get("/api/commands/{command_id}")
     def get_command(
@@ -3194,7 +3283,74 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers={"Content-Disposition": 'attachment; filename="runner-control-packages.csv"'},
         )
 
+    @app.get("/api/export/commands.csv")
+    def export_commands_csv(
+        agent_id: str = Query(default=""),
+        status: str = Query(default=""),
+        q: str = Query(default=""),
+        since: str = Query(default=""),
+        until: str = Query(default=""),
+        limit: int | None = Query(default=None),
+        offset: int = Query(default=0),
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+    ) -> Response:
+        del user
+        limit, offset, status, q, since, until = _command_history_filters(
+            limit, offset, status, q, since, until
+        )
+        rows, _total = database.command_history(
+            agent_id or None,
+            limit=limit,
+            offset=offset,
+            status=status,
+            query=q,
+            since=since,
+            until=until,
+        )
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            [
+                "created_at",
+                "completed_at",
+                "kind",
+                "status",
+                "exit_code",
+                "description",
+                "args",
+                "stdout",
+                "stderr",
+                "error",
+                "agent_id",
+                "id",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row["created_at"] or "",
+                    row["completed_at"] or "",
+                    row["kind"],
+                    row["status"],
+                    "" if row["exit_code"] is None else row["exit_code"],
+                    _command_csv_description(row),
+                    row["args"],
+                    row["stdout"],
+                    row["stderr"],
+                    row["error"],
+                    row["agent_id"],
+                    row["id"],
+                ]
+            )
+        return Response(
+            output.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="runner-control-commands.csv"'},
+        )
+
     return app
+
 
 
 def _latest_agent_release(database: Database) -> Any:
