@@ -21,7 +21,7 @@ There is no agent listener and no third-party relay.
 | Notifications | `sextant_control/notifications.py` | Background condition evaluator, Telegram delivery, persisted outbox, retry/backoff. |
 | Remote install | `sextant_control/remote_install.py` | Key-based SSH install for Linux, job log, one-time enrollment. |
 | Agent | `sextant_agent/` | Heartbeat, telemetry collectors, package inventory/actions, Docker detection/inventory, self-update, queued command execution, result posting. |
-| Docker inventory | `sextant_agent/docker.py`, server Docker routes | Local Docker CLI probe, bounded container/image/volume/network inventory, SQLite cache. Read-only in D1. |
+| Docker inventory | `sextant_agent/docker.py`, server Docker routes | Local Docker CLI probe, bounded inventory, allowlisted actions, one-shot exec, cleanup, SQLite cache. |
 | Deployment assets | `deploy/` | systemd units, nginx config, Linux/Windows installers, env template. |
 
 ## Request and command flow
@@ -173,16 +173,27 @@ A fast PowerShell metrics script runs on every heartbeat; a second inventory scr
 
 NVIDIA GPUs are then queried with `nvidia-smi` for actual utilization/VRAM/temperature and compute processes. If it is absent, only GPU names are reported with zero statistics.
 
-### Docker inventory (D1)
+### Docker inventory and actions (D1/D2)
 
-Linux agents can opt into read-only Docker discovery with local `allow_docker`
-plus the profile's `modules.docker` and `actions.allow_docker`. The agent probes
-the local Docker CLI/socket (never the Engine API from the server), sends a
-compact heartbeat summary, and uploads a bounded full inventory to
+Linux agents can opt into Docker discovery with local `allow_docker` plus the
+profile's `modules.docker` and `actions.allow_docker`. The agent probes the local
+Docker CLI/socket (never the Engine API from the server), sends a compact
+heartbeat summary, and uploads a bounded full inventory to
 `POST /api/agent/{id}/docker/inventory` on the profile cadence or when the server
 requests it. The server replaces `docker_hosts` and the four inventory tables in
 one transaction. Docker is off by default; Windows agents report `unsupported_os`
 and are never listed. Container environment variables are not collected.
+
+D2 adds an allowlisted `docker` command family. Browser routes validate action
+models and cached ownership, enforce role/profile/policy gates, queue through the
+normal command lifecycle, and apply a per-host one-active-mutation guard.
+One-shot exec requires `allow_docker_exec`; cleanup requires
+`allow_docker_prune`. The agent re-resolves targets with `docker inspect`,
+executes argv only, masks raw-inspect environment values, enforces timeouts and
+a local mutation lock, and refreshes inventory after successful mutations.
+Requests and results are audited; completed mutations create `docker.action`
+agent events. Cleanup previews use cached inventory only and never include a
+combined prune-everything or default volume action.
 
 ### Alerts
 
@@ -237,7 +248,7 @@ The server must be on the same layer-2 broadcast domain as the target (or have a
 | `shell` | `shell`: bash/powershell/cmd, `command`, `timeout` 5–300s | Local shell, bounded streaming output, process-tree kill on timeout or output cap |
 | `service` | `action`: start/stop/restart/enable/disable/status, `name` | systemctl or PowerShell service cmdlets |
 | `power` | `action`: shutdown/reboot/cancel, `delay` 0–600s | `shutdown`/`shutdown.exe` |
-| `docker` | D1: `action=inventory.refresh` | Read-only Docker probe and inventory upload |
+| `docker` | `inventory.refresh`, allowlisted container/image/volume/network actions, one-shot exec, cleanup scopes | argv-only Docker CLI action; target re-resolved with `docker inspect`; exec/cleanup gates and per-host mutation guard |
 | `refresh` | none | No-op result; prompts the UI to refresh after the next heartbeat |
 
 The server validates service names and power actions, but `shell` is intentionally arbitrary. Agent-local flags can disable shell, power, or service execution entirely.
@@ -271,6 +282,6 @@ The app server binds loopback by default in the provided unit. nginx terminates 
 - No nested AD group resolution.
 - No MFA in the app itself (deferred; see the roadmap).
 - NVIDIA-only utilization telemetry.
-- Docker management is D1 read-only and Linux-only: no container mutations, exec/console, cleanup, or Compose deployment yet. The server never mounts or connects to a Docker socket.
+- Docker management is D1+D2 and Linux-only: container actions, logs, one-shot exec, cleanup, and inspect are implemented; interactive console, Compose deployment, and recreate/clone are not. The server never mounts or connects to a Docker socket.
 - WoL is limited to the server's broadcast domain.
 - Windows agents require Python 3.11+.

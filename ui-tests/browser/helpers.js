@@ -49,7 +49,13 @@ async function preparePage(page, { theme = "dark" } = {}) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    const response = respond(url, request.method().toUpperCase());
+    let body = null;
+    try {
+      body = request.postDataJSON();
+    } catch (_error) {
+      body = null;
+    }
+    const response = respond(url, request.method().toUpperCase(), body);
     if (response.status === 204) {
       await route.fulfill({ status: 204 });
       return;

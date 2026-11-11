@@ -1,8 +1,22 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+import re
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
+
+from .docker_rules import (
+    CONTAINER_ID_PATTERN,
+    CPUS_PATTERN,
+    IMAGE_ID_PATTERN,
+    MEMORY_PATTERN,
+    NETWORK_ID_PATTERN,
+    RENAME_PATTERN,
+    RESTART_POLICY_PATTERN,
+    USER_PATTERN,
+    VOLUME_NAME_PATTERN,
+    WORKDIR_PATTERN,
+)
 
 DOCKER_REASONS = Literal[
     "",
@@ -267,6 +281,9 @@ class DockerContainerIn(BaseModel):
     finished_at: str = Field(default="", max_length=64)
     exit_code: int | None = Field(default=None, ge=-1, le=1_000_000)
     restart_policy: str = Field(default="", max_length=64)
+    memory_limit: int = Field(default=0, ge=0, le=10**15)
+    nano_cpus: int = Field(default=0, ge=0, le=10**15)
+    pids_limit: int | None = Field(default=None, ge=0, le=1_000_000)
     ports: list[str] = Field(default_factory=list, max_length=128)
     labels: dict[str, str] = Field(default_factory=dict, max_length=64)
     mounts: list[str] = Field(default_factory=list, max_length=128)
@@ -308,6 +325,171 @@ class DockerNetworkIn(BaseModel):
     attachable: bool = False
     labels: dict[str, str] = Field(default_factory=dict, max_length=64)
     container_count: int = Field(default=0, ge=0, le=1_000_000)
+
+
+class DockerContainerLifecycleIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal[
+        "container.start",
+        "container.stop",
+        "container.restart",
+        "container.pause",
+        "container.unpause",
+        "container.kill",
+    ]
+    container_id: str = Field(pattern=CONTAINER_ID_PATTERN)
+
+
+class DockerContainerRenameIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["container.rename"]
+    container_id: str = Field(pattern=CONTAINER_ID_PATTERN)
+    new_name: str = Field(pattern=RENAME_PATTERN)
+
+
+class DockerContainerRemoveIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["container.remove"]
+    container_id: str = Field(pattern=CONTAINER_ID_PATTERN)
+    force: bool = False
+    remove_volumes: bool = False
+
+
+class DockerContainerUpdateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["container.update"]
+    container_id: str = Field(pattern=CONTAINER_ID_PATTERN)
+    restart_policy: str = Field(default="", max_length=64)
+    memory: str = Field(default="", max_length=32)
+    cpus: str = Field(default="", max_length=16)
+    pids_limit: int | None = Field(default=None, ge=0, le=1_000_000)
+
+    @field_validator("restart_policy")
+    @classmethod
+    def _restart_policy(cls, value: str) -> str:
+        if value and not re.match(RESTART_POLICY_PATTERN, value):
+            raise ValueError("invalid restart policy")
+        return value
+
+    @field_validator("memory")
+    @classmethod
+    def _memory(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value and not re.match(MEMORY_PATTERN, value):
+            raise ValueError("memory must be a Docker memory value such as 512m or 1g")
+        return value
+
+    @field_validator("cpus")
+    @classmethod
+    def _cpus(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.match(CPUS_PATTERN, value):
+            raise ValueError("cpus must be a positive number such as 0.5 or 2")
+        return value
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "DockerContainerUpdateIn":
+        if not self.restart_policy and not self.memory and not self.cpus and self.pids_limit is None:
+            raise ValueError("container.update requires at least one limit")
+        return self
+
+
+class DockerContainerLogsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["container.logs"]
+    container_id: str = Field(pattern=CONTAINER_ID_PATTERN)
+    tail: Literal[100, 500, 1000] = 500
+    timestamps: bool = False
+
+
+class DockerContainerInspectIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["container.inspect"]
+    container_id: str = Field(pattern=CONTAINER_ID_PATTERN)
+
+
+class DockerImageRemoveIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["image.remove"]
+    image_id: str = Field(pattern=IMAGE_ID_PATTERN)
+
+
+class DockerVolumeRemoveIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["volume.remove"]
+    volume_name: str = Field(pattern=VOLUME_NAME_PATTERN)
+
+
+class DockerNetworkRemoveIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["network.remove"]
+    network_id: str = Field(pattern=NETWORK_ID_PATTERN)
+
+
+DockerActionPayload = Annotated[
+    Union[
+        DockerContainerLifecycleIn,
+        DockerContainerRenameIn,
+        DockerContainerRemoveIn,
+        DockerContainerUpdateIn,
+        DockerContainerLogsIn,
+        DockerContainerInspectIn,
+        DockerImageRemoveIn,
+        DockerVolumeRemoveIn,
+        DockerNetworkRemoveIn,
+    ],
+    Field(discriminator="action"),
+]
+
+
+class DockerActionIn(RootModel[DockerActionPayload]):
+    root: DockerActionPayload
+
+
+class DockerExecIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    shell: Literal["sh", "bash", "ash"] = "sh"
+    user: str = Field(default="", max_length=32)
+    workdir: str = Field(default="", max_length=256)
+    command: str = Field(min_length=1, max_length=8000)
+    timeout: int = Field(default=60, ge=5, le=300)
+    tty: bool = False
+
+    @field_validator("user")
+    @classmethod
+    def _user(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.match(USER_PATTERN, value):
+            raise ValueError("user must match [A-Za-z0-9_.-]{1,32}")
+        return value
+
+    @field_validator("workdir")
+    @classmethod
+    def _workdir(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.match(WORKDIR_PATTERN, value):
+            raise ValueError("workdir must be an absolute path")
+        return value
+
+    @field_validator("command")
+    @classmethod
+    def _command(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("command must not contain a NUL byte")
+        return value
+
+
+class DockerCleanupIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scope: Literal[
+        "stopped_containers",
+        "dangling_images",
+        "unused_images",
+        "unused_volumes",
+        "unused_networks",
+        "build_cache",
+    ]
+    include_compose: bool = False
 
 
 class DockerInventoryIn(BaseModel):

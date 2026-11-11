@@ -272,7 +272,8 @@ Optional installer variables:
 | `CA_FILE` | Private CA bundle for TLS verification |
 | `ALLOW_PACKAGES` | Set to `0` to disable managed package actions locally (default `1`) |
 | `ALLOW_DOCKER` | Set to `1` to enable read-only Docker discovery/inventory (default `0`) |
-| `ALLOW_DOCKER_EXEC` / `ALLOW_DOCKER_COMPOSE` / `ALLOW_DOCKER_PRUNE` | Reserved Docker action flags for future phases; stored in the agent config |
+| `ALLOW_DOCKER_EXEC` / `ALLOW_DOCKER_PRUNE` | Enable one-shot container exec / cleanup actions locally |
+| `ALLOW_DOCKER_COMPOSE` | Reserved for future Compose support; stored in the agent config |
 | `DOCKER_SOCKET` / `DOCKER_COMMAND` | Optional local Docker socket/CLI overrides |
 | `NO_SELF_UPDATE` | Set to `1` to disable agent self-update in the config |
 | `PROFILE` | Profile slug selected at enrollment (default `workstation`) |

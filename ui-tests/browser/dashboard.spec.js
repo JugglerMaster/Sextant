@@ -82,6 +82,32 @@ for (const theme of THEMES) {
   });
 }
 
+test("Docker Hosts exposes cached inspect and cleanup confirmations", async ({ page }) => {
+  await login(page);
+  await page.locator('[data-page="docker-hosts"]').click();
+  await expect(page.locator("#docker-host-list")).toContainText("Build Server");
+  await page.locator("#docker-host-list").getByRole("button", { name: "Open" }).click();
+  await expect(page.locator("#docker-host-detail")).toBeVisible();
+  await expect(page.locator("#docker-host-title")).toHaveText("Build Server");
+  await expect(page.locator(".docker-cleanup-card")).toHaveCount(6);
+  await page.locator('#docker-host-tabs [data-docker-tab="containers"]').click();
+  await expect(page.locator("#docker-host-body")).toContainText("web-1");
+  await page.locator("#docker-host-body").getByRole("button", { name: "Inspect" }).first().click();
+  await expect(page.locator("#docker-dialog")).toBeVisible();
+  await expect(page.locator("#docker-dialog")).toContainText("Container overview");
+  await page.locator("#docker-dialog").getByRole("button", { name: "Close" }).click();
+  await page.locator('#docker-host-tabs [data-docker-tab="overview"]').click();
+  await expect(page.locator(".docker-cleanup-card")).toHaveCount(6);
+
+  const cleanupCard = page.locator(".docker-cleanup-card", { hasText: "Dangling images" });
+  await cleanupCard.getByRole("button", { name: "Review" }).click();
+  await expect(page.locator("#confirm-dialog")).toBeVisible();
+  await expect(page.locator("#confirm-dialog")).toContainText("Clean up dangling images?");
+  await page.locator("#confirm-dialog").getByRole("button", { name: "Cancel" }).click();
+  await screenshot(page, "docker-hosts-dark");
+  await scan(page, "docker hosts dark");
+});
+
 test("Ctrl/Cmd+K opens, filters, activates, and closes the command palette", async ({ page }) => {
   await login(page);
   const palette = page.locator("#command-palette");

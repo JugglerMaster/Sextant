@@ -31,6 +31,10 @@ const state = {
   dockerTab: "overview",
   dockerLoading: false,
   dockerRefreshTimer: null,
+  dockerContainerFilter: "all",
+  dockerActionBusy: false,
+  dockerDialogTrigger: null,
+  dockerCleanup: null,
   fleetFilters: { status: "all", profile: "", tag: "" },
   fleetRenderLimit: 60,
   agentCards: new Map(),
@@ -3972,6 +3976,132 @@ function dockerAge(seconds) {
   return `${Math.floor(value / 86400)}d ago`;
 }
 
+function dockerHost() {
+  return state.dockerHostDetail?.host || null;
+}
+
+function dockerCan(gate = "mutate") {
+  const host = dockerHost();
+  if (!state.permissions.operate || !host?.available || !host?.online || state.dockerActionBusy) {
+    return false;
+  }
+  return host.capabilities ? host.capabilities[gate] !== false : true;
+}
+
+function closeDockerDialog() {
+  const dialog = $("docker-dialog");
+  if (dialog?.open) dialog.close();
+}
+
+function openDockerDialog(title, eyebrow, bodyBuilder, actionsBuilder) {
+  const dialog = $("docker-dialog");
+  if (!dialog) return;
+  if (dialog.open) dialog.close();
+  state.dockerDialogTrigger = document.activeElement;
+  setText("docker-dialog-title", title);
+  setText("docker-dialog-eyebrow", eyebrow || "Docker");
+  setText("docker-dialog-error", "");
+  const body = $("docker-dialog-body");
+  clear(body);
+  if (typeof bodyBuilder === "function") bodyBuilder(body);
+  const actions = $("docker-dialog-actions");
+  clear(actions);
+  actions.append(button("Close", "button-ghost", closeDockerDialog));
+  if (typeof actionsBuilder === "function") actionsBuilder(actions);
+  dialog.showModal();
+  const first = body.querySelector("input, select, textarea, button");
+  first?.focus();
+}
+
+function dockerCommandText(command) {
+  const parts = [];
+  if (command.stdout) parts.push(command.stdout);
+  if (command.stderr) parts.push(command.stderr);
+  if (command.error) parts.push(command.error);
+  return parts.join("\n").trim() || "(no output)";
+}
+
+function parseDockerReclaimed(text) {
+  const match = String(text || "").match(/Total reclaimed space:\s*([0-9.]+)\s*([KMGTPE]?i?B)/i);
+  if (!match) return 0;
+  const amount = Number(match[1]);
+  const unit = match[2].toUpperCase();
+  const factor = unit.startsWith("K")
+    ? 1024
+    : unit.startsWith("M")
+      ? 1024 ** 2
+      : unit.startsWith("G")
+        ? 1024 ** 3
+        : unit.startsWith("T")
+          ? 1024 ** 4
+          : 1;
+  return Math.round(amount * factor);
+}
+
+function showDockerOutput(title, command) {
+  const reclaimed = parseDockerReclaimed(dockerCommandText(command));
+  openDockerDialog(title, "Docker result", (body) => {
+    const status = command.status === "succeeded" ? "Succeeded" : command.status === "cancelled" ? "Cancelled" : "Failed";
+    body.append(
+      h("p", { class: "form-hint" }, `${status}${command.exit_code != null ? ` · exit ${command.exit_code}` : ""}${reclaimed ? ` · reclaimed ${fmtBytes(reclaimed)}` : ""}`),
+      h("pre", { class: "terminal docker-dialog-output" }, dockerCommandText(command)),
+    );
+  });
+}
+
+async function waitForDockerCommand(commandId) {
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    await sleep(1200);
+    const data = await api(`/api/commands/${encodeURIComponent(commandId)}`);
+    const command = data?.command;
+    if (!command) continue;
+    if (commandIsTerminal(command)) return command;
+    const status = $("docker-hosts-status");
+    if (status) status.textContent = command.status === "queued" ? "Docker action queued; waiting for the agent heartbeat…" : "Docker action running…";
+  }
+  throw new Error("Timed out waiting for the Docker action result. Check the command history.");
+}
+
+async function queueDockerAction(path, payload, label, options = {}) {
+  if (state.dockerActionBusy) {
+    toast("Wait for the current Docker action to finish.", "warn");
+    return null;
+  }
+  state.dockerActionBusy = true;
+  const status = $("docker-hosts-status");
+  if (status) status.textContent = `${label}: queuing…`;
+  try {
+    const created = await api(path, { method: "POST", body: payload });
+    if (status) status.textContent = `${label}: queued. Waiting for the agent heartbeat…`;
+    const command = await waitForDockerCommand(created.id);
+    if (status) status.textContent = `${label}: ${command.status}.`;
+    if (options.showOutput !== false) {
+      showDockerOutput(label, command);
+    } else if (command.status === "succeeded") {
+      toast(`${label} completed.`);
+    } else {
+      toast(`${label} failed: ${command.error || command.stderr || "see command history"}`, "error");
+    }
+    if (state.dockerHostId) await loadDockerHostDetail(state.dockerHostId, true);
+    await loadDockerHosts(true);
+    return command;
+  } catch (error) {
+    setText("docker-dialog-error", error.message);
+    if (status) status.textContent = `${label}: ${error.message}`;
+    toast(error.message, "error");
+    return null;
+  } finally {
+    state.dockerActionBusy = false;
+    if (state.dockerHostDetail) renderDockerTab();
+  }
+}
+
+async function confirmDockerAction(title, message, confirmLabel, path, payload, label, options = {}) {
+  const confirmed = await confirmAction(title, message, confirmLabel);
+  if (!confirmed) return null;
+  return queueDockerAction(path, payload, label, options);
+}
+
 function stopDockerRefreshPoll() {
   if (state.dockerRefreshTimer) {
     clearTimeout(state.dockerRefreshTimer);
@@ -4107,9 +4237,14 @@ function renderDockerHostDetail() {
     clear(notice);
     const messages = [];
     if (!host.available) messages.push(`${dockerReason(host.reason)}. Showing the last cached inventory.`);
-    else if (!host.online) messages.push("The agent is offline. Showing cached inventory; mutations are unavailable in this phase.");
+    else if (!host.online) messages.push("The agent is offline. Showing cached inventory; Docker actions are unavailable.");
     else if (host.stale) messages.push(`Cached inventory is older than ${Math.round((detail.stale_seconds || 900) / 60)} minutes. Use Refresh now.`);
     if (host.reason === "compose_missing") messages.push("Compose v2 was not detected on this host.");
+    if (host.capabilities && !host.capabilities.mutate) messages.push("Docker actions are disabled by the agent profile or server policy.");
+    else {
+      if (host.capabilities && !host.capabilities.exec) messages.push("Docker exec is disabled by the agent profile or server policy.");
+      if (host.capabilities && !host.capabilities.prune) messages.push("Docker cleanup is disabled by the agent profile or server policy.");
+    }
     notice.hidden = messages.length === 0;
     for (const message of messages) notice.append(h("p", {}, message));
   }
@@ -4175,52 +4310,362 @@ function renderDockerOverview(body, detail) {
       ),
     ),
   );
+  const cleanupHost = h("div", {});
+  body.append(
+    section(
+      "Docker host",
+      "Cleanup",
+      h("p", { class: "form-hint" }, "Estimates come from the cached inventory. Review the exact filter before running a prune."),
+      cleanupHost,
+    ),
+  );
+  loadDockerCleanupPanel(cleanupHost);
+}
+
+async function loadDockerCleanupPanel(container) {
+  clear(container);
+  container.append(h("div", { class: "empty-inline" }, "Loading cleanup estimate…"));
+  try {
+    const data = await api(`/api/docker/hosts/${encodeURIComponent(state.dockerHostId)}/cleanup`);
+    state.dockerCleanup = data;
+    clear(container);
+    const grid = h("div", { class: "docker-cleanup-grid" });
+    for (const scope of data.scopes || []) {
+      const meta = DOCKER_CLEANUP_META[scope.scope] || { label: scope.label, warning: "" };
+      const size = scope.estimated && scope.estimated_bytes > 0
+        ? fmtBytes(scope.estimated_bytes)
+        : scope.estimated
+          ? "size unknown"
+          : "reported after prune";
+      const disabled = !data.can_prune || (scope.scope !== "build_cache" && scope.count === 0);
+      grid.append(
+        h(
+          "article",
+          { class: "docker-cleanup-card" },
+          h("h4", {}, meta.label),
+          h("strong", {}, `${scope.count} item${scope.count === 1 ? "" : "s"}`),
+          h("p", {}, size),
+          h("p", {}, meta.warning || scope.warning || ""),
+          button("Review", "button-secondary button-small", () => confirmDockerCleanup(scope.scope), disabled),
+        ),
+      );
+    }
+    container.append(grid);
+    if (!data.can_prune) {
+      container.append(h("p", { class: "form-hint" }, "Cleanup is disabled by the agent profile or server policy."));
+    }
+  } catch (error) {
+    clear(container);
+    container.append(h("div", { class: "empty-inline" }, error.message));
+  }
+}
+
+function dockerActionUrl() {
+  return `/api/docker/hosts/${encodeURIComponent(state.dockerHostId)}/actions`;
+}
+
+function dockerContainerMatches(container, filter) {
+  const stateName = String(container.state || "").toLowerCase();
+  if (filter === "running") return stateName === "running";
+  if (filter === "stopped") return !["running", "paused"].includes(stateName);
+  if (filter === "unhealthy") return container.health === "unhealthy";
+  if (filter === "unmanaged") return !container.compose_project;
+  return true;
+}
+
+function dockerContainerLabel(container) {
+  return container.name || short(container.id, 12);
 }
 
 function renderDockerContainers(body, detail) {
   const containers = detail.containers || [];
-  if (!containers.length) {
-    body.append(section("Docker host", "Containers", h("div", { class: "empty-inline" }, "No containers reported. Refresh inventory if the host recently started a container.")));
-    return;
-  }
-  const rows = containers.map((container) =>
-    h(
+  const filter = h(
+    "select",
+    { "aria-label": "Container status filter" },
+    ...["all", "running", "stopped", "unhealthy", "unmanaged"].map((value) =>
+      h("option", { value }, value === "all" ? "All containers" : value[0].toUpperCase() + value.slice(1)),
+    ),
+  );
+  filter.value = state.dockerContainerFilter;
+  filter.addEventListener("change", () => {
+    state.dockerContainerFilter = filter.value;
+    renderDockerTab();
+  });
+  const filtered = containers.filter((container) => dockerContainerMatches(container, state.dockerContainerFilter));
+  const canMutate = dockerCan("mutate");
+  const canExec = dockerCan("exec");
+  const rows = filtered.map((container) => {
+    const running = String(container.state || "").toLowerCase() === "running";
+    const paused = String(container.state || "").toLowerCase() === "paused";
+    const label = dockerContainerLabel(container);
+    return h(
       "tr",
       {},
-      h("td", {}, h("strong", {}, container.name || short(container.id, 12))),
+      h("td", {}, h("strong", {}, label)),
       h("td", { class: "mono" }, container.image || "—"),
       h("td", {}, container.state || "—"),
       h("td", {}, container.health ? statusPill(container.health, container.health === "unhealthy" ? "critical" : "online") : "—"),
       h("td", {}, (container.ports || []).join(", ") || "—"),
       h("td", {}, container.compose_project || "—"),
       h("td", {}, container.status || "—"),
-    ),
-  );
-  body.append(
-    section(
-      "Docker host",
-      "Containers",
+      h(
+        "td",
+        {},
+        h(
+          "div",
+          { class: "docker-row-actions" },
+          button("Inspect", "button-ghost button-small", () => openDockerContainerDetail(container), false),
+          button("Logs", "button-ghost button-small", () => openDockerLogs(container), !canMutate),
+          button("Exec", "button-secondary button-small", () => openDockerExec(container), !canExec),
+          running
+            ? button("Stop", "button-ghost button-small", () => dockerLifecycle(container, "container.stop"), !canMutate)
+            : button("Start", "button-secondary button-small", () => dockerLifecycle(container, "container.start"), !canMutate),
+          button("Restart", "button-ghost button-small", () => dockerLifecycle(container, "container.restart"), !canMutate),
+          paused
+            ? button("Unpause", "button-ghost button-small", () => dockerLifecycle(container, "container.unpause"), !canMutate)
+            : button("Pause", "button-ghost button-small", () => dockerLifecycle(container, "container.pause"), !canMutate || !running),
+          button("Rename", "button-ghost button-small", () => openDockerRename(container), !canMutate),
+          button("Update", "button-ghost button-small", () => openDockerUpdate(container), !canMutate),
+          button("Remove", "button-danger button-small", () => removeDockerContainer(container), !canMutate),
+        ),
+      ),
+    );
+  });
+  const children = [
+    h("div", { class: "docker-filter-row" }, h("label", { class: "field" }, h("span", {}, "Status"), filter)),
+    h("p", { class: "form-hint" }, `${filtered.length} of ${containers.length} containers shown. Actions are audited and queue on the agent heartbeat.`),
+  ];
+  if (!filtered.length) {
+    children.push(h("div", { class: "empty-inline" }, containers.length ? "No containers match this filter." : "No containers reported. Refresh inventory if the host recently started a container."));
+  } else {
+    children.push(
       interactiveTable(
         h(
           "table",
           { class: "data-table" },
-          h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Image"), h("th", {}, "State"), h("th", {}, "Health"), h("th", {}, "Ports"), h("th", {}, "Compose project"), h("th", {}, "Uptime / status"))),
+          h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Image"), h("th", {}, "State"), h("th", {}, "Health"), h("th", {}, "Ports"), h("th", {}, "Compose project"), h("th", {}, "Uptime / status"), h("th", {}, "Actions"))),
           h("tbody", {}, ...rows),
         ),
         { placeholder: "Filter containers", pageSize: 25 },
       ),
-    ),
+    );
+  }
+  body.append(section("Docker host", "Containers", ...children));
+}
+
+function dockerLifecycle(container, action) {
+  return queueDockerAction(
+    dockerActionUrl(),
+    { action, container_id: container.id },
+    `${action.split(".")[1]} ${dockerContainerLabel(container)}`,
+    { showOutput: true },
+  );
+}
+
+function openDockerContainerDetail(container) {
+  const host = dockerHost();
+  openDockerDialog(
+    dockerContainerLabel(container),
+    "Container overview",
+    (body) => {
+      body.append(
+        h(
+          "div",
+          { class: "info-grid" },
+          infoTile("Image", container.image),
+          infoTile("State", container.state),
+          infoTile("Health", container.health || "—"),
+          infoTile("Exit code", container.exit_code ?? "—"),
+          infoTile("Restart policy", container.restart_policy || "—"),
+          infoTile("Memory limit", container.memory_limit ? fmtBytes(container.memory_limit) : "unlimited"),
+          infoTile("CPU limit", container.nano_cpus ? (container.nano_cpus / 1e9).toFixed(2) : "unlimited"),
+          infoTile("PIDs limit", container.pids_limit ?? "unlimited"),
+          infoTile("Compose project", container.compose_project || "—"),
+          infoTile("Compose service", container.compose_service || "—"),
+          infoTile("Container ID", short(container.id, 20)),
+        ),
+        h("p", { class: "form-hint" }, `Command: ${short(container.command || "—", 180)}`),
+        h("p", { class: "form-hint" }, `Ports: ${(container.ports || []).join(", ") || "—"}`),
+        h("h3", {}, "Mounted networks"),
+        h("ul", { class: "docker-detail-list" }, ...(container.networks || ["—"]).map((item) => h("li", {}, item))),
+        h("h3", {}, "Mounts"),
+        h("ul", { class: "docker-detail-list" }, ...(container.mounts || ["—"]).map((item) => h("li", {}, item))),
+        h("h3", {}, "Labels"),
+        h("ul", { class: "docker-detail-list" }, ...(Object.entries(container.labels || {}).length
+          ? Object.entries(container.labels).map(([key, value]) => h("li", {}, `${key}=${value}`))
+          : [h("li", {}, "—")])),
+      );
+      if (host?.capabilities?.mutate && state.permissions.operate) {
+        body.append(
+          button("Load raw inspect (env masked)", "button-secondary button-small", async () => {
+            await queueDockerAction(
+              dockerActionUrl(),
+              { action: "container.inspect", container_id: container.id },
+              `Inspect ${dockerContainerLabel(container)}`,
+              { showOutput: true },
+            );
+          }, state.dockerActionBusy),
+        );
+      }
+    },
+  );
+}
+
+function openDockerLogs(container) {
+  openDockerDialog(`Logs · ${dockerContainerLabel(container)}`, "Container logs", (body) => {
+    const tail = h("select", {}, h("option", { value: "100" }, "100 lines"), h("option", { value: "500", selected: true }, "500 lines"), h("option", { value: "1000" }, "1,000 lines"));
+    const timestamps = h("input", { type: "checkbox" });
+    const form = h(
+      "form",
+      { class: "form-stack" },
+      h("label", { class: "field" }, h("span", {}, "Tail"), tail),
+      h("label", { class: "checkbox-row" }, timestamps, h("span", {}, "Include timestamps")),
+      h("p", { class: "form-hint" }, "Logs are fetched from the selected container and capped by the agent output limit."),
+    );
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      queueDockerAction(
+        dockerActionUrl(),
+        { action: "container.logs", container_id: container.id, tail: Number(tail.value), timestamps: timestamps.checked },
+        `Logs ${dockerContainerLabel(container)}`,
+        { showOutput: true },
+      );
+    });
+    body.append(form);
+  }, (actions) => {
+    actions.append(button("Load logs", "button-primary", () => {
+      const form = $("docker-dialog-body").querySelector("form");
+      form?.requestSubmit();
+    }, !dockerCan("mutate")));
+  });
+}
+
+function openDockerExec(container) {
+  openDockerDialog(`Exec · ${dockerContainerLabel(container)}`, "One-shot container exec", (body) => {
+    const shell = h("select", {}, h("option", { value: "sh" }, "sh"), h("option", { value: "bash" }, "bash"), h("option", { value: "ash" }, "ash"));
+    const user = h("input", { type: "text", maxlength: "32", placeholder: "container user (optional)" });
+    const workdir = h("input", { type: "text", maxlength: "256", placeholder: "/app (optional)" });
+    const command = h("textarea", { rows: "4", maxlength: "8000", placeholder: "id && uname -a", required: true });
+    const timeout = h("input", { type: "number", min: "5", max: "300", value: "60" });
+    const form = h(
+      "form",
+      { class: "form-stack" },
+      h("div", { class: "form-grid" }, h("label", { class: "field" }, h("span", {}, "Shell"), shell), h("label", { class: "field" }, h("span", {}, "Timeout seconds"), timeout)),
+      h("div", { class: "form-grid" }, h("label", { class: "field" }, h("span", {}, "User"), user), h("label", { class: "field" }, h("span", {}, "Working directory"), workdir)),
+      h("label", { class: "field" }, h("span", {}, "Command"), command),
+      h("p", { class: "form-hint" }, "Runs inside the container with the container's privileges. Output is retained in command history."),
+    );
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const text = command.value.trim();
+      if (!text) return setText("docker-dialog-error", "Enter a command.");
+      if (workdir.value.trim() && !workdir.value.trim().startsWith("/")) {
+        return setText("docker-dialog-error", "Working directory must be an absolute path.");
+      }
+      queueDockerAction(
+        `/api/docker/hosts/${encodeURIComponent(state.dockerHostId)}/containers/${encodeURIComponent(container.id)}/exec`,
+        { shell: shell.value, user: user.value.trim(), workdir: workdir.value.trim(), command: text, timeout: Number(timeout.value) },
+        `Exec ${dockerContainerLabel(container)}`,
+        { showOutput: true },
+      );
+    });
+    body.append(form);
+  }, (actions) => {
+    actions.append(button("Run command", "button-primary", () => {
+      $("docker-dialog-body").querySelector("form")?.requestSubmit();
+    }, !dockerCan("exec")));
+  });
+}
+
+function openDockerRename(container) {
+  openDockerDialog(`Rename · ${dockerContainerLabel(container)}`, "Container rename", (body) => {
+    const name = h("input", { type: "text", maxlength: "128", required: true, value: container.name || "" });
+    const form = h("form", { class: "form-stack" }, h("label", { class: "field" }, h("span", {}, "New name"), name));
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      queueDockerAction(dockerActionUrl(), { action: "container.rename", container_id: container.id, new_name: name.value.trim() }, `Rename ${dockerContainerLabel(container)}`, { showOutput: true });
+    });
+    body.append(form);
+  }, (actions) => {
+    actions.append(button("Rename", "button-primary", () => $("docker-dialog-body").querySelector("form")?.requestSubmit(), !dockerCan("mutate")));
+  });
+}
+
+function openDockerUpdate(container) {
+  openDockerDialog(`Update · ${dockerContainerLabel(container)}`, "Container limits", (body) => {
+    const restart = h("select", {}, h("option", { value: "" }, "No change"), ...["no", "always", "unless-stopped", "on-failure", "on-failure:3"].map((value) => h("option", { value }, value)));
+    const memory = h("input", { type: "text", maxlength: "32", placeholder: "512m (optional)" });
+    const cpus = h("input", { type: "text", maxlength: "16", placeholder: "1.5 (optional)" });
+    const pids = h("input", { type: "number", min: "0", max: "1000000", placeholder: "pids limit (optional)" });
+    const form = h(
+      "form",
+      { class: "form-stack" },
+      h("div", { class: "form-grid" }, h("label", { class: "field" }, h("span", {}, "Restart policy"), restart), h("label", { class: "field" }, h("span", {}, "Memory"), memory)),
+      h("div", { class: "form-grid" }, h("label", { class: "field" }, h("span", {}, "CPUs"), cpus), h("label", { class: "field" }, h("span", {}, "PIDs limit"), pids)),
+      h("p", { class: "form-hint" }, "Docker can update restart policy and resource limits in place. Environment, ports, and mounts require a recreate."),
+    );
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const payload = { action: "container.update", container_id: container.id };
+      if (restart.value) payload.restart_policy = restart.value;
+      if (memory.value.trim()) payload.memory = memory.value.trim();
+      if (cpus.value.trim()) payload.cpus = cpus.value.trim();
+      if (pids.value !== "") payload.pids_limit = Number(pids.value);
+      if (Object.keys(payload).length === 2) return setText("docker-dialog-error", "Choose at least one limit.");
+      queueDockerAction(dockerActionUrl(), payload, `Update ${dockerContainerLabel(container)}`, { showOutput: true });
+    });
+    body.append(form);
+  }, (actions) => {
+    actions.append(button("Apply update", "button-primary", () => $("docker-dialog-body").querySelector("form")?.requestSubmit(), !dockerCan("mutate")));
+  });
+}
+
+async function removeDockerContainer(container) {
+  const running = String(container.state || "").toLowerCase() === "running";
+  return confirmDockerAction(
+    `Remove ${dockerContainerLabel(container)}?`,
+    running
+      ? "This force-removes a running container. Volumes are not removed. This cannot be undone."
+      : "This removes the stopped container. Volumes are not removed. This cannot be undone.",
+    "Remove container",
+    dockerActionUrl(),
+    { action: "container.remove", container_id: container.id, force: running, remove_volumes: false },
+    `Remove ${dockerContainerLabel(container)}`,
+    { showOutput: true },
+  );
+}
+
+const DOCKER_CLEANUP_META = {
+  stopped_containers: {
+    label: "Stopped containers",
+    warning: "Removes stopped containers except Compose-managed containers by default. Volumes are not removed.",
+  },
+  dangling_images: { label: "Dangling images", warning: "Removes untagged images only. This is generally safe." },
+  unused_images: { label: "Unused images", warning: "Destructive: removes tagged images not used by a cached container." },
+  unused_volumes: { label: "Unused volumes", warning: "Destructive and irreversible. Docker only removes volumes not in use." },
+  unused_networks: { label: "Unused networks", warning: "Removes unused non-default networks." },
+  build_cache: { label: "Build cache", warning: "Clears Docker build cache." },
+};
+
+async function confirmDockerCleanup(scope) {
+  const meta = DOCKER_CLEANUP_META[scope] || { label: scope, warning: "Docker cleanup." };
+  return confirmDockerAction(
+    `Clean up ${meta.label.toLowerCase()}?`,
+    `${meta.warning} The exact filter is scope=${scope}. This action runs on the selected host.`,
+    "Run cleanup",
+    `/api/docker/hosts/${encodeURIComponent(state.dockerHostId)}/cleanup`,
+    { scope, include_compose: false },
+    `Cleanup ${meta.label}`,
+    { showOutput: true },
   );
 }
 
 function renderDockerImages(body, detail) {
   const images = detail.images || [];
-  if (!images.length) {
-    body.append(section("Docker host", "Images", h("div", { class: "empty-inline" }, "No images reported.")));
-    return;
-  }
-  const rows = images.map((image) =>
-    h(
+  const canMutate = dockerCan("mutate");
+  const rows = images.map((image) => {
+    const protectedImage = Number(image.containers || 0) > 0;
+    return h(
       "tr",
       {},
       h("td", {}, (image.repo_tags || []).join(", ") || (image.dangling ? "<none>" : short(image.id, 16))),
@@ -4228,31 +4673,54 @@ function renderDockerImages(body, detail) {
       h("td", {}, fmtBytes(image.size)),
       h("td", {}, image.dangling ? statusPill("dangling", "warning") : statusPill("tagged", "online")),
       h("td", {}, image.containers),
+      h(
+        "td",
+        {},
+        button(
+          "Remove",
+          "button-danger button-small",
+          () => confirmDockerAction(
+            "Remove image?",
+            "Docker refuses to remove an image used by a container. This cannot be undone.",
+            "Remove image",
+            dockerActionUrl(),
+            { action: "image.remove", image_id: image.id },
+            "Remove image",
+            { showOutput: true },
+          ),
+          !canMutate || protectedImage,
+        ),
+      ),
+    );
+  });
+  const children = [
+    h(
+      "div",
+      { class: "section-toolbar" },
+      button("Prune dangling", "button-ghost button-small", () => confirmDockerCleanup("dangling_images"), !dockerCan("prune")),
+      button("Prune unused", "button-danger button-small", () => confirmDockerCleanup("unused_images"), !dockerCan("prune")),
     ),
-  );
-  body.append(
-    section(
-      "Docker host",
-      "Images",
+  ];
+  if (!images.length) children.push(h("div", { class: "empty-inline" }, "No images reported."));
+  else {
+    children.push(
       interactiveTable(
         h(
           "table",
           { class: "data-table" },
-          h("thead", {}, h("tr", {}, h("th", {}, "Repository / tags"), h("th", {}, "Image ID"), h("th", {}, "Size"), h("th", {}, "State"), h("th", {}, "Containers"))),
+          h("thead", {}, h("tr", {}, h("th", {}, "Repository / tags"), h("th", {}, "Image ID"), h("th", {}, "Size"), h("th", {}, "State"), h("th", {}, "Containers"), h("th", {}, "Actions"))),
           h("tbody", {}, ...rows),
         ),
         { placeholder: "Filter images", pageSize: 25 },
       ),
-    ),
-  );
+    );
+  }
+  body.append(section("Docker host", "Images", ...children));
 }
 
 function renderDockerVolumes(body, detail) {
   const volumes = detail.volumes || [];
-  if (!volumes.length) {
-    body.append(section("Docker host", "Volumes", h("div", { class: "empty-inline" }, "No volumes reported.")));
-    return;
-  }
+  const canMutate = dockerCan("mutate");
   const rows = volumes.map((volume) =>
     h(
       "tr",
@@ -4262,33 +4730,56 @@ function renderDockerVolumes(body, detail) {
       h("td", {}, volume.scope || "—"),
       h("td", {}, volume.in_use ? "yes" : "unknown"),
       h("td", { class: "mono" }, short(volume.mountpoint || "—", 72)),
+      h(
+        "td",
+        {},
+        button(
+          "Remove",
+          "button-danger button-small",
+          () => confirmDockerAction(
+            "Remove volume?",
+            "This permanently deletes the volume and its data. This cannot be undone.",
+            "Remove volume",
+            dockerActionUrl(),
+            { action: "volume.remove", volume_name: volume.name },
+            `Remove volume ${volume.name}`,
+            { showOutput: true },
+          ),
+          !canMutate || volume.in_use,
+        ),
+      ),
     ),
   );
-  body.append(
-    section(
-      "Docker host",
-      "Volumes",
+  const children = [
+    h(
+      "div",
+      { class: "section-toolbar" },
+      button("Prune unused volumes", "button-danger button-small", () => confirmDockerCleanup("unused_volumes"), !dockerCan("prune")),
+    ),
+  ];
+  if (!volumes.length) children.push(h("div", { class: "empty-inline" }, "No volumes reported."));
+  else {
+    children.push(
       interactiveTable(
         h(
           "table",
           { class: "data-table" },
-          h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Driver"), h("th", {}, "Scope"), h("th", {}, "In use"), h("th", {}, "Mountpoint"))),
+          h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Driver"), h("th", {}, "Scope"), h("th", {}, "In use"), h("th", {}, "Mountpoint"), h("th", {}, "Actions"))),
           h("tbody", {}, ...rows),
         ),
         { placeholder: "Filter volumes", pageSize: 25 },
       ),
-    ),
-  );
+    );
+  }
+  body.append(section("Docker host", "Volumes", ...children));
 }
 
 function renderDockerNetworks(body, detail) {
   const networks = detail.networks || [];
-  if (!networks.length) {
-    body.append(section("Docker host", "Networks", h("div", { class: "empty-inline" }, "No networks reported.")));
-    return;
-  }
-  const rows = networks.map((network) =>
-    h(
+  const canMutate = dockerCan("mutate");
+  const rows = networks.map((network) => {
+    const isDefault = ["bridge", "host", "none"].includes(String(network.name || "").toLowerCase());
+    return h(
       "tr",
       {},
       h("td", {}, h("strong", {}, network.name || short(network.id, 16))),
@@ -4296,23 +4787,48 @@ function renderDockerNetworks(body, detail) {
       h("td", {}, network.scope || "—"),
       h("td", {}, network.internal ? "yes" : "no"),
       h("td", {}, network.container_count),
+      h(
+        "td",
+        {},
+        button(
+          "Remove",
+          "button-danger button-small",
+          () => confirmDockerAction(
+            "Remove network?",
+            "Docker refuses to remove a network with attached containers. This cannot be undone.",
+            "Remove network",
+            dockerActionUrl(),
+            { action: "network.remove", network_id: network.id },
+            `Remove network ${network.name || short(network.id, 12)}`,
+            { showOutput: true },
+          ),
+          !canMutate || isDefault || Number(network.container_count || 0) > 0,
+        ),
+      ),
+    );
+  });
+  const children = [
+    h(
+      "div",
+      { class: "section-toolbar" },
+      button("Prune unused networks", "button-ghost button-small", () => confirmDockerCleanup("unused_networks"), !dockerCan("prune")),
     ),
-  );
-  body.append(
-    section(
-      "Docker host",
-      "Networks",
+  ];
+  if (!networks.length) children.push(h("div", { class: "empty-inline" }, "No networks reported."));
+  else {
+    children.push(
       interactiveTable(
         h(
           "table",
           { class: "data-table" },
-          h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Driver"), h("th", {}, "Scope"), h("th", {}, "Internal"), h("th", {}, "Containers"))),
+          h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Driver"), h("th", {}, "Scope"), h("th", {}, "Internal"), h("th", {}, "Containers"), h("th", {}, "Actions"))),
           h("tbody", {}, ...rows),
         ),
         { placeholder: "Filter networks", pageSize: 25 },
       ),
-    ),
-  );
+    );
+  }
+  body.append(section("Docker host", "Networks", ...children));
 }
 
 async function refreshDockerHost() {
@@ -4684,6 +5200,11 @@ function wireEvents() {
   $("docker-refresh-list")?.addEventListener("click", () => loadDockerHosts());
   $("docker-refresh-host")?.addEventListener("click", refreshDockerHost);
   $("docker-close-host")?.addEventListener("click", closeDockerHost);
+  $("docker-dialog")?.addEventListener("close", () => {
+    const trigger = state.dockerDialogTrigger;
+    state.dockerDialogTrigger = null;
+    if (trigger && typeof trigger.focus === "function") trigger.focus();
+  });
   document.querySelectorAll("#docker-host-tabs .tab").forEach((el) => {
     el.addEventListener("click", () => {
       state.dockerTab = el.dataset.dockerTab;

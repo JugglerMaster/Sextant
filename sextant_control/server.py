@@ -28,6 +28,7 @@ from . import remote_install
 from . import updates
 from .config import Settings
 from .db import Database, DEFAULT_PROFILES, dumps, loads, parse_iso, utcnow, utcnow_iso
+from .docker_rules import DOCKER_MUTATION_ACTIONS
 from .ldap_auth import authenticate_ldap
 from .notifications import NotificationError, NotificationService
 from .models import (
@@ -42,6 +43,9 @@ from .models import (
     CommandIn,
     CommandOutputIn,
     CommandResultIn,
+    DockerActionIn,
+    DockerCleanupIn,
+    DockerExecIn,
     DockerInventoryIn,
     EnrollmentTokenIn,
     HeartbeatIn,
@@ -190,7 +194,8 @@ def _command_csv_description(row: sqlite3.Row) -> str:
     if kind == "refresh":
         return "refresh telemetry"
     if kind == "docker":
-        return f"docker: {args.get('action', '?')}"
+        target = args.get("container_id") or args.get("image_id") or args.get("volume_name") or args.get("network_id") or args.get("scope") or ""
+        return f"docker: {args.get('action', '?')}{f' {target}' if target else ''}"
     return kind
 
 
@@ -900,16 +905,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     status_code=409,
                     detail=f"{kind.capitalize()} commands are blocked by this agent's profile or server policy.",
                 )
-            if kind == "docker" and (
-                str(agent["os"]).lower() != "linux"
-                or not _docker_module_enabled(profile_row)
-                or agent_policy.get("allow_docker", True) is False
-                or not profile_actions.get("allow_docker", False)
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail="Docker commands are blocked by this agent's profile or server policy.",
-                )
+            if kind == "docker":
+                docker_action = str(normalized.get("action", "")).lower()
+                docker_gate = "allow_docker"
+                if docker_action == "container.exec_one_shot":
+                    docker_gate = "allow_docker_exec"
+                elif docker_action == "cleanup":
+                    docker_gate = "allow_docker_prune"
+                if (
+                    str(agent["os"]).lower() != "linux"
+                    or not _docker_module_enabled(profile_row)
+                    or agent_policy.get(docker_gate, True) is False
+                    or not profile_actions.get(docker_gate, False)
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Docker commands are blocked by this agent's profile or server policy.",
+                    )
+                if docker_action in DOCKER_MUTATION_ACTIONS:
+                    active = conn.execute(
+                        """SELECT args FROM commands
+                           WHERE agent_id = ? AND kind = 'docker'
+                             AND status IN ('queued', 'dispatched', 'running')""",
+                        (agent_id,),
+                    ).fetchall()
+                    for row in active:
+                        active_args = loads(row["args"], {})
+                        if (
+                            isinstance(active_args, dict)
+                            and str(active_args.get("action", "")).lower() in DOCKER_MUTATION_ACTIONS
+                        ):
+                            raise HTTPException(
+                                status_code=409,
+                                detail="Another Docker mutation is already active for this host.",
+                            )
             last_seen = parse_iso(agent["last_seen"])
             online = bool(
                 last_seen and (utcnow() - last_seen).total_seconds() <= config.offline_after_seconds
@@ -1556,6 +1585,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "hosts": [docker_host_to_dict(row, config, now) for row in rows],
         }
 
+    def _docker_context(
+        database: Database,
+        agent_id: str,
+        config: Settings,
+    ) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row, dict[str, bool]]:
+        host_row = database.get_docker_host(agent_id)
+        if host_row is None:
+            raise HTTPException(status_code=404, detail="Docker host not found.")
+        with database.connection() as conn:
+            agent_row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        if agent_row is None:
+            raise HTTPException(status_code=404, detail="Agent not found.")
+        profile_row = database.get_profile_by_id(
+            agent_row["profile_id"]
+        ) or database.get_profile_by_slug("workstation")
+        return host_row, agent_row, profile_row, _docker_capabilities(agent_row, profile_row, config)
+
     @app.get("/api/docker/hosts/{agent_id}")
     def get_docker_host(
         agent_id: str,
@@ -1566,13 +1612,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         del user
         if not config.docker_enabled:
             raise HTTPException(status_code=404, detail="Docker management is disabled.")
-        row = database.get_docker_host(agent_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="Docker host not found.")
+        row, _agent_row, _profile_row, capabilities = _docker_context(database, agent_id, config)
+        host_payload = docker_host_to_dict(row, config)
+        host_payload["capabilities"] = capabilities
         return {
             "server_time": utcnow_iso(),
             "stale_seconds": config.docker_inventory_stale_seconds,
-            "host": docker_host_to_dict(row, config),
+            "host": host_payload,
             "containers": [
                 docker_container_to_dict(item)
                 for item in database.list_docker_containers(agent_id)
@@ -1625,6 +1671,223 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             config,
             audit_action="docker.inventory_refresh",
             extra_detail={"host": host_row["agent_name"]},
+        )
+        command["queued"] = True
+        return command
+
+    @app.post("/api/docker/hosts/{agent_id}/actions")
+    def docker_action(
+        agent_id: str,
+        payload: DockerActionIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        host_row, _agent_row, _profile_row, capabilities = _docker_context(
+            database, agent_id, config
+        )
+        if not host_row["available"]:
+            raise HTTPException(status_code=409, detail="Docker is not currently reachable on this host.")
+        if not capabilities["mutate"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Docker actions are disabled by the agent profile or server policy.",
+            )
+        action_model = payload.root
+        action = action_model.action
+        args = action_model.model_dump(exclude_none=True)
+        target = ""
+        detail: dict[str, Any] = {
+            "host": host_row["agent_name"],
+            "docker_action": action,
+        }
+        if action.startswith("container."):
+            container = database.find_docker_container(agent_id, str(args["container_id"]))
+            if container is None:
+                raise HTTPException(status_code=404, detail="Container not found in the latest inventory.")
+            target = str(container["container_id"])
+            args["container_id"] = target
+            detail["target"] = target
+            detail["container_name"] = container["name"]
+        elif action == "image.remove":
+            image = database.find_docker_image(agent_id, str(args["image_id"]))
+            if image is None:
+                raise HTTPException(status_code=404, detail="Image not found in the latest inventory.")
+            if int(image["container_count"]) > 0:
+                raise HTTPException(status_code=409, detail="Image is used by a container and cannot be removed.")
+            target = str(image["image_id"])
+            args["image_id"] = target
+            detail["target"] = target
+        elif action == "volume.remove":
+            volume = database.find_docker_volume(agent_id, str(args["volume_name"]))
+            if volume is None:
+                raise HTTPException(status_code=404, detail="Volume not found in the latest inventory.")
+            if bool(volume["in_use"]):
+                raise HTTPException(status_code=409, detail="Volume is in use and cannot be removed.")
+            target = str(volume["name"])
+            args["volume_name"] = target
+            detail["target"] = target
+        elif action == "network.remove":
+            network = database.find_docker_network(agent_id, str(args["network_id"]))
+            if network is None:
+                raise HTTPException(status_code=404, detail="Network not found in the latest inventory.")
+            if str(network["name"]).lower() in {"bridge", "host", "none"}:
+                raise HTTPException(status_code=409, detail="Default Docker networks cannot be removed.")
+            if int(network["container_count"]) > 0:
+                raise HTTPException(status_code=409, detail="Network has attached containers and cannot be removed.")
+            target = str(network["network_id"])
+            args["network_id"] = target
+            detail["target"] = target
+        if action == "container.rename":
+            detail["new_name"] = args.get("new_name", "")
+        elif action == "container.update":
+            detail.update(
+                {
+                    "restart_policy": args.get("restart_policy", ""),
+                    "memory": args.get("memory", ""),
+                    "cpus": args.get("cpus", ""),
+                    "pids_limit": args.get("pids_limit"),
+                }
+            )
+        elif action == "container.remove":
+            detail.update(
+                {"force": bool(args.get("force")), "remove_volumes": bool(args.get("remove_volumes"))}
+            )
+        elif action == "container.logs":
+            detail.update({"tail": args.get("tail"), "timestamps": bool(args.get("timestamps"))})
+        command = queue_command(
+            agent_id,
+            "docker",
+            args,
+            user,
+            request,
+            database,
+            config,
+            audit_action="docker.action_requested",
+            extra_detail=detail,
+        )
+        command["queued"] = True
+        return command
+
+    @app.post("/api/docker/hosts/{agent_id}/containers/{container_id}/exec")
+    def docker_container_exec(
+        agent_id: str,
+        container_id: str,
+        payload: DockerExecIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        host_row, _agent_row, _profile_row, capabilities = _docker_context(
+            database, agent_id, config
+        )
+        if not host_row["available"]:
+            raise HTTPException(status_code=409, detail="Docker is not currently reachable on this host.")
+        if not capabilities["exec"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Docker exec is disabled by the agent profile or server policy.",
+            )
+        container = database.find_docker_container(agent_id, container_id)
+        if container is None:
+            raise HTTPException(status_code=404, detail="Container not found in the latest inventory.")
+        args = {
+            "action": "container.exec_one_shot",
+            "container_id": container["container_id"],
+            "shell": payload.shell,
+            "user": payload.user,
+            "workdir": payload.workdir,
+            "command": payload.command,
+            "timeout": payload.timeout,
+            "tty": payload.tty,
+        }
+        command = queue_command(
+            agent_id,
+            "docker",
+            args,
+            user,
+            request,
+            database,
+            config,
+            audit_action="docker.action_requested",
+            extra_detail={
+                "host": host_row["agent_name"],
+                "docker_action": "container.exec_one_shot",
+                "target": container["container_id"],
+                "container_name": container["name"],
+                "shell": payload.shell,
+                "timeout": payload.timeout,
+            },
+        )
+        command["queued"] = True
+        return command
+
+    @app.get("/api/docker/hosts/{agent_id}/cleanup")
+    def docker_cleanup_preview(
+        agent_id: str,
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        del user
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        host_row, _agent_row, _profile_row, capabilities = _docker_context(
+            database, agent_id, config
+        )
+        return {
+            "server_time": utcnow_iso(),
+            "host": docker_host_to_dict(host_row, config),
+            "can_prune": capabilities["prune"],
+            "scopes": _docker_cleanup_preview(database, agent_id),
+        }
+
+    @app.post("/api/docker/hosts/{agent_id}/cleanup")
+    def docker_cleanup(
+        agent_id: str,
+        payload: DockerCleanupIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        host_row, _agent_row, _profile_row, capabilities = _docker_context(
+            database, agent_id, config
+        )
+        if not host_row["available"]:
+            raise HTTPException(status_code=409, detail="Docker is not currently reachable on this host.")
+        if not capabilities["prune"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Docker cleanup is disabled by the agent profile or server policy.",
+            )
+        command = queue_command(
+            agent_id,
+            "docker",
+            {
+                "action": "cleanup",
+                "scope": payload.scope,
+                "include_compose": payload.include_compose,
+            },
+            user,
+            request,
+            database,
+            config,
+            audit_action="docker.action_requested",
+            extra_detail={
+                "host": host_row["agent_name"],
+                "docker_action": "cleanup",
+                "scope": payload.scope,
+                "include_compose": payload.include_compose,
+            },
         )
         command["queued"] = True
         return command
@@ -3491,6 +3754,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=404, detail="Command not found.")
             conn.execute("UPDATE agents SET last_seen = ? WHERE id = ?", (utcnow_iso(), agent_id))
             updated = conn.execute("SELECT * FROM commands WHERE id = ?", (command_id,)).fetchone()
+            if row["kind"] == "docker":
+                docker_args = loads(row["args"], {})
+                if not isinstance(docker_args, dict):
+                    docker_args = {}
+                docker_action = str(docker_args.get("action", "")).lower()
+                combined = f"{stdout}\n{stderr}"
+                result_detail = {
+                    "docker_action": docker_action,
+                    "status": final_status,
+                    "exit_code": payload.exit_code,
+                    "reclaimed_bytes": _docker_reclaimed_bytes(combined),
+                    "removed_containers": _docker_removed_containers(combined),
+                }
+                if docker_args.get("scope"):
+                    result_detail["scope"] = docker_args["scope"]
+                if docker_args.get("container_id"):
+                    result_detail["target"] = docker_args["container_id"]
+                elif docker_args.get("image_id"):
+                    result_detail["target"] = docker_args["image_id"]
+                elif docker_args.get("volume_name"):
+                    result_detail["target"] = docker_args["volume_name"]
+                elif docker_args.get("network_id"):
+                    result_detail["target"] = docker_args["network_id"]
+                database.audit(
+                    actor=row["created_by"],
+                    action="docker.action_result",
+                    target=agent_id,
+                    detail=result_detail,
+                    conn=conn,
+                )
+                if docker_action in DOCKER_MUTATION_ACTIONS:
+                    database.record_agent_event(
+                        agent_id,
+                        "docker.action",
+                        "success" if final_status == "succeeded" else "warning",
+                        f"Docker {docker_action} {final_status}",
+                        result_detail,
+                        conn=conn,
+                    )
         notify_dashboard()
         return {"command": command_to_dict(updated)}
 
@@ -4488,6 +4790,166 @@ def _docker_effective_allowed(agent_row: Any, profile_row: Any, config: Settings
     if not isinstance(policy, dict):
         policy = {}
     return bool(policy.get("allow_docker", True)) and actions["allow_docker"]
+
+
+def _docker_capabilities(agent_row: Any, profile_row: Any, config: Settings) -> dict[str, bool]:
+    allowed = _docker_effective_allowed(agent_row, profile_row, config)
+    actions = _policy_from_settings(_profile_settings(profile_row))
+    policy = loads(agent_row["policy"] if "policy" in agent_row.keys() else agent_row.get("policy"), {})
+    if not isinstance(policy, dict):
+        policy = {}
+    return {
+        "mutate": bool(allowed),
+        "exec": bool(
+            allowed
+            and policy.get("allow_docker_exec", True)
+            and actions["allow_docker_exec"]
+        ),
+        "prune": bool(
+            allowed
+            and policy.get("allow_docker_prune", True)
+            and actions["allow_docker_prune"]
+        ),
+    }
+
+
+_DOCKER_RECLAIM_RE = re.compile(r"Total reclaimed space:\s*([0-9.]+)\s*([kmgtpe]?i?b?)", re.IGNORECASE)
+_DOCKER_REMOVED_RE = re.compile(r"Removed\s+([0-9]+)\s+stopped container", re.IGNORECASE)
+
+
+def _docker_reclaimed_bytes(text: str) -> int:
+    match = _DOCKER_RECLAIM_RE.search(text or "")
+    if match is None:
+        return 0
+    amount = float(match.group(1))
+    unit = match.group(2).lower()
+    factor = 1
+    if unit.startswith("k"):
+        factor = 1024
+    elif unit.startswith("m"):
+        factor = 1024**2
+    elif unit.startswith("g"):
+        factor = 1024**3
+    elif unit.startswith("t"):
+        factor = 1024**4
+    elif unit.startswith("p"):
+        factor = 1024**5
+    return max(0, int(amount * factor))
+
+
+def _docker_removed_containers(text: str) -> int:
+    match = _DOCKER_REMOVED_RE.search(text or "")
+    return int(match.group(1)) if match else 0
+
+
+def _docker_cleanup_preview(database: Database, agent_id: str) -> list[dict[str, Any]]:
+    containers = database.list_docker_containers(agent_id)
+    images = database.list_docker_images(agent_id)
+    volumes = database.list_docker_volumes(agent_id)
+    networks = database.list_docker_networks(agent_id)
+
+    stopped = [
+        row
+        for row in containers
+        if str(row["state"]).lower() in {"exited", "created", "dead"}
+        and not str(row["compose_project"] or "").strip()
+    ]
+    dangling = [row for row in images if bool(row["dangling"])]
+    used_images: set[str] = set()
+    for row in containers:
+        if row["image"]:
+            used_images.add(str(row["image"]))
+        if row["image_id"]:
+            used_images.add(str(row["image_id"]))
+    unused_images = []
+    for row in images:
+        if bool(row["dangling"]):
+            continue
+        tags = loads(row["repo_tags"], [])
+        if int(row["container_count"]) > 0:
+            continue
+        if row["image_id"] in used_images or any(str(tag) in used_images for tag in tags):
+            continue
+        unused_images.append(row)
+    unused_volumes = [row for row in volumes if not bool(row["in_use"])]
+    unused_networks = [
+        row
+        for row in networks
+        if int(row["container_count"]) == 0
+        and str(row["name"]).lower() not in {"bridge", "host", "none"}
+    ]
+
+    def entry(
+        scope: str,
+        label: str,
+        rows: list[Any],
+        *,
+        estimated_bytes: int = 0,
+        estimated: bool = True,
+        warning: str = "",
+    ) -> dict[str, Any]:
+        candidates = []
+        for row in rows[:20]:
+            if scope == "stopped_containers":
+                candidates.append({"id": row["container_id"], "name": row["name"]})
+            elif scope in {"dangling_images", "unused_images"}:
+                candidates.append({"id": row["image_id"], "tags": loads(row["repo_tags"], [])})
+            elif scope == "unused_volumes":
+                candidates.append({"name": row["name"]})
+            elif scope == "unused_networks":
+                candidates.append({"id": row["network_id"], "name": row["name"]})
+        return {
+            "scope": scope,
+            "label": label,
+            "count": len(rows),
+            "estimated_bytes": estimated_bytes,
+            "estimated": estimated,
+            "candidates": candidates,
+            "warning": warning,
+        }
+
+    return [
+        entry(
+            "stopped_containers",
+            "Stopped containers",
+            stopped,
+            warning="Compose-managed stopped containers are excluded by default.",
+        ),
+        entry(
+            "dangling_images",
+            "Dangling images",
+            dangling,
+            estimated_bytes=sum(int(row["size"]) for row in dangling),
+            warning="Untagged images only.",
+        ),
+        entry(
+            "unused_images",
+            "Unused images",
+            unused_images,
+            estimated_bytes=sum(int(row["size"]) for row in unused_images),
+            warning="Destructive: removes tagged images not used by a cached container.",
+        ),
+        entry(
+            "unused_volumes",
+            "Unused volumes",
+            unused_volumes,
+            estimated=False,
+            warning="Destructive and irreversible. Docker only removes volumes not in use.",
+        ),
+        entry(
+            "unused_networks",
+            "Unused networks",
+            unused_networks,
+            warning="Default bridge/host/none networks are excluded.",
+        ),
+        entry(
+            "build_cache",
+            "Build cache",
+            [],
+            estimated=False,
+            warning="Docker reports reclaimed size after the prune runs.",
+        ),
+    ]
 
 
 def _profile_settings(row: Any) -> dict[str, Any]:

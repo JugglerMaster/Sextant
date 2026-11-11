@@ -11,7 +11,7 @@ from typing import Any
 from .client import AgentClient, AgentHTTPError
 from .collectors import MetricsCollector
 from .config import AgentConfig
-from .docker import DockerCollector
+from .docker import DOCKER_MUTATION_ACTIONS, DockerCollector
 from .executor import execute_command
 
 logger = logging.getLogger("sextant_agent")
@@ -234,38 +234,35 @@ class AgentRunner:
         args = command.get("args") if isinstance(command.get("args"), dict) else {}
         action = str(args.get("action", "")).lower()
         started = time.time()
-        if action != "inventory.refresh":
-            result = {
-                "status": "failed",
-                "exit_code": None,
-                "stdout": "",
-                "stderr": "",
-                "error": "Unsupported Docker action in this phase.",
-            }
-        elif not self.docker.enabled():
-            result = {
-                "status": "failed",
-                "exit_code": None,
-                "stdout": "",
-                "stderr": "",
-                "error": "Docker collection is disabled by local config, profile, or server policy.",
-            }
-        elif self._upload_docker_inventory(force=True):
-            result = {
-                "status": "succeeded",
-                "exit_code": 0,
-                "stdout": "Docker inventory refreshed.",
-                "stderr": "",
-                "error": "",
-            }
+        if action == "inventory.refresh":
+            if not self.docker.enabled():
+                result = {
+                    "status": "failed",
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "error": "Docker collection is disabled by local config, profile, or server policy.",
+                }
+            elif self._upload_docker_inventory(force=True):
+                result = {
+                    "status": "succeeded",
+                    "exit_code": 0,
+                    "stdout": "Docker inventory refreshed.",
+                    "stderr": "",
+                    "error": "",
+                }
+            else:
+                result = {
+                    "status": "failed",
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "error": "Docker inventory could not be collected or uploaded.",
+                }
         else:
-            result = {
-                "status": "failed",
-                "exit_code": None,
-                "stdout": "",
-                "stderr": "",
-                "error": "Docker inventory could not be collected or uploaded.",
-            }
+            result = self.docker.execute_action(action, args)
+            if result.get("status") == "succeeded" and action in DOCKER_MUTATION_ACTIONS:
+                self._upload_docker_inventory(force=True)
         result["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started))
         result["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self._post_result(command_id, result)

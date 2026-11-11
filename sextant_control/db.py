@@ -358,6 +358,9 @@ CREATE TABLE IF NOT EXISTS docker_containers (
     finished_at TEXT NOT NULL DEFAULT '',
     exit_code INTEGER,
     restart_policy TEXT NOT NULL DEFAULT '',
+    memory_limit INTEGER NOT NULL DEFAULT 0,
+    nano_cpus INTEGER NOT NULL DEFAULT 0,
+    pids_limit INTEGER,
     ports TEXT NOT NULL DEFAULT '[]',
     labels TEXT NOT NULL DEFAULT '{}',
     mounts TEXT NOT NULL DEFAULT '[]',
@@ -611,7 +614,7 @@ class Database:
             if old_version < 7:
                 self._ensure_docker_profile_defaults(conn)
             conn.executescript(INDEXES)
-            conn.execute("PRAGMA user_version=7")
+            conn.execute("PRAGMA user_version=8")
             conn.execute("UPDATE agents SET profile_id = 'prof_workstation' WHERE profile_id = ''")
         try:
             self.path.chmod(0o600)
@@ -641,6 +644,19 @@ class Database:
             conn.execute("ALTER TABLE agents ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'prof_workstation'")
         if "service_inventory_at" not in agent_columns:
             conn.execute("ALTER TABLE agents ADD COLUMN service_inventory_at TEXT")
+
+        docker_container_columns = columns("docker_containers")
+        if docker_container_columns:
+            if "memory_limit" not in docker_container_columns:
+                conn.execute(
+                    "ALTER TABLE docker_containers ADD COLUMN memory_limit INTEGER NOT NULL DEFAULT 0"
+                )
+            if "nano_cpus" not in docker_container_columns:
+                conn.execute(
+                    "ALTER TABLE docker_containers ADD COLUMN nano_cpus INTEGER NOT NULL DEFAULT 0"
+                )
+            if "pids_limit" not in docker_container_columns:
+                conn.execute("ALTER TABLE docker_containers ADD COLUMN pids_limit INTEGER")
 
         state_columns = columns("package_inventory_state")
         if state_columns and "revision" not in state_columns:
@@ -2509,9 +2525,9 @@ class Database:
                 """INSERT INTO docker_containers
                    (agent_id, container_id, name, image, image_id, command, state, status,
                     health, created_at, started_at, finished_at, exit_code, restart_policy,
-                    ports, labels, mounts, networks, compose_project, compose_service,
-                    compose_config_hash, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    memory_limit, nano_cpus, pids_limit, ports, labels, mounts, networks,
+                    compose_project, compose_service, compose_config_hash, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     (
                         agent_id,
@@ -2528,6 +2544,9 @@ class Database:
                         str(item.get("finished_at", ""))[:64],
                         item.get("exit_code"),
                         str(item.get("restart_policy", ""))[:64],
+                        int(item.get("memory_limit") or 0),
+                        int(item.get("nano_cpus") or 0),
+                        item.get("pids_limit"),
                         dumps(item.get("ports") or []),
                         dumps(item.get("labels") or {}),
                         dumps(item.get("mounts") or []),
@@ -2627,6 +2646,40 @@ class Database:
                 self._docker_host_select() + " AND d.agent_id = ?",
                 (agent_id,),
             ).fetchone()
+
+    def find_docker_container(self, agent_id: str, target: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM docker_containers WHERE agent_id = ? AND (container_id = ? OR container_id LIKE ?)",
+                (agent_id, target, f"{target}%"),
+            ).fetchall()
+            return rows[0] if len(rows) == 1 else None
+
+    def find_docker_image(self, agent_id: str, target: str) -> sqlite3.Row | None:
+        prefix = target[len("sha256:") :] if target.startswith("sha256:") else target
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT * FROM docker_images
+                   WHERE agent_id = ? AND (image_id = ? OR image_id = ? OR image_id LIKE ?)""",
+                (agent_id, target, prefix, f"{prefix}%"),
+            ).fetchall()
+            return rows[0] if len(rows) == 1 else None
+
+    def find_docker_volume(self, agent_id: str, name: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM docker_volumes WHERE agent_id = ? AND name = ?",
+                (agent_id, name),
+            ).fetchone()
+
+    def find_docker_network(self, agent_id: str, target: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT * FROM docker_networks
+                   WHERE agent_id = ? AND (network_id = ? OR network_id LIKE ?)""",
+                (agent_id, target, f"{target}%"),
+            ).fetchall()
+            return rows[0] if len(rows) == 1 else None
 
     def list_docker_containers(self, agent_id: str) -> list[sqlite3.Row]:
         with self.connection() as conn:

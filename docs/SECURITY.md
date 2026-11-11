@@ -137,25 +137,43 @@ There is no pixel-level remote desktop or input injection in this version. “Re
 - **GitHub is not an app source.** App packages are uploaded to the store by an admin or CI; agents never download apps from GitHub.
 - **Remote install is admin-only and key-based.** One private key is stored on the server filesystem (`SEXTANT_SSH_KEY_PATH`, mode 0600), not in SQLite. No SSH passwords, no agent forwarding, no forwarding, fixed install script, validated inputs, one job at a time, full audit. Host-key verification is intentionally disabled for rebuilt hosts, so use SSH only on a trusted admin network/VPN.
 
-## Docker inventory (D1)
+## Docker inventory and actions (D1/D2)
 
-- **Read-only in D1.** Docker Hosts exposes cached container/image/volume/network
-  metadata; it does not start, stop, remove, exec, prune, or deploy anything yet.
 - **Docker access is local and opt-in.** The Linux agent's `allow_docker` flag
   defaults to false, and the assigned profile must enable both `modules.docker`
-  and `actions.allow_docker`. Either side can deny. Windows agents report
-  `unsupported_os` and never appear.
+  and `actions.allow_docker`. Exec additionally requires `allow_docker_exec`;
+  cleanup requires `allow_docker_prune`. Either side can deny. Windows agents
+  report `unsupported_os` and never appear.
 - **Docker socket access is root-equivalent.** The agent reads the socket as its
-  service user (root by default). Enabling Docker inventory therefore expands
-  the agent's read surface; keep the same VPN/TLS trust boundary as remote shell.
+  service user (root by default). Enabling Docker management therefore expands
+  the agent's control surface; keep the same VPN/TLS trust boundary as remote
+  shell. A privileged container or host bind mount still makes an exec shell
+  powerful inside that container.
 - **No server-side Docker socket.** The server never mounts or connects to a
-  Docker socket; it stores inventory uploaded by the authenticated agent.
+  Docker socket; it stores inventory and queues authenticated agent work.
+- **No raw Docker proxy.** Browser action models are strict, reject unknown
+  fields, and only allow named lifecycle/logs/inspect/exec/remove/cleanup
+  actions. The agent repeats validation and executes argv only; it never accepts
+  arbitrary Docker flags or a raw host command string. One-shot exec is the
+  explicitly gated exception for a shell *inside* the container.
+- **One active mutation per host.** Server queue checks and an agent-side lock
+  prevent overlapping destructive actions. Cleanup is one scope per request;
+  there is no combined prune-everything action and volumes are never included by
+  default.
+- **Target ownership and re-resolution.** The server requires the target to exist
+  in the cached inventory; the agent re-resolves it with `docker inspect` before
+  acting. In-use image/volume/network removal is rejected by both layers where
+  Docker can determine it.
 - **Bounded and non-secret.** Inventory payloads are strict, row-capped, and
-  size-capped. Container environment variables are never collected. Uploads are
-  scoped to the agent's bearer token and path agent ID.
-- **Refresh is non-mutating.** `POST /api/docker/hosts/{id}/refresh` queues only
-  `docker` / `inventory.refresh`, obeys offline policy and the command queue, and
-  is audited like other command creation.
+  size-capped. Raw inspect masks environment values. Logs/exec/cleanup output is
+  bounded. Uploads and commands are scoped to the agent's bearer token/path ID.
+- **Audit and events.** Every Docker action request and result is audited with
+  actor, host, action, target, status, exit code, and reclaimed bytes where
+  available. Completed mutations create `docker.action` agent events. Command
+  text, environment values, and file bytes are not included in audit details.
+- **Offline behavior.** Actions obey the normal offline-command policy and
+  one-command-per-heartbeat queue. Cached inventory remains visible while
+  offline, but mutations are rejected or queued according to that policy.
 
 ## Transport and deployment
 

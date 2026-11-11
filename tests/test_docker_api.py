@@ -123,18 +123,25 @@ def inventory_payload(**overrides) -> dict:
     return payload
 
 
-def enable_docker_profile(client, admin) -> None:
+def enable_docker_profile(client, admin, *, exec_allowed=False, prune_allowed=False) -> None:
     profiles = client.get("/api/profiles").json()["profiles"]
     profile = next(item for item in profiles if item["slug"] == "workstation")
     settings = deepcopy(profile["settings"])
     settings.setdefault("modules", {})["docker"] = True
     settings.setdefault("actions", {})["allow_docker"] = True
+    settings.setdefault("actions", {})["allow_docker_exec"] = exec_allowed
+    settings.setdefault("actions", {})["allow_docker_prune"] = prune_allowed
     response = client.patch(
         f"/api/profiles/{profile['id']}",
         json={"settings": settings},
         headers=headers(admin),
     )
     assert response.status_code == 200, response.text
+
+
+def clear_docker_commands(app) -> None:
+    with app.state.db.connection() as conn:
+        conn.execute("DELETE FROM commands WHERE kind = 'docker'")
 
 
 def upload_inventory(client, session, agent, payload=None):
@@ -310,12 +317,12 @@ def test_docker_host_list_detail_and_refresh_rbac(app, client, admin):
     assert any(item["kind"] == "docker" for item in commands.json()["commands"])
 
 
-def test_docker_command_validation_only_allows_inventory_refresh(client, admin):
+def test_docker_command_validation_rejects_unknown_action(client, admin):
     enable_docker_profile(client, admin)
     agent = enroll_agent(admin)
     bad = client.post(
         f"/api/agents/{agent['agent_id']}/commands",
-        json={"kind": "docker", "args": {"action": "container.remove"}},
+        json={"kind": "docker", "args": {"action": "container.nuke"}},
         headers=headers(admin),
     )
     assert bad.status_code == 400
@@ -386,3 +393,322 @@ def test_heartbeat_requests_full_inventory_when_hash_is_missing(client, admin):
     response = heartbeat(admin, agent, sample_metrics(docker=docker_summary()))
     assert response["request_docker_inventory"] == "full"
     assert response["policy"]["allow_docker"] is True
+
+
+def test_container_lifecycle_action_route(app, client, admin):
+    enable_docker_profile(client, admin)
+    agent = enroll_agent(admin)
+    assert upload_inventory(client, admin, agent).status_code == 200
+    container_id = container_row(1)["id"]
+    for action in (
+        "container.start",
+        "container.stop",
+        "container.restart",
+        "container.pause",
+        "container.unpause",
+        "container.kill",
+    ):
+        # Each request is validated before the one-active-mutation guard; clear
+        # the queued command between calls so this test exercises every route.
+        response = client.post(
+            f"/api/docker/hosts/{agent['agent_id']}/actions",
+            json={"action": action, "container_id": container_id},
+            headers=headers(admin),
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["args"] == {"action": action, "container_id": container_id}
+        clear_docker_commands(app)
+
+
+def test_container_actions_inspect_logs_and_exec(client, admin):
+    enable_docker_profile(client, admin, exec_allowed=True)
+    agent = enroll_agent(admin)
+    assert upload_inventory(client, admin, agent).status_code == 200
+    container_id = container_row(1)["id"]
+
+    logs = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json={
+            "action": "container.logs",
+            "container_id": container_id,
+            "tail": 1000,
+            "timestamps": True,
+        },
+        headers=headers(admin),
+    )
+    assert logs.status_code == 200, logs.text
+    assert logs.json()["args"]["tail"] == 1000
+    assert logs.json()["args"]["timestamps"] is True
+
+    inspect = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json={"action": "container.inspect", "container_id": container_id},
+        headers=headers(admin),
+    )
+    assert inspect.status_code == 200, inspect.text
+
+    exec_response = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/containers/{container_id}/exec",
+        json={
+            "shell": "bash",
+            "user": "root",
+            "workdir": "/srv/app",
+            "command": "id && uname -a",
+            "timeout": 60,
+        },
+        headers=headers(admin),
+    )
+    assert exec_response.status_code == 200, exec_response.text
+    assert exec_response.json()["args"]["action"] == "container.exec_one_shot"
+    assert exec_response.json()["args"]["command"] == "id && uname -a"
+
+    bad_exec = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/containers/{container_id}/exec",
+        json={"shell": "zsh", "command": "id"},
+        headers=headers(admin),
+    )
+    assert bad_exec.status_code == 422
+
+
+def test_resource_remove_routes_and_in_use_protection(app, client, admin):
+    enable_docker_profile(client, admin)
+    agent = enroll_agent(admin)
+    payload = inventory_payload()
+    payload["volumes"][0]["in_use"] = True
+    payload["images"][0]["containers"] = 0
+    payload["networks"][0]["container_count"] = 0
+    assert upload_inventory(client, admin, agent, payload).status_code == 200
+
+    image = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json={"action": "image.remove", "image_id": "sha256:" + "a" * 64},
+        headers=headers(admin),
+    )
+    assert image.status_code == 200, image.text
+    assert image.json()["args"]["image_id"] == "sha256:" + "a" * 64
+    clear_docker_commands(app)
+
+    volume = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json={"action": "volume.remove", "volume_name": "web_data"},
+        headers=headers(admin),
+    )
+    assert volume.status_code == 409
+    assert "in use" in volume.json()["detail"].lower()
+
+    network = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json={"action": "network.remove", "network_id": "b" * 64},
+        headers=headers(admin),
+    )
+    assert network.status_code == 200, network.text
+
+
+def test_docker_action_rbac_csrf_and_gate_denial(app, client, admin):
+    enable_docker_profile(client, admin)
+    agent = enroll_agent(admin)
+    assert upload_inventory(client, admin, agent).status_code == 200
+    container_id = container_row(1)["id"]
+    body = {"action": "container.stop", "container_id": container_id}
+
+    no_csrf = client.post(f"/api/docker/hosts/{agent['agent_id']}/actions", json=body)
+    assert no_csrf.status_code == 403
+
+    client.post(
+        "/api/users",
+        json={"username": "docker-operator-viewer", "role": "viewer", "password": "viewer password 123"},
+        headers=headers(admin),
+    )
+    with TestClient(app) as viewer_client:
+        viewer = login(viewer_client, "docker-operator-viewer", "viewer password 123")
+        denied = viewer_client.post(
+            f"/api/docker/hosts/{agent['agent_id']}/actions",
+            json=body,
+            headers=headers(viewer),
+        )
+        assert denied.status_code == 403
+
+    exec_denied = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/containers/{container_id}/exec",
+        json={"shell": "sh", "command": "id"},
+        headers=headers(admin),
+    )
+    assert exec_denied.status_code == 409
+    assert "exec" in exec_denied.json()["detail"].lower()
+
+    cleanup_denied = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/cleanup",
+        json={"scope": "dangling_images"},
+        headers=headers(admin),
+    )
+    assert cleanup_denied.status_code == 409
+    assert "cleanup" in cleanup_denied.json()["detail"].lower()
+
+
+def test_one_active_docker_mutation_per_host(client, admin):
+    enable_docker_profile(client, admin)
+    agent = enroll_agent(admin)
+    assert upload_inventory(client, admin, agent).status_code == 200
+    body = {"action": "container.stop", "container_id": container_row(1)["id"]}
+    first = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json=body,
+        headers=headers(admin),
+    )
+    assert first.status_code == 200, first.text
+    second = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json={"action": "container.restart", "container_id": container_row(2)["id"]},
+        headers=headers(admin),
+    )
+    assert second.status_code == 409
+    assert "mutation" in second.json()["detail"].lower()
+
+    # Read-only work is still allowed while a mutation is queued.
+    inspect = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json={"action": "container.inspect", "container_id": container_row(1)["id"]},
+        headers=headers(admin),
+    )
+    assert inspect.status_code == 200, inspect.text
+
+
+def test_docker_action_offline_policy(settings):
+    app = create_app(replace(settings, offline_command_policy="reject"))
+    with TestClient(app) as client:
+        admin = login(client)
+        enable_docker_profile(client, admin)
+        agent = enroll_agent(admin)
+        assert upload_inventory(client, admin, agent).status_code == 200
+        with app.state.db.connection() as conn:
+            conn.execute(
+                "UPDATE agents SET last_seen = ? WHERE id = ?",
+                ("2026-01-01T00:00:00Z", agent["agent_id"]),
+            )
+        response = client.post(
+            f"/api/docker/hosts/{agent['agent_id']}/actions",
+            json={"action": "container.stop", "container_id": container_row(1)["id"]},
+            headers=headers(admin),
+        )
+        assert response.status_code == 409
+        assert "offline" in response.json()["detail"].lower()
+
+
+def test_docker_cleanup_preview_and_request(client, admin, app):
+    enable_docker_profile(client, admin, prune_allowed=True)
+    agent = enroll_agent(admin)
+    payload = inventory_payload(
+        containers=[
+            container_row(
+                3,
+                name="orphan",
+                state="exited",
+                status="Exited (0) 1 hour ago",
+                health="",
+                exit_code=0,
+                labels={},
+                compose_project="",
+                compose_service="",
+                compose_config_hash="",
+                mounts=[],
+            )
+        ],
+        images=[
+            {
+                "id": "sha256:" + "a" * 64,
+                "repo_tags": [],
+                "repo_digests": [],
+                "size": 1000,
+                "shared_size": 0,
+                "containers": 0,
+                "dangling": True,
+                "created_at": "2026-11-11T10:00:00Z",
+            }
+        ],
+    )
+    assert upload_inventory(client, admin, agent, payload).status_code == 200
+
+    preview = client.get(f"/api/docker/hosts/{agent['agent_id']}/cleanup")
+    assert preview.status_code == 200, preview.text
+    scopes = {item["scope"]: item for item in preview.json()["scopes"]}
+    assert scopes["stopped_containers"]["count"] == 1
+    assert scopes["stopped_containers"]["candidates"][0]["name"] == "orphan"
+    assert scopes["dangling_images"]["count"] == 1
+    assert scopes["build_cache"]["estimated"] is False
+    with app.state.db.connection() as conn:
+        before = conn.execute("SELECT COUNT(*) AS n FROM commands").fetchone()["n"]
+    assert before == 0
+
+    cleanup = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/cleanup",
+        json={"scope": "dangling_images"},
+        headers=headers(admin),
+    )
+    assert cleanup.status_code == 200, cleanup.text
+    assert cleanup.json()["args"] == {
+        "action": "cleanup",
+        "scope": "dangling_images",
+        "include_compose": False,
+    }
+
+    action_cleanup = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json={"action": "cleanup", "scope": "dangling_images"},
+        headers=headers(admin),
+    )
+    assert action_cleanup.status_code == 422
+
+
+def test_docker_result_audit_and_event(client, admin, app):
+    enable_docker_profile(client, admin)
+    agent = enroll_agent(admin)
+    assert upload_inventory(client, admin, agent).status_code == 200
+    queued = client.post(
+        f"/api/docker/hosts/{agent['agent_id']}/actions",
+        json={"action": "container.stop", "container_id": container_row(1)["id"]},
+        headers=headers(admin),
+    )
+    assert queued.status_code == 200
+    command_id = queued.json()["id"]
+    beat = heartbeat(admin, agent, sample_metrics(docker=docker_summary()))
+    assert any(item["id"] == command_id for item in beat["commands"])
+
+    result = client.post(
+        f"/api/agent/{agent['agent_id']}/commands/{command_id}/result",
+        json={
+            "status": "succeeded",
+            "exit_code": 0,
+            "stdout": "Total reclaimed space: 2MB",
+            "stderr": "",
+        },
+        headers={"Authorization": f"Bearer {agent['agent_token']}"},
+    )
+    assert result.status_code == 200, result.text
+
+    events = client.get(f"/api/agents/{agent['agent_id']}/events?hours=24")
+    assert events.status_code == 200
+    docker_events = [event for event in events.json()["events"] if event["kind"] == "docker.action"]
+    assert docker_events
+    assert docker_events[0]["detail"]["reclaimed_bytes"] == 2 * 1024**2
+
+    with app.state.db.connection() as conn:
+        audits = conn.execute(
+            "SELECT action, detail FROM audit_log WHERE action LIKE 'docker.%' ORDER BY id"
+        ).fetchall()
+    assert any(row["action"] == "docker.action_requested" for row in audits)
+    result_audit = next(row for row in audits if row["action"] == "docker.action_result")
+    assert '"reclaimed_bytes":2097152' in result_audit["detail"]
+    assert "command" not in result_audit["detail"]
+
+
+def test_docker_detail_includes_capabilities_and_no_env_values(client, admin):
+    enable_docker_profile(client, admin, exec_allowed=True, prune_allowed=False)
+    agent = enroll_agent(admin)
+    assert upload_inventory(client, admin, agent).status_code == 200
+    detail = client.get(f"/api/docker/hosts/{agent['agent_id']}")
+    assert detail.status_code == 200
+    capabilities = detail.json()["host"]["capabilities"]
+    assert capabilities == {"mutate": True, "exec": True, "prune": False}
+    serialized = detail.text.lower()
+    assert "secret" not in serialized
+    assert "env" not in serialized

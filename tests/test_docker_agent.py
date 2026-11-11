@@ -12,6 +12,7 @@ FAKE_DOCKER = r'''#!/usr/bin/env python3
 import json
 import os
 import sys
+import time
 
 args = sys.argv[1:]
 log = os.environ.get("FAKE_DOCKER_LOG")
@@ -63,7 +64,7 @@ if args[:1] == ["ps"]:
             "CreatedAt": "2026-11-11 10:00:00 +0000 UTC",
             "Ports": "0.0.0.0:8080->80/tcp, :::8080->80/tcp",
             "Labels": "com.docker.compose.project=web,com.docker.compose.service=nginx,com.docker.compose.config-hash=abc123",
-            "Mounts": "/data,/var/lib/docker/volumes/web/_data",
+            "Mounts": "web_data:/data,/var/lib/docker/volumes/web/_data",
             "Networks": "web_default,bridge",
         }))
     raise SystemExit(0)
@@ -99,6 +100,69 @@ if args[:2] == ["network", "ls"]:
         "Attachable": "false",
         "Labels": "com.docker.compose.project=web",
     }))
+    raise SystemExit(0)
+if args[:2] == ["inspect", "--format"]:
+    template = args[2]
+    if "|" in template:
+        for target in args[3:]:
+            print(
+                f"{target}|2026-11-11T10:00:00Z|2026-11-11T12:00:00Z|0|unless-stopped|0|536870912|1500000000|128"
+            )
+        raise SystemExit(0)
+    target = args[-1]
+    if target.startswith("f"):
+        print("no such container", file=sys.stderr)
+        raise SystemExit(1)
+    print(("a" * 64) if target.startswith("a") else target)
+    raise SystemExit(0)
+if args[:1] == ["inspect"]:
+    target = args[-1]
+    print(json.dumps([{
+        "Id": target,
+        "Config": {"Env": ["SECRET_TOKEN=never-return-this"], "Image": "nginx:latest"},
+        "State": {"Status": "running", "ExitCode": 0},
+    }]))
+    raise SystemExit(0)
+if args[:2] == ["image", "inspect"]:
+    print("sha256:" + "b" * 64)
+    raise SystemExit(0)
+if args[:2] == ["volume", "inspect"]:
+    print("web_data")
+    raise SystemExit(0)
+if args[:2] == ["network", "inspect"]:
+    print("c" * 64)
+    raise SystemExit(0)
+if args[:1] in (["rm"], ["rename"], ["update"], ["start"], ["stop"], ["restart"], ["pause"], ["unpause"], ["kill"]):
+    print(args[-1])
+    raise SystemExit(0)
+if args[:1] == ["logs"]:
+    print("log line one\nlog line two")
+    raise SystemExit(0)
+if args[:1] == ["exec"]:
+    if os.environ.get("FAKE_DOCKER_SLEEP"):
+        time.sleep(float(os.environ["FAKE_DOCKER_SLEEP"]))
+    print("uid=0(root) gid=0(root) groups=0(root)")
+    raise SystemExit(0)
+if args[:2] == ["image", "rm"]:
+    print("Untagged: nginx:latest")
+    raise SystemExit(0)
+if args[:2] == ["image", "prune"]:
+    print("Total reclaimed space: 12.5MB")
+    raise SystemExit(0)
+if args[:2] == ["volume", "rm"]:
+    print(args[-1])
+    raise SystemExit(0)
+if args[:2] == ["volume", "prune"]:
+    print("Total reclaimed space: 2MB")
+    raise SystemExit(0)
+if args[:2] == ["network", "rm"]:
+    print(args[-1])
+    raise SystemExit(0)
+if args[:2] == ["network", "prune"]:
+    print("Total reclaimed space: 1MB")
+    raise SystemExit(0)
+if args[:2] == ["builder", "prune"]:
+    print("Total reclaimed space: 3.5GB")
     raise SystemExit(0)
 print("unsupported command", file=sys.stderr)
 raise SystemExit(2)
@@ -224,7 +288,7 @@ def test_summary_and_inventory_parsing(tmp_path: Path, monkeypatch):
     assert payload["containers"][0]["compose_project"] == "web"
     assert payload["containers"][0]["compose_service"] == "nginx"
     assert payload["containers"][0]["health"] == "healthy"
-    assert payload["containers"][0]["exit_code"] is None
+    assert payload["containers"][0]["exit_code"] == 0
     assert payload["containers"][1]["exit_code"] == 0
     assert payload["summary"]["counts"]["running"] == 1
     assert payload["summary"]["counts"]["stopped"] == 1
@@ -235,10 +299,15 @@ def test_summary_and_inventory_parsing(tmp_path: Path, monkeypatch):
     assert payload["networks"][0]["name"] == "web_default"
     assert len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) <= MAX_INVENTORY_BYTES
 
-    # Full inventory output is bounded and never runs docker inspect/env.
+    assert payload["containers"][0]["restart_policy"] == "unless-stopped"
+    assert payload["containers"][0]["memory_limit"] == 536870912
+    assert payload["containers"][0]["nano_cpus"] == 1500000000
+    assert payload["containers"][0]["pids_limit"] == 128
+
     commands = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     assert any(command[:1] == ["ps"] for command in commands)
-    assert not any("inspect" in command or "env" in command for command in commands)
+    assert any(command[:2] == ["inspect", "--format"] for command in commands)
+    assert not any("env" in command for command in commands)
     serialized = json.dumps(payload)
     assert "DOCKER_HOST" not in serialized
     assert "environment" not in serialized.lower()
@@ -257,6 +326,197 @@ def test_row_cap_is_enforced(tmp_path: Path, monkeypatch):
     assert len(payload["containers"]) == MAX_CONTAINERS
     assert payload["summary"]["counts"]["containers"] == MAX_CONTAINERS
     assert len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) <= MAX_INVENTORY_BYTES
+
+
+def _action_collector(tmp_path: Path, **overrides) -> DockerCollector:
+    config = make_config(
+        tmp_path,
+        allow_docker_exec=True,
+        allow_docker_prune=True,
+        **overrides,
+    )
+    value = DockerCollector(config)
+    value.set_profile(
+        {
+            "modules": {"docker": True},
+            "collection": {"docker_inventory_seconds": 60},
+            "actions": {
+                "allow_docker": True,
+                "allow_docker_exec": True,
+                "allow_docker_prune": True,
+            },
+        }
+    )
+    value.set_policy(
+        {
+            "allow_docker": True,
+            "allow_docker_exec": True,
+            "allow_docker_prune": True,
+        }
+    )
+    return value
+
+
+def _logged_commands(path: Path) -> list[list[str]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_container_lifecycle_argv(tmp_path: Path, monkeypatch):
+    config = make_config(tmp_path)
+    log = tmp_path / "docker.log"
+    monkeypatch.setenv("FAKE_DOCKER_LOG", str(log))
+    value = collector(config)
+    result = value.execute_action("container.restart", {"container_id": "a" * 64})
+    assert result["status"] == "succeeded"
+    commands = _logged_commands(log)
+    assert ["restart", "a" * 64] in commands
+
+
+def test_container_rename_update_and_remove_argv(tmp_path: Path, monkeypatch):
+    config = make_config(tmp_path)
+    log = tmp_path / "docker.log"
+    monkeypatch.setenv("FAKE_DOCKER_LOG", str(log))
+    value = collector(config)
+    assert value.execute_action(
+        "container.rename", {"container_id": "a" * 64, "new_name": "web-2"}
+    )["status"] == "succeeded"
+    assert value.execute_action(
+        "container.update",
+        {
+            "container_id": "a" * 64,
+            "restart_policy": "always",
+            "memory": "512m",
+            "cpus": "1.5",
+            "pids_limit": 128,
+        },
+    )["status"] == "succeeded"
+    assert value.execute_action(
+        "container.remove",
+        {"container_id": "a" * 64, "force": True, "remove_volumes": True},
+    )["status"] == "succeeded"
+    commands = _logged_commands(log)
+    assert ["rename", "a" * 64, "web-2"] in commands
+    assert any(command[:1] == ["update"] and "--memory" in command for command in commands)
+    assert any(command[:1] == ["rm"] and "-f" in command and "-v" in command for command in commands)
+
+
+def test_exec_argv_and_no_host_shell_execution(tmp_path: Path, monkeypatch):
+    config = make_config(tmp_path, allow_docker_exec=True)
+    log = tmp_path / "docker.log"
+    marker = tmp_path / "pwned"
+    monkeypatch.setenv("FAKE_DOCKER_LOG", str(log))
+    value = collector(config)
+    value.set_policy({"allow_docker": True, "allow_docker_exec": True})
+    result = value.execute_action(
+        "container.exec_one_shot",
+        {
+            "container_id": "a" * 64,
+            "shell": "sh",
+            "user": "root",
+            "workdir": "/srv",
+            "command": f"echo hi; touch {marker}",
+            "timeout": 20,
+        },
+    )
+    assert result["status"] == "succeeded"
+    assert not marker.exists()
+    commands = _logged_commands(log)
+    exec_command = next(command for command in commands if command[:1] == ["exec"])
+    assert exec_command[:2] == ["exec", "-i"]
+    assert "-u" in exec_command and "root" in exec_command
+    assert "-w" in exec_command and "/srv" in exec_command
+    assert f"echo hi; touch {marker}" in exec_command
+    assert exec_command[-2:] == ["-lc", f"echo hi; touch {marker}"]
+
+
+def test_exec_timeout_is_forwarded(tmp_path: Path, monkeypatch):
+    value = collector(make_config(tmp_path, allow_docker_exec=True))
+    value.set_policy({"allow_docker": True, "allow_docker_exec": True})
+    seen: list[int | None] = []
+
+    def fake_run(command, args, *, env, max_output, timeout=None):
+        if args[:2] == ["inspect", "--format"]:
+            return {"status": "succeeded", "exit_code": 0, "stdout": "a" * 64, "stderr": "", "error": ""}
+        seen.append(timeout)
+        return {"status": "succeeded", "exit_code": 0, "stdout": "ok", "stderr": "", "error": ""}
+
+    monkeypatch.setattr(value, "_run", fake_run)
+    result = value.execute_action(
+        "container.exec_one_shot",
+        {"container_id": "a" * 64, "shell": "sh", "command": "id", "timeout": 45},
+    )
+    assert result["status"] == "succeeded"
+    assert seen == [45]
+
+
+def test_exec_and_prune_gates(tmp_path: Path):
+    value = collector(make_config(tmp_path, allow_docker_exec=False, allow_docker_prune=False))
+    value.set_policy({"allow_docker": True, "allow_docker_exec": False, "allow_docker_prune": False})
+    denied_exec = value.execute_action(
+        "container.exec_one_shot",
+        {"container_id": "a" * 64, "shell": "sh", "command": "id", "timeout": 20},
+    )
+    assert denied_exec["status"] == "failed"
+    assert "exec" in denied_exec["error"].lower()
+    denied_cleanup = value.execute_action("cleanup", {"scope": "dangling_images"})
+    assert denied_cleanup["status"] == "failed"
+    assert "cleanup" in denied_cleanup["error"].lower()
+
+
+def test_inspect_masks_environment(tmp_path: Path, monkeypatch):
+    config = make_config(tmp_path)
+    value = collector(config)
+    result = value.execute_action("container.inspect", {"container_id": "a" * 64})
+    assert result["status"] == "succeeded"
+    assert "SECRET_TOKEN" not in result["stdout"]
+    assert "never-return-this" not in result["stdout"]
+    assert "<masked>" in result["stdout"]
+
+
+def test_unknown_target_is_rejected(tmp_path: Path):
+    value = collector(make_config(tmp_path))
+    result = value.execute_action("container.stop", {"container_id": "f" * 64})
+    assert result["status"] == "failed"
+    assert "not found" in result["error"].lower()
+
+
+def test_cleanup_reclaimed_and_compose_exclusion(tmp_path: Path, monkeypatch):
+    value = collector(make_config(tmp_path, allow_docker_prune=True))
+    value.set_policy({"allow_docker": True, "allow_docker_prune": True})
+    pruned = value.execute_action("cleanup", {"scope": "dangling_images"})
+    assert pruned["status"] == "succeeded"
+    assert "12.5MB" in pruned["stdout"]
+
+    default = value.execute_action("cleanup", {"scope": "stopped_containers"})
+    assert default["status"] == "succeeded"
+    assert "Removed 0 stopped containers." in default["stdout"]
+
+    included = value.execute_action(
+        "cleanup", {"scope": "stopped_containers", "include_compose": True}
+    )
+    assert included["status"] == "succeeded"
+    assert "Removed 1 stopped container." in included["stdout"]
+
+
+def test_mutation_guard_rejects_overlap(tmp_path: Path):
+    value = collector(make_config(tmp_path))
+    assert value._mutation_lock.acquire(timeout=1)
+    try:
+        result = value.execute_action("container.stop", {"container_id": "a" * 64})
+    finally:
+        value._mutation_lock.release()
+    assert result["status"] == "failed"
+    assert "mutation" in result["error"].lower()
+
+
+def test_volume_and_network_usage_is_derived_from_containers(tmp_path: Path):
+    payload = collector(make_config(tmp_path)).collect_inventory(force=True)
+    assert payload is not None
+    assert payload["volumes"][0]["in_use"] is True
+    assert payload["networks"][0]["container_count"] == 2
+    assert payload["containers"][0]["compose_project"] == "web"
 
 
 def test_profile_and_policy_can_disable_local_docker(tmp_path: Path):

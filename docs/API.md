@@ -305,7 +305,7 @@ Kinds and validated arguments:
 - `power`: `shutdown` | `reboot` | `cancel`; delay 0–600 seconds.
 - `refresh`: no args.
 - `package`: 1–25 actions; each has `manager` (`apt` | `dnf` | `winget` | `choco`), `action` (`install` | `remove` | `upgrade`), `package`, optional `version`. Requires both the agent-local `allow_packages` flag and the server policy flag.
-- `docker`: D1 accepts only `action=inventory.refresh`; it triggers a read-only probe and inventory upload. The Linux agent, profile Docker module, `allow_docker` action gate, and per-agent policy must all allow it. Container mutations are not accepted in this phase.
+- `docker`: D2 accepts `inventory.refresh` plus the allowlisted actions above. The Linux agent, profile Docker module, action gate (`allow_docker`, `allow_docker_exec`, or `allow_docker_prune`), and per-agent policy must all allow the requested action. Raw Docker flags and unknown fields are rejected.
 
 Queue guardrails:
 
@@ -524,7 +524,7 @@ Any authenticated role can read. `hours` must be 1–720 and `limit` must be 1�
 
 Kinds are `online`, `service`, `package`, `version`, `profile`, and `alert`. Alert detail identifies the lifecycle action (`raised`, `cleared`, `acknowledged`, `reacknowledged`, `snoozed`, or `acknowledgement_expired`) plus the `incident_id` where applicable. Raises are recorded on the first heartbeat that sees a condition; a recurrence is still a `raised` event with `recurrence: true` and the previous incident id. Steady heartbeats only advance `last_seen_at` and do not create events. Events are recorded best-effort: a failed event write never breaks a heartbeat or command path. Detail is deliberately bounded (for package transitions, at most the first ten names plus counts and a `truncated` flag), and an oversized detail payload is replaced with `{"truncated": true}`. Events are pruned with `SEXTANT_COMMAND_RETENTION_DAYS` (default 90).
 
-## Docker Hosts (D1, read-only)
+## Docker Hosts (D1/D2)
 
 Docker is off by default. A host appears only when the Linux agent reports Docker,
 the agent profile enables `modules.docker` and `actions.allow_docker`, and the
@@ -535,8 +535,12 @@ socket.
 | Method | Path | Role | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/api/docker/hosts` | viewer+ | Host summaries, counts, versions, availability/reason, and freshness |
-| `GET` | `/api/docker/hosts/{agent_id}` | viewer+ | One selected host plus cached containers, images, volumes, and networks |
+| `GET` | `/api/docker/hosts/{agent_id}` | viewer+ | One selected host plus cached containers, images, volumes, networks, and capabilities |
 | `POST` | `/api/docker/hosts/{agent_id}/refresh` | operator+ | Queue a non-mutating `docker` / `inventory.refresh` command |
+| `POST` | `/api/docker/hosts/{agent_id}/actions` | operator+ | Queue an allowlisted container/image/volume/network action |
+| `POST` | `/api/docker/hosts/{agent_id}/containers/{container_id}/exec` | operator+ | Queue a one-shot container exec |
+| `GET` | `/api/docker/hosts/{agent_id}/cleanup` | viewer+ | Cached cleanup counts and candidates |
+| `POST` | `/api/docker/hosts/{agent_id}/cleanup` | operator+ | Queue one cleanup scope |
 
 Host response shape (counts abbreviated):
 
@@ -569,6 +573,43 @@ Host response shape (counts abbreviated):
 `POST /api/docker/hosts/{id}/refresh` returns the queued command with
 `"queued": true`. It obeys the normal offline-command policy and the
 one-command-per-heartbeat queue.
+
+Docker action bodies are strict and action-specific:
+
+```json
+{"action":"container.restart","container_id":"a1b2…"}
+{"action":"container.rename","container_id":"a1b2…","new_name":"web-2"}
+{"action":"container.remove","container_id":"a1b2…","force":true,"remove_volumes":false}
+{"action":"container.update","container_id":"a1b2…","restart_policy":"unless-stopped","memory":"512m","cpus":"1.5","pids_limit":256}
+{"action":"container.logs","container_id":"a1b2…","tail":500,"timestamps":true}
+{"action":"container.inspect","container_id":"a1b2…"}
+{"action":"image.remove","image_id":"sha256:…"}
+{"action":"volume.remove","volume_name":"web_data"}
+{"action":"network.remove","network_id":"c3d4…"}
+```
+
+One-shot exec body:
+
+```json
+{"shell":"bash","user":"root","workdir":"/srv/app","command":"id && uname -a","timeout":60}
+```
+
+Cleanup body:
+
+```json
+{"scope":"dangling_images","include_compose":false}
+```
+
+Allowed scopes: `stopped_containers`, `dangling_images`, `unused_images`,
+`unused_volumes`, `unused_networks`, `build_cache`. There is no combined
+"prune everything" action; volumes are never included by default.
+
+Action requests require operator role and CSRF, a reachable Docker engine,
+profile/policy `allow_docker`, and the relevant exec/prune gate. One active
+Docker mutation is allowed per host. The target must exist in the cached
+inventory; the agent resolves it again with `docker inspect`. Every request and
+result is audited. Result output is returned through the normal command
+endpoint, and completed mutations create `docker.action` agent events.
 
 ## Package management
 

@@ -179,6 +179,7 @@ const dockerHost = {
   age_seconds: 30,
   stale: false,
   last_error: "",
+  capabilities: { mutate: true, exec: true, prune: true },
 };
 const dockerDetail = {
   server_time: "2026-11-06T08:00:30Z",
@@ -189,21 +190,35 @@ const dockerDetail = {
       id: "a".repeat(64),
       name: "web-1",
       image: "nginx:latest",
+      command: "nginx -g daemon off;",
       state: "running",
       status: "Up 2 hours (healthy)",
       health: "healthy",
+      exit_code: null,
+      restart_policy: "unless-stopped",
       ports: ["0.0.0.0:8080->80/tcp"],
+      labels: { "com.docker.compose.project": "web" },
+      mounts: ["web_data:/data"],
+      networks: ["web_default"],
       compose_project: "web",
+      compose_service: "nginx",
     },
     {
       id: "b".repeat(64),
       name: "worker-1",
       image: "worker:latest",
+      command: "./worker",
       state: "exited",
       status: "Exited (0) 3 hours ago",
       health: "",
+      exit_code: 0,
+      restart_policy: "no",
       ports: [],
+      labels: {},
+      mounts: [],
+      networks: ["web_default"],
       compose_project: "",
+      compose_service: "",
     },
   ],
   images: [
@@ -241,6 +256,9 @@ const dockerDetail = {
     },
   ],
 };
+
+const dockerCommandResults = {};
+let dockerCommandSeq = 0;
 
 const responses = {
   "/api/auth/config": { status: 200, body: { ldap_enabled: false, version: "0.3.0", public_url: "" } },
@@ -330,6 +348,22 @@ const responses = {
   "/api/profile-tags": { status: 200, body: { assignments: [] } },
   "/api/docker/hosts": { status: 200, body: { server_time: "2026-11-06T08:00:30Z", stale_seconds: 900, hosts: [dockerHost] } },
   "/api/docker/hosts/agt_demo": { status: 200, body: dockerDetail },
+  "/api/docker/hosts/agt_demo/cleanup": {
+    status: 200,
+    body: {
+      server_time: "2026-11-06T08:00:30Z",
+      host: dockerHost,
+      can_prune: true,
+      scopes: [
+        { scope: "stopped_containers", label: "Stopped containers", count: 1, estimated_bytes: 0, estimated: true, candidates: [{ id: "b".repeat(64), name: "worker-1" }], warning: "Compose-managed stopped containers are excluded by default." },
+        { scope: "dangling_images", label: "Dangling images", count: 1, estimated_bytes: 1024 * 1024, estimated: true, candidates: [], warning: "Untagged images only." },
+        { scope: "unused_images", label: "Unused images", count: 0, estimated_bytes: 0, estimated: true, candidates: [], warning: "Destructive." },
+        { scope: "unused_volumes", label: "Unused volumes", count: 1, estimated_bytes: 0, estimated: false, candidates: [], warning: "Destructive and irreversible." },
+        { scope: "unused_networks", label: "Unused networks", count: 0, estimated_bytes: 0, estimated: true, candidates: [], warning: "Default networks excluded." },
+        { scope: "build_cache", label: "Build cache", count: 0, estimated_bytes: 0, estimated: false, candidates: [], warning: "Reported after prune." },
+      ],
+    },
+  },
   "/api/remote-install": { status: 200, body: { jobs: [] } },
   "/api/profiles": {
     status: 200,
@@ -508,6 +542,32 @@ window.fetch = async (path, options = {}) => {
     dockerHost.age_seconds = 5;
     dockerHost.stale = false;
     response = { status: 200, body: { id: "cmd_docker", agent_id: "agt_demo", kind: "docker", args: { action: "inventory.refresh" }, status: "queued", queued: true } };
+  } else if (method === "POST" && (key === "/api/docker/hosts/agt_demo/actions" || key === "/api/docker/hosts/agt_demo/cleanup" || /^\/api\/docker\/hosts\/agt_demo\/containers\/[^/]+\/exec$/.test(key))) {
+    const id = `cmd_docker_${++dockerCommandSeq}`;
+    const action = key.endsWith("/cleanup") ? "cleanup" : key.endsWith("/exec") ? "container.exec_one_shot" : body?.action;
+    let stdout = "ok";
+    if (action === "container.inspect") stdout = JSON.stringify([{ Config: { Env: ["<masked>"], Image: "nginx:latest" } }], null, 2);
+    else if (action === "container.logs") stdout = "log line one\nlog line two";
+    else if (action === "container.exec_one_shot") stdout = "uid=0(root) gid=0(root)";
+    else if (action === "cleanup") stdout = "Total reclaimed space: 1MB";
+    dockerCommandResults[id] = {
+      id,
+      agent_id: "agt_demo",
+      kind: "docker",
+      args: body || {},
+      status: "succeeded",
+      created_at: "2026-11-06T08:01:00Z",
+      completed_at: "2026-11-06T08:01:05Z",
+      exit_code: 0,
+      stdout,
+      stderr: "",
+      error: "",
+      output_truncated: false,
+    };
+    response = { status: 200, body: dockerCommandResults[id] };
+  } else if (method === "GET" && key.startsWith("/api/commands/cmd_docker_")) {
+    const commandId = key.slice("/api/commands/".length);
+    response = { status: 200, body: { command: dockerCommandResults[commandId] } };
   } else {
     response = responses[key] || { status: 404, body: { detail: `No mock for ${key}` } };
   }
@@ -1179,11 +1239,82 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!window.document.getElementById("docker-host-title").textContent.includes("Studio PC")) {
     throw new Error("Docker host detail title is wrong");
   }
+  await sleep(80);
+  const cleanupCard = [...window.document.querySelectorAll(".docker-cleanup-card")].find((card) => card.textContent.includes("Dangling images"));
+  if (!cleanupCard) throw new Error("Docker cleanup preview did not render");
+  const cleanupReview = findButton(cleanupCard, "Review");
+  if (!cleanupReview) throw new Error("Docker cleanup review action missing");
+  cleanupReview.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await closeConfirm("Clean up dangling images?");
+  await sleep(2600);
+  if (!window.document.getElementById("docker-dialog").open) throw new Error("Docker cleanup result dialog did not open");
+  if (!window.document.getElementById("docker-dialog-body").textContent.includes("Total reclaimed")) {
+    throw new Error("Docker cleanup result output missing");
+  }
+  findButton(window.document.getElementById("docker-dialog"), "Close").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(600);
+
   window.document.querySelector('[data-docker-tab="containers"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(20);
-  if (!window.document.getElementById("docker-host-body").textContent.includes("web-1")) {
+  const dockerBody = window.document.getElementById("docker-host-body");
+  if (!dockerBody.textContent.includes("web-1")) {
     throw new Error("Docker containers did not render");
   }
+  const inspectButton = findButton(dockerBody, "Inspect");
+  if (!inspectButton) throw new Error(`Docker inspect action missing: ${dockerBody.textContent.slice(0, 200)}`);
+  inspectButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  if (!window.document.getElementById("docker-dialog").open || !window.document.getElementById("docker-dialog-eyebrow").textContent.includes("Container overview")) {
+    throw new Error("Docker inspect dialog did not open");
+  }
+  findButton(window.document.getElementById("docker-dialog"), "Close").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+  findButton(dockerBody, "Logs").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  findButton(window.document.getElementById("docker-dialog"), "Load logs").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(1800);
+  if (!window.document.getElementById("docker-dialog-body").textContent.includes("log line one")) {
+    throw new Error("Docker logs result missing");
+  }
+  findButton(window.document.getElementById("docker-dialog"), "Close").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(600);
+
+  findButton(window.document.getElementById("docker-host-body"), "Exec").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  const execCommand = window.document.querySelector("#docker-dialog-body textarea");
+  execCommand.value = "id";
+  findButton(window.document.getElementById("docker-dialog"), "Run command").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(1800);
+  if (!window.document.getElementById("docker-dialog-body").textContent.includes("uid=0")) {
+    throw new Error("Docker exec result missing");
+  }
+  findButton(window.document.getElementById("docker-dialog"), "Close").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(600);
+
+  findButton(window.document.getElementById("docker-host-body"), "Remove").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await closeConfirm("Remove web-1?");
+  await sleep(1800);
+  if (!window.document.getElementById("docker-dialog").open) throw new Error("Docker remove result dialog did not open");
+  findButton(window.document.getElementById("docker-dialog"), "Close").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(600);
+  dockerHost.online = false;
+  dockerHost.capabilities = { mutate: false, exec: false, prune: false };
+  window.document.getElementById("docker-refresh-list").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  findButton(dockerList, "Selected").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  window.document.querySelector('[data-docker-tab="containers"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  const offlineStop = findButton(window.document.getElementById("docker-host-body"), "Stop");
+  if (!offlineStop || !offlineStop.disabled) throw new Error("Docker actions should disable while offline");
+  if (!window.document.getElementById("docker-host-notice").textContent.includes("offline")) {
+    throw new Error("Docker offline notice missing");
+  }
+  dockerHost.online = true;
+  dockerHost.capabilities = { mutate: true, exec: true, prune: true };
+  window.document.getElementById("docker-refresh-list").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  findButton(dockerList, "Selected").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+
   window.document.querySelector('[data-docker-tab="images"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(20);
   if (!window.document.getElementById("docker-host-body").textContent.includes("nginx:latest")) {
@@ -1284,7 +1415,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty state, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty plus inspect/logs/exec/remove/cleanup/offline states, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

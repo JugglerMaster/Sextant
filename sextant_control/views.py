@@ -61,10 +61,9 @@ def validate_command_args(kind: str, args: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     if kind == "docker":
-        action = str(args.get("action", "")).lower()
-        if action != "inventory.refresh":
-            raise ValueError("unsupported Docker action in this phase")
-        return {"action": action}
+        from .docker_rules import normalize_docker_command_args
+
+        return normalize_docker_command_args(args)
 
     if kind == "package":
         actions = args.get("actions")
@@ -334,6 +333,9 @@ def docker_container_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "finished_at": row["finished_at"],
         "exit_code": row["exit_code"],
         "restart_policy": row["restart_policy"],
+        "memory_limit": int(row["memory_limit"]),
+        "nano_cpus": int(row["nano_cpus"]),
+        "pids_limit": row["pids_limit"],
         "ports": loads(row["ports"], []),
         "labels": loads(row["labels"], {}),
         "mounts": loads(row["mounts"], []),

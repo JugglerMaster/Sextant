@@ -13,6 +13,7 @@ import os
 import platform
 import re
 import shutil
+import threading
 import time
 from typing import Any
 
@@ -41,6 +42,47 @@ REASONS = {
 
 _SIZE_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?i?b?)\s*$", re.IGNORECASE)
 _LABEL_SPLIT_RE = re.compile(r",(?=[A-Za-z0-9_.-]+=)")
+_CONTAINER_ID_RE = re.compile(r"^[a-f0-9]{12,64}$")
+_IMAGE_ID_RE = re.compile(r"^(?:sha256:)?[a-f0-9]{12,64}$")
+_NETWORK_ID_RE = re.compile(r"^[a-f0-9]{12,64}$")
+_VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
+_RENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_USER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+_WORKDIR_RE = re.compile(r"^(?:/[^\x00-\x1f]{0,255})?$")
+_RESTART_POLICY_RE = re.compile(r"^(?:no|always|unless-stopped|on-failure(?::[0-9]{1,5})?)$")
+_MEMORY_RE = re.compile(r"^[0-9]{1,12}[bkmg]?$")
+_CPUS_RE = re.compile(r"^[0-9]{1,4}(?:\.[0-9]{1,4})?$")
+_RECLAIM_RE = re.compile(r"Total reclaimed space:\s*([0-9.]+)\s*([A-Za-z]+)", re.IGNORECASE)
+_REMOVED_RE = re.compile(r"Removed\s+([0-9]+)\s+stopped container", re.IGNORECASE)
+
+_CONTAINER_LIFECYCLE_ACTIONS = {
+    "container.start",
+    "container.stop",
+    "container.restart",
+    "container.pause",
+    "container.unpause",
+    "container.kill",
+}
+_MUTATION_ACTIONS = _CONTAINER_LIFECYCLE_ACTIONS | {
+    "container.rename",
+    "container.remove",
+    "container.update",
+    "container.exec_one_shot",
+    "image.remove",
+    "volume.remove",
+    "network.remove",
+    "cleanup",
+}
+_CLEANUP_SCOPES = {
+    "stopped_containers",
+    "dangling_images",
+    "unused_images",
+    "unused_volumes",
+    "unused_networks",
+    "build_cache",
+}
+DOCKER_MUTATION_ACTIONS = _MUTATION_ACTIONS
+DOCKER_CLEANUP_SCOPES = _CLEANUP_SCOPES
 
 
 def _text(value: Any, limit: int) -> str:
@@ -162,6 +204,9 @@ def _container_row(raw: dict[str, Any]) -> dict[str, Any] | None:
         "finished_at": "",
         "exit_code": _exit_code_from_status(status),
         "restart_policy": "",
+        "memory_limit": 0,
+        "nano_cpus": 0,
+        "pids_limit": None,
         "ports": _split_compact(raw.get("Ports"), 128),
         "labels": labels,
         "mounts": _split_compact(raw.get("Mounts"), 128, 1024),
@@ -239,6 +284,30 @@ def _network_row(raw: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _apply_inventory_usage(
+    containers: list[dict[str, Any]],
+    volumes: list[dict[str, Any]],
+    networks: list[dict[str, Any]],
+) -> None:
+    mount_names: set[str] = set()
+    for container in containers:
+        for mount in container.get("mounts") or []:
+            text = str(mount)
+            if "/volumes/" in text:
+                mount_names.add(text.split("/volumes/", 1)[1].split("/", 1)[0])
+            elif ":" in text:
+                source = text.split(":", 1)[0].strip()
+                if source and "/" not in source:
+                    mount_names.add(source)
+    for volume in volumes:
+        volume["in_use"] = str(volume.get("name", "")) in mount_names
+    for network in networks:
+        name = str(network.get("name", ""))
+        network["container_count"] = sum(
+            1 for container in containers if name and name in (container.get("networks") or [])
+        )
+
+
 def _counts(
     containers: list[dict[str, Any]],
     images: list[dict[str, Any]],
@@ -313,6 +382,7 @@ class DockerCollector:
         self._last_collected_at = ""
         self._revision = 0
         self._counts: dict[str, int] = _counts([], [], [], [])
+        self._mutation_lock = threading.Lock()
 
     # --- Profile / policy -------------------------------------------------
     def set_profile(self, profile: dict[str, Any]) -> None:
@@ -485,10 +555,11 @@ class DockerCollector:
         *,
         env: dict[str, str],
         max_output: int,
+        timeout: int | None = None,
     ) -> dict[str, Any]:
         return run_capture(
             [command, *args],
-            max(5, int(self.config.docker_timeout)),
+            max(5, min(int(timeout or self.config.docker_timeout), 300)),
             max_output=max_output,
             env=env,
         )
@@ -563,6 +634,8 @@ class DockerCollector:
             for row in (_network_row(raw) for raw in _json_lines(networks_raw.get("stdout", "")))
             if row is not None
         ][:MAX_NETWORKS]
+        self._apply_container_inspect(command, env, containers)
+        _apply_inventory_usage(containers, volumes, networks)
 
         collected_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         containers.sort(key=lambda item: (item.get("name", ""), item.get("id", "")))
@@ -615,6 +688,66 @@ class DockerCollector:
         self._status_at = 0.0
         return payload
 
+    def _apply_container_inspect(
+        self,
+        command: str,
+        env: dict[str, str],
+        containers: list[dict[str, Any]],
+    ) -> None:
+        if not containers:
+            return
+        template = (
+            "{{.Id}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.ExitCode}}|"
+            "{{.HostConfig.RestartPolicy.Name}}|{{.HostConfig.RestartPolicy.MaximumRetryCount}}|"
+            "{{.HostConfig.Memory}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.PidsLimit}}"
+        )
+        by_id = {str(item.get("id", "")): item for item in containers}
+        for start in range(0, len(containers), 100):
+            chunk = [str(item.get("id", "")) for item in containers[start : start + 100]]
+            result = self._run(
+                command,
+                ["inspect", "--format", template, *chunk],
+                env=env,
+                max_output=MAX_COMMAND_OUTPUT,
+            )
+            if result["status"] != "succeeded":
+                continue
+            for line in str(result.get("stdout", "")).splitlines():
+                fields = line.split("|", 8)
+                if len(fields) != 9:
+                    continue
+                container_id = fields[0].strip()
+                item = by_id.get(container_id)
+                if item is None:
+                    continue
+                item["started_at"] = _text(fields[1], 64)
+                item["finished_at"] = _text(fields[2], 64)
+                try:
+                    exit_code = int(fields[3])
+                except ValueError:
+                    exit_code = None
+                if exit_code is not None and exit_code >= 0:
+                    item["exit_code"] = exit_code
+                restart_name = _text(fields[4], 64)
+                try:
+                    retry_count = int(fields[5])
+                except ValueError:
+                    retry_count = 0
+                if restart_name == "on-failure" and retry_count > 0:
+                    item["restart_policy"] = f"on-failure:{retry_count}"[:64]
+                else:
+                    item["restart_policy"] = restart_name
+                try:
+                    item["memory_limit"] = max(0, int(fields[6]))
+                    item["nano_cpus"] = max(0, int(fields[7]))
+                except ValueError:
+                    pass
+                pids_text = fields[8].strip()
+                try:
+                    item["pids_limit"] = int(pids_text) if pids_text else None
+                except ValueError:
+                    item["pids_limit"] = None
+
     @staticmethod
     def _fit_payload(payload: dict[str, Any]) -> dict[str, Any]:
         """Drop trailing rows until the serialized inventory is under the cap."""
@@ -650,6 +783,377 @@ class DockerCollector:
                 payload["containers"], payload["images"], payload["volumes"], payload["networks"]
             )
         return payload
+
+    # --- Mutating actions ------------------------------------------------
+    def _policy_flag(self, name: str) -> bool:
+        return bool(self.policy.get(name, True))
+
+    def exec_enabled(self) -> bool:
+        return (
+            self.enabled()
+            and bool(self.config.allow_docker_exec)
+            and self._policy_flag("allow_docker_exec")
+        )
+
+    def prune_enabled(self) -> bool:
+        return (
+            self.enabled()
+            and bool(self.config.allow_docker_prune)
+            and self._policy_flag("allow_docker_prune")
+        )
+
+    @staticmethod
+    def _action_result(
+        status: str,
+        *,
+        exit_code: int | None = None,
+        stdout: str = "",
+        stderr: str = "",
+        error: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "exit_code": exit_code,
+            "stdout": stdout[:MAX_COMMAND_OUTPUT],
+            "stderr": stderr[:MAX_COMMAND_OUTPUT],
+            "error": error[:4000],
+        }
+
+    def _resolve_target(
+        self,
+        command: str,
+        env: dict[str, str],
+        args: list[str],
+        pattern: re.Pattern[str],
+    ) -> tuple[str | None, dict[str, Any]]:
+        result = self._run(command, args, env=env, max_output=16384)
+        value = str(result.get("stdout", "")).strip()
+        if result["status"] == "succeeded" and pattern.match(value):
+            return value, result
+        return None, result
+
+    def execute_action(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Execute one allowlisted Docker action with argv only."""
+        if platform.system() != "Linux":
+            return self._action_result("failed", error="Docker actions are Linux-only.")
+        if not self.enabled():
+            return self._action_result(
+                "failed",
+                error="Docker is disabled by local config, profile, or server policy.",
+            )
+        command = self._docker_binary()
+        if not command:
+            return self._action_result("failed", error="Docker CLI is not installed.")
+        env = self._docker_env()
+
+        if action == "container.exec_one_shot" and not self.exec_enabled():
+            return self._action_result("failed", error="Docker exec is disabled by local or server policy.")
+        if action == "cleanup" and not self.prune_enabled():
+            return self._action_result("failed", error="Docker cleanup is disabled by local or server policy.")
+        if action not in _MUTATION_ACTIONS and action not in {
+            "container.logs",
+            "container.inspect",
+        }:
+            return self._action_result("failed", error="Unsupported Docker action.")
+
+        locked = False
+        if action in _MUTATION_ACTIONS:
+            locked = self._mutation_lock.acquire(blocking=False)
+            if not locked:
+                return self._action_result(
+                    "failed",
+                    error="Another Docker mutation is already running on this host.",
+                )
+        try:
+            if action in _CONTAINER_LIFECYCLE_ACTIONS:
+                return self._container_lifecycle(command, env, action, args)
+            if action == "container.rename":
+                return self._container_rename(command, env, args)
+            if action == "container.remove":
+                return self._container_remove(command, env, args)
+            if action == "container.update":
+                return self._container_update(command, env, args)
+            if action == "container.logs":
+                return self._container_logs(command, env, args)
+            if action == "container.inspect":
+                return self._container_inspect(command, env, args)
+            if action == "container.exec_one_shot":
+                return self._container_exec(command, env, args)
+            if action == "image.remove":
+                return self._image_remove(command, env, args)
+            if action == "volume.remove":
+                return self._volume_remove(command, env, args)
+            if action == "network.remove":
+                return self._network_remove(command, env, args)
+            if action == "cleanup":
+                return self._cleanup(command, env, args)
+            return self._action_result("failed", error="Unsupported Docker action.")
+        except Exception as exc:  # defensive: never let an action kill the agent loop
+            return self._action_result("failed", error=f"Docker action error: {type(exc).__name__}")
+        finally:
+            if locked:
+                self._mutation_lock.release()
+
+    def _target_container(self, command: str, env: dict[str, str], args: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+        target = str(args.get("container_id", "") or "").strip()
+        if not _CONTAINER_ID_RE.match(target):
+            return None, self._action_result("failed", error="Invalid container ID.")
+        return self._resolve_target(
+            command,
+            env,
+            ["inspect", "--format", "{{.Id}}", target],
+            _CONTAINER_ID_RE,
+        )
+
+    def _container_lifecycle(self, command: str, env: dict[str, str], action: str, args: dict[str, Any]) -> dict[str, Any]:
+        container_id, resolved = self._target_container(command, env, args)
+        if container_id is None:
+            return self._action_result(
+                "failed",
+                stderr=str(resolved.get("stderr", "")),
+                error="Container not found in the current Docker inventory.",
+            )
+        verb = action.split(".", 1)[1]
+        return self._run(command, [verb, container_id], env=env, max_output=MAX_COMMAND_OUTPUT)
+
+    def _container_rename(self, command: str, env: dict[str, str], args: dict[str, Any]) -> dict[str, Any]:
+        container_id, resolved = self._target_container(command, env, args)
+        if container_id is None:
+            return self._action_result("failed", error="Container not found.")
+        new_name = str(args.get("new_name", "") or "").strip()
+        if not _RENAME_RE.match(new_name):
+            return self._action_result("failed", error="Invalid container name.")
+        return self._run(command, ["rename", container_id, new_name], env=env, max_output=MAX_COMMAND_OUTPUT)
+
+    def _container_remove(self, command: str, env: dict[str, str], args: dict[str, Any]) -> dict[str, Any]:
+        container_id, resolved = self._target_container(command, env, args)
+        if container_id is None:
+            return self._action_result("failed", error="Container not found.")
+        argv = ["rm"]
+        if bool(args.get("force", False)):
+            argv.append("-f")
+        if bool(args.get("remove_volumes", False)):
+            argv.append("-v")
+        argv.append(container_id)
+        return self._run(command, argv, env=env, max_output=MAX_COMMAND_OUTPUT)
+
+    def _container_update(self, command: str, env: dict[str, str], args: dict[str, Any]) -> dict[str, Any]:
+        container_id, resolved = self._target_container(command, env, args)
+        if container_id is None:
+            return self._action_result("failed", error="Container not found.")
+        argv = ["update"]
+        restart_policy = str(args.get("restart_policy", "") or "").strip()
+        memory = str(args.get("memory", "") or "").strip().lower()
+        cpus = str(args.get("cpus", "") or "").strip()
+        pids_limit = args.get("pids_limit")
+        if restart_policy:
+            if not _RESTART_POLICY_RE.match(restart_policy):
+                return self._action_result("failed", error="Invalid restart policy.")
+            argv.extend(["--restart", restart_policy])
+        if memory:
+            if not _MEMORY_RE.match(memory):
+                return self._action_result("failed", error="Invalid memory limit.")
+            argv.extend(["--memory", memory])
+        if cpus:
+            if not _CPUS_RE.match(cpus):
+                return self._action_result("failed", error="Invalid CPU limit.")
+            argv.extend(["--cpus", cpus])
+        if pids_limit is not None:
+            try:
+                pids = int(pids_limit)
+            except (TypeError, ValueError):
+                return self._action_result("failed", error="Invalid pids limit.")
+            if not 0 <= pids <= 1_000_000:
+                return self._action_result("failed", error="Invalid pids limit.")
+            argv.extend(["--pids-limit", str(pids)])
+        if len(argv) == 1:
+            return self._action_result("failed", error="No update limits supplied.")
+        argv.append(container_id)
+        return self._run(command, argv, env=env, max_output=MAX_COMMAND_OUTPUT)
+
+    def _container_logs(self, command: str, env: dict[str, str], args: dict[str, Any]) -> dict[str, Any]:
+        container_id, resolved = self._target_container(command, env, args)
+        if container_id is None:
+            return self._action_result("failed", error="Container not found.")
+        try:
+            tail = int(args.get("tail", 500))
+        except (TypeError, ValueError):
+            return self._action_result("failed", error="Invalid log tail.")
+        if tail not in {100, 500, 1000}:
+            return self._action_result("failed", error="Invalid log tail.")
+        argv = ["logs", "--tail", str(tail)]
+        if bool(args.get("timestamps", False)):
+            argv.append("--timestamps")
+        argv.append(container_id)
+        return self._run(command, argv, env=env, max_output=MAX_COMMAND_OUTPUT)
+
+    def _container_inspect(self, command: str, env: dict[str, str], args: dict[str, Any]) -> dict[str, Any]:
+        container_id, resolved = self._target_container(command, env, args)
+        if container_id is None:
+            return self._action_result("failed", error="Container not found.")
+        result = self._run(command, ["inspect", container_id], env=env, max_output=MAX_COMMAND_OUTPUT)
+        if result["status"] != "succeeded":
+            return result
+        try:
+            parsed = json.loads(result.get("stdout", ""))
+        except (TypeError, ValueError):
+            return self._action_result("failed", error="Docker inspect returned invalid JSON.")
+        result["stdout"] = json.dumps(self._mask_env(parsed), indent=2, ensure_ascii=False)[:MAX_COMMAND_OUTPUT]
+        return result
+
+    @classmethod
+    def _mask_env(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: ["<masked>"] if str(key).lower() == "env" else cls._mask_env(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._mask_env(item) for item in value]
+        return value
+
+    def _container_exec(self, command: str, env: dict[str, str], args: dict[str, Any]) -> dict[str, Any]:
+        container_id, resolved = self._target_container(command, env, args)
+        if container_id is None:
+            return self._action_result("failed", error="Container not found.")
+        shell = str(args.get("shell", "sh") or "").strip().lower()
+        if shell not in {"sh", "bash", "ash"}:
+            return self._action_result("failed", error="Unsupported exec shell.")
+        user = str(args.get("user", "") or "").strip()
+        if user and not _USER_RE.match(user):
+            return self._action_result("failed", error="Invalid exec user.")
+        workdir = str(args.get("workdir", "") or "").strip()
+        if workdir and not _WORKDIR_RE.match(workdir):
+            return self._action_result("failed", error="Invalid exec workdir.")
+        script = str(args.get("command", "") or "")
+        if not script.strip() or len(script) > 8000 or "\x00" in script:
+            return self._action_result("failed", error="Invalid exec command.")
+        try:
+            timeout = max(5, min(int(args.get("timeout", 60)), 300))
+        except (TypeError, ValueError):
+            return self._action_result("failed", error="Invalid exec timeout.")
+        argv = ["exec", "-i"]
+        if bool(args.get("tty", False)):
+            argv.append("-t")
+        if user:
+            argv.extend(["-u", user])
+        if workdir:
+            argv.extend(["-w", workdir])
+        argv.extend(["-e", "TERM=xterm-256color", container_id, shell, "-lc", script])
+        return self._run(command, argv, env=env, max_output=MAX_COMMAND_OUTPUT, timeout=timeout)
+
+    def _image_remove(self, command: str, env: dict[str, str], args: dict[str, Any]) -> dict[str, Any]:
+        target = str(args.get("image_id", "") or "").strip()
+        if not _IMAGE_ID_RE.match(target):
+            return self._action_result("failed", error="Invalid image ID.")
+        image_id, resolved = self._resolve_target(
+            command, env, ["image", "inspect", "--format", "{{.Id}}", target], _IMAGE_ID_RE
+        )
+        if image_id is None:
+            return self._action_result("failed", error="Image not found.")
+        return self._run(command, ["image", "rm", image_id], env=env, max_output=MAX_COMMAND_OUTPUT)
+
+    def _volume_remove(self, command: str, env: dict[str, str], args: dict[str, Any]) -> dict[str, Any]:
+        target = str(args.get("volume_name", "") or "").strip()
+        if not _VOLUME_NAME_RE.match(target):
+            return self._action_result("failed", error="Invalid volume name.")
+        name, resolved = self._resolve_target(
+            command, env, ["volume", "inspect", "--format", "{{.Name}}", target], _VOLUME_NAME_RE
+        )
+        if name is None:
+            return self._action_result("failed", error="Volume not found.")
+        return self._run(command, ["volume", "rm", name], env=env, max_output=MAX_COMMAND_OUTPUT)
+
+    def _network_remove(self, command: str, env: dict[str, str], args: dict[str, Any]) -> dict[str, Any]:
+        target = str(args.get("network_id", "") or "").strip()
+        if not _NETWORK_ID_RE.match(target):
+            return self._action_result("failed", error="Invalid network ID.")
+        network_id, resolved = self._resolve_target(
+            command, env, ["network", "inspect", "--format", "{{.Id}}", target], _NETWORK_ID_RE
+        )
+        if network_id is None:
+            return self._action_result("failed", error="Network not found.")
+        return self._run(command, ["network", "rm", network_id], env=env, max_output=MAX_COMMAND_OUTPUT)
+
+    def _cleanup(self, command: str, env: dict[str, str], args: dict[str, Any]) -> dict[str, Any]:
+        scope = str(args.get("scope", "") or "").strip().lower()
+        if scope not in _CLEANUP_SCOPES:
+            return self._action_result("failed", error="Unsupported cleanup scope.")
+        if scope == "stopped_containers":
+            return self._cleanup_stopped_containers(command, env, bool(args.get("include_compose", False)))
+        argv = {
+            "dangling_images": ["image", "prune", "-f"],
+            "unused_images": ["image", "prune", "-a", "-f"],
+            "unused_volumes": ["volume", "prune", "-f"],
+            "unused_networks": ["network", "prune", "-f"],
+            "build_cache": ["builder", "prune", "-f"],
+        }[scope]
+        return self._run(command, argv, env=env, max_output=MAX_COMMAND_OUTPUT)
+
+    def _cleanup_stopped_containers(
+        self,
+        command: str,
+        env: dict[str, str],
+        include_compose: bool,
+    ) -> dict[str, Any]:
+        listing = self._run(
+            command,
+            [
+                "ps",
+                "-a",
+                "--no-trunc",
+                "--filter",
+                "status=exited",
+                "--filter",
+                "status=created",
+                "--format",
+                "{{json .}}",
+            ],
+            env=env,
+            max_output=MAX_COMMAND_OUTPUT,
+        )
+        if listing["status"] != "succeeded":
+            return listing
+        candidates: list[tuple[str, str]] = []
+        for raw in _json_lines(listing.get("stdout", "")):
+            container_id = str(raw.get("ID", "")).strip()
+            name = str(raw.get("Names", "")).split(",")[0].strip()
+            state = str(raw.get("State", "")).strip().lower()
+            labels = _parse_labels(raw.get("Labels"))
+            if not _CONTAINER_ID_RE.match(container_id) or state not in {"exited", "created", "dead"}:
+                continue
+            if not include_compose and labels.get("com.docker.compose.project"):
+                continue
+            candidates.append((container_id, name))
+            if len(candidates) >= 200:
+                break
+        if not candidates:
+            return self._action_result(
+                "succeeded",
+                exit_code=0,
+                stdout="Removed 0 stopped containers.",
+            )
+        lines: list[str] = []
+        errors: list[str] = []
+        removed = 0
+        for container_id, name in candidates:
+            result = self._run(command, ["rm", container_id], env=env, max_output=16384)
+            if result["status"] == "succeeded":
+                removed += 1
+                lines.append(f"Removed {name or container_id} ({container_id}).")
+            else:
+                errors.append(f"{name or container_id}: {result.get('error') or result.get('stderr') or 'remove failed'}")
+        summary = f"Removed {removed} stopped container{'s' if removed != 1 else ''}."
+        stdout = "\n".join([summary, *lines])
+        if errors:
+            return self._action_result(
+                "failed",
+                exit_code=1,
+                stdout=stdout,
+                stderr="\n".join(errors)[:MAX_COMMAND_OUTPUT],
+                error=f"{len(errors)} container removal(s) failed.",
+            )
+        return self._action_result("succeeded", exit_code=0, stdout=stdout)
 
     def reset(self) -> None:
         self._status = None

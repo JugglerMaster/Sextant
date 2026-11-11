@@ -158,6 +158,125 @@ const labAgent = {
 
 const agents = [demoAgent, buildAgent, labAgent];
 
+const dockerHost = {
+  agent_id: "agt_build",
+  name: "Build Server",
+  hostname: "build-01",
+  os: "linux",
+  online: true,
+  last_seen: "2026-11-06T08:04:45Z",
+  available: true,
+  reason: "",
+  engine_version: "27.5.1",
+  api_version: "1.47",
+  compose_version: "2.32.4",
+  compose_available: true,
+  rootless: false,
+  storage_driver: "overlay2",
+  cgroup_driver: "systemd",
+  docker_root_dir: "/var/lib/docker",
+  counts: { containers: 2, running: 1, paused: 0, stopped: 1, unhealthy: 0, images: 1, volumes: 1, networks: 2 },
+  inventory_hash: "a".repeat(64),
+  inventory_revision: 4,
+  inventory_at: "2026-11-06T08:04:30Z",
+  collected_at: "2026-11-06T08:04:30Z",
+  heartbeat_at: "2026-11-06T08:04:45Z",
+  age_seconds: 30,
+  stale: false,
+  last_error: "",
+  capabilities: { mutate: true, exec: true, prune: true },
+};
+
+const dockerDetail = {
+  server_time: "2026-11-06T08:05:00Z",
+  stale_seconds: 900,
+  host: dockerHost,
+  containers: [
+    {
+      id: "a".repeat(64),
+      name: "web-1",
+      image: "nginx:latest",
+      command: "nginx -g daemon off;",
+      state: "running",
+      status: "Up 2 hours (healthy)",
+      health: "healthy",
+      exit_code: null,
+      restart_policy: "unless-stopped",
+      ports: ["0.0.0.0:8080->80/tcp"],
+      labels: { "com.docker.compose.project": "web" },
+      mounts: ["web_data:/data"],
+      networks: ["web_default"],
+      compose_project: "web",
+      compose_service: "nginx",
+    },
+    {
+      id: "b".repeat(64),
+      name: "worker-1",
+      image: "worker:latest",
+      command: "./worker",
+      state: "exited",
+      status: "Exited (0) 3 hours ago",
+      health: "",
+      exit_code: 0,
+      restart_policy: "no",
+      ports: [],
+      labels: {},
+      mounts: [],
+      networks: ["web_default"],
+      compose_project: "",
+      compose_service: "",
+    },
+  ],
+  images: [
+    {
+      id: "sha256:" + "c".repeat(64),
+      repo_tags: ["nginx:latest"],
+      repo_digests: [],
+      size: 187000000,
+      shared_size: 0,
+      containers: 1,
+      dangling: false,
+      created_at: "2026-11-06T07:00:00Z",
+    },
+  ],
+  volumes: [
+    {
+      name: "web_data",
+      driver: "local",
+      scope: "local",
+      mountpoint: "/var/lib/docker/volumes/web_data/_data",
+      labels: {},
+      in_use: true,
+    },
+  ],
+  networks: [
+    {
+      id: "d".repeat(64),
+      name: "web_default",
+      driver: "bridge",
+      scope: "local",
+      internal: false,
+      attachable: false,
+      labels: {},
+      container_count: 2,
+    },
+  ],
+};
+
+const dockerCleanup = {
+  server_time: "2026-11-06T08:05:00Z",
+  host: dockerHost,
+  can_prune: true,
+  scopes: [
+    { scope: "stopped_containers", label: "Stopped containers", count: 1, estimated_bytes: 0, estimated: true, candidates: [], warning: "Compose-managed stopped containers are excluded by default." },
+    { scope: "dangling_images", label: "Dangling images", count: 1, estimated_bytes: 1048576, estimated: true, candidates: [], warning: "Untagged images only." },
+    { scope: "unused_images", label: "Unused images", count: 0, estimated_bytes: 0, estimated: true, candidates: [], warning: "Destructive." },
+    { scope: "unused_volumes", label: "Unused volumes", count: 1, estimated_bytes: 0, estimated: false, candidates: [], warning: "Destructive and irreversible." },
+    { scope: "unused_networks", label: "Unused networks", count: 0, estimated_bytes: 0, estimated: true, candidates: [], warning: "Default networks excluded." },
+    { scope: "build_cache", label: "Build cache", count: 0, estimated_bytes: 0, estimated: false, candidates: [], warning: "Reported after prune." },
+  ],
+};
+
 const historyCommands = [
   {
     id: "cmd_queued",
@@ -364,7 +483,8 @@ const dashboardPayload = {
 };
 
 function createApi(session) {
-  return function respond(url, method) {
+  let dockerCommand = null;
+  return function respond(url, method, body = null) {
     const key = url.pathname;
     if (key === "/api/auth/config") {
       return { status: 200, body: { ldap_enabled: false, version: "0.3.0", public_url: "" } };
@@ -400,6 +520,52 @@ function createApi(session) {
     if (key === "/api/remote-install") return { status: 200, body: { jobs: [] } };
     if (key === "/api/agents/agt_demo") {
       return { status: 200, body: { agent: demoAgent, commands: historyCommands.slice(0, 2) } };
+    }
+    if (key === "/api/docker/hosts") {
+      return { status: 200, body: { server_time: "2026-11-06T08:05:00Z", stale_seconds: 900, hosts: [dockerHost] } };
+    }
+    if (key === "/api/docker/hosts/agt_build") {
+      return { status: 200, body: dockerDetail };
+    }
+    if (key === "/api/docker/hosts/agt_build/cleanup") {
+      return { status: 200, body: dockerCleanup };
+    }
+    if (
+      method === "POST" &&
+      (key === "/api/docker/hosts/agt_build/actions" ||
+        key === "/api/docker/hosts/agt_build/cleanup" ||
+        /^\/api\/docker\/hosts\/agt_build\/containers\/[^/]+\/exec$/.test(key))
+    ) {
+      const action = key.endsWith("/cleanup")
+        ? "cleanup"
+        : key.endsWith("/exec")
+          ? "container.exec_one_shot"
+          : body?.action;
+      dockerCommand = {
+        id: "cmd_docker_browser",
+        agent_id: "agt_build",
+        kind: "docker",
+        args: body || {},
+        status: "succeeded",
+        created_at: "2026-11-06T08:05:00Z",
+        completed_at: "2026-11-06T08:05:05Z",
+        exit_code: 0,
+        stdout:
+          action === "cleanup"
+            ? "Total reclaimed space: 1MB"
+            : action === "container.exec_one_shot"
+              ? "uid=0(root)"
+              : action === "container.inspect"
+                ? '{"Config":{"Env":["<masked>"]}}'
+                : "ok",
+        stderr: "",
+        error: "",
+        output_truncated: false,
+      };
+      return { status: 200, body: dockerCommand };
+    }
+    if (key === "/api/commands/cmd_docker_browser" && dockerCommand) {
+      return { status: 200, body: { command: dockerCommand } };
     }
     if (key === "/api/agents/agt_demo/packages") return { status: 200, body: packagesPayload };
     if (key === "/api/agents/agt_demo/history") {
