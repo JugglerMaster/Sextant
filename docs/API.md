@@ -9,7 +9,7 @@ Interactive docs are intentionally disabled (`/docs`, `/openapi.json`).
 ### Browser/session API
 
 1. `POST /api/auth/login` with `username`, `password`, and optional `mode` (`auto`, `local`, `ad`).
-2. The response sets an HttpOnly `rc_session` cookie and returns a CSRF token, the user, permissions, and public settings.
+2. The response sets an HttpOnly `sextant_session` cookie and returns a CSRF token, the user, permissions, and public settings.
 3. Send the cookie on subsequent requests.
 4. Send `X-CSRF-Token: <token>` on every `POST`, `PATCH`, or `DELETE` except agent endpoints and login.
 5. Every request also checks the server-side session row. Sessions can be revoked individually or all at once; disabling a user or resetting a password invalidates their sessions.
@@ -24,14 +24,14 @@ CSRF=$(python3 -c 'import json;print(json.load(open("/tmp/rc.login.json"))["csrf
 curl -fsS -b /tmp/rc.cookies https://ops.example.com/api/dashboard
 ```
 
-The session cookie expires after `RC_SESSION_HOURS` (default 12, max 8784 hours). A password change issues a new cookie and invalidates older sessions for that user.
+The session cookie expires after `SEXTANT_SESSION_HOURS` (default 12, max 8784 hours). A password change issues a new cookie and invalidates older sessions for that user.
 
 ### Agent API
 
 Agents send:
 
 ```http
-Authorization: Bearer rc_agent_...
+Authorization: Bearer sextant_agent_...
 ```
 
 The path agent ID and token must belong together. Enrollment uses a one-time enrollment token in the request body instead of a bearer token.
@@ -140,7 +140,7 @@ returned with the view:
 }
 ```
 
-The browser imports legacy `rc.savedViews` localStorage entries once after
+The browser imports legacy `sextant.savedViews` localStorage entries once after
 sign-in, skipping names that already exist on the server. localStorage is not
 the source of truth for saved views.
 
@@ -186,11 +186,11 @@ Dashboard agent fields include `online`, `last_seen`, `cpu_pct`, `mem_pct`, `mem
 }
 ```
 
-Alert conditions are computed from the latest heartbeat telemetry and reconciled into `alert_states` whenever the dashboard or agent detail is built. A new condition receives a fresh `incident_id`, `first_seen_at`, and `last_seen_at`. A still-present condition only advances `last_seen_at`, preserving an acknowledgement. A condition that disappears is marked cleared and loses its acknowledgement and snooze. If the same key later reappears it starts a new incident with a new id and fresh first-seen time, so a resolved-then-recurring alert is never silently muted. Acknowledgements also expire after `RC_ALERT_ACK_TTL_HOURS` (default 168, 1–8760), at which point the alert becomes active again and must be re-acknowledged. Snoozes keep their explicit `snoozed_until` expiry. `alert_count` counts only current alerts that are unacknowledged and not snoozed.
+Alert conditions are computed from the latest heartbeat telemetry and reconciled into `alert_states` whenever the dashboard or agent detail is built. A new condition receives a fresh `incident_id`, `first_seen_at`, and `last_seen_at`. A still-present condition only advances `last_seen_at`, preserving an acknowledgement. A condition that disappears is marked cleared and loses its acknowledgement and snooze. If the same key later reappears it starts a new incident with a new id and fresh first-seen time, so a resolved-then-recurring alert is never silently muted. Acknowledgements also expire after `SEXTANT_ALERT_ACK_TTL_HOURS` (default 168, 1–8760), at which point the alert becomes active again and must be re-acknowledged. Snoozes keep their explicit `snoozed_until` expiry. `alert_count` counts only current alerts that are unacknowledged and not snoozed.
 
 ### Live updates (Server-Sent Events)
 
-Both streams use the normal session cookie (`rc_session`) and return
+Both streams use the normal session cookie (`sextant_session`) and return
 `Content-Type: text/event-stream`. They are same-origin; the CSP already allows
 `connect-src 'self'`. Heartbeat comment lines are sent every 15 seconds.
 
@@ -286,10 +286,10 @@ Kinds and validated arguments:
 
 Queue guardrails:
 
-- `RC_OFFLINE_COMMAND_POLICY=reject` refuses commands for offline agents (409). The default `queue` holds them until the next heartbeat.
-- `RC_MAX_QUEUED_COMMANDS_PER_AGENT` caps waiting work (409 when full).
-- `RC_QUEUED_COMMAND_TTL_HOURS` expires queued work so offline endpoints do not receive stale commands.
-- Dispatched work fails after its shell timeout plus `RC_DISPATCHED_GRACE_SECONDS`.
+- `SEXTANT_OFFLINE_COMMAND_POLICY=reject` refuses commands for offline agents (409). The default `queue` holds them until the next heartbeat.
+- `SEXTANT_MAX_QUEUED_COMMANDS_PER_AGENT` caps waiting work (409 when full).
+- `SEXTANT_QUEUED_COMMAND_TTL_HOURS` expires queued work so offline endpoints do not receive stale commands.
+- Dispatched work fails after its shell timeout plus `SEXTANT_DISPATCHED_GRACE_SECONDS`.
 - Only `queued` commands can be cancelled. If a command is already `dispatched`, the agent may execute it; cancellation returns 409.
 - `failed`/`cancelled` commands can be retried, creating a new command row and audit entry.
 - Commands blocked by the agent's server policy (shell/power/service) are rejected with 409 before they enter the queue.
@@ -471,7 +471,7 @@ Any authenticated role can read. `hours` must be 1–720 and `points` must be 10
 }
 ```
 
-One sample is stored per heartbeat, derived from the latest validated payload. History is kept for `RC_TELEMETRY_RETENTION_DAYS` (default 7, 1–365) and disabled entirely with `RC_TELEMETRY_HISTORY=0`. Disabling history does not affect the latest telemetry shown on the dashboard.
+One sample is stored per heartbeat, derived from the latest validated payload. History is kept for `SEXTANT_TELEMETRY_RETENTION_DAYS` (default 7, 1–365) and disabled entirely with `SEXTANT_TELEMETRY_HISTORY=0`. Disabling history does not affect the latest telemetry shown on the dashboard.
 
 ### Read agent state-change events
 
@@ -499,7 +499,7 @@ Any authenticated role can read. `hours` must be 1–720 and `limit` must be 1�
 }
 ```
 
-Kinds are `online`, `service`, `package`, `version`, `profile`, and `alert`. Alert detail identifies the lifecycle action (`raised`, `cleared`, `acknowledged`, `reacknowledged`, `snoozed`, or `acknowledgement_expired`) plus the `incident_id` where applicable. Raises are recorded on the first heartbeat that sees a condition; a recurrence is still a `raised` event with `recurrence: true` and the previous incident id. Steady heartbeats only advance `last_seen_at` and do not create events. Events are recorded best-effort: a failed event write never breaks a heartbeat or command path. Detail is deliberately bounded (for package transitions, at most the first ten names plus counts and a `truncated` flag), and an oversized detail payload is replaced with `{"truncated": true}`. Events are pruned with `RC_COMMAND_RETENTION_DAYS` (default 90).
+Kinds are `online`, `service`, `package`, `version`, `profile`, and `alert`. Alert detail identifies the lifecycle action (`raised`, `cleared`, `acknowledged`, `reacknowledged`, `snoozed`, or `acknowledgement_expired`) plus the `incident_id` where applicable. Raises are recorded on the first heartbeat that sees a condition; a recurrence is still a `raised` event with `recurrence: true` and the previous incident id. Steady heartbeats only advance `last_seen_at` and do not create events. Events are recorded best-effort: a failed event write never breaks a heartbeat or command path. Detail is deliberately bounded (for package transitions, at most the first ten names plus counts and a `truncated` flag), and an oversized detail payload is replaced with `{"truncated": true}`. Events are pruned with `SEXTANT_COMMAND_RETENTION_DAYS` (default 90).
 
 ## Package management
 
@@ -524,7 +524,7 @@ Rules are `{manager, package, desired_state, version_spec}` where `desired_state
 | GET | `/api/store/events` | admin | Publish/download/yank events |
 | GET | `/api/store/stats` | admin | Package/release counts and blob usage |
 
-Upload headers: `X-Artifact-Type` (`agent-wheel`, `deb`, `rpm`, `msi`, `msix`, `zip`, `exe`), `X-Filename`, optional `X-Sha256`, `X-Channel`, `X-Min-Version`, `X-Notes-Url`, `X-Mandatory`. The server computes SHA-256 and size from the body; a supplied hash must match. CLI equivalents: `runner-control store-publish`, `store-list`, `store-yank`.
+Upload headers: `X-Artifact-Type` (`agent-wheel`, `deb`, `rpm`, `msi`, `msix`, `zip`, `exe`), `X-Filename`, optional `X-Sha256`, `X-Channel`, `X-Min-Version`, `X-Notes-Url`, `X-Mandatory`. The server computes SHA-256 and size from the body; a supplied hash must match. CLI equivalents: `sextant store-publish`, `store-list`, `store-yank`.
 
 ## Agent profiles
 
@@ -570,7 +570,7 @@ Tag assignments:
 
 Key-based SSH only, one job at a time. Host-key verification is disabled for rebuilt hosts. See [REMOTE_INSTALL.md](REMOTE_INSTALL.md).
 
-`RC_UPDATE_FEED=github:owner/repo` or an HTTPS JSON URL enables the check. The dashboard shows an admin banner when a newer server version exists. This version does **not** apply server updates automatically.
+`SEXTANT_UPDATE_FEED=github:owner/repo` or an HTTPS JSON URL enables the check. The dashboard shows an admin banner when a newer server version exists. This version does **not** apply server updates automatically.
 
 ### Wake an agent
 
@@ -619,17 +619,17 @@ Create body:
 {"label":"Linux lab","expires_minutes":30}
 ```
 
-`expires_minutes` is optional (5–1440). When omitted, `RC_ENROLLMENT_TTL_MINUTES` (default 30) is used.
+`expires_minutes` is optional (5–1440). When omitted, `SEXTANT_ENROLLMENT_TTL_MINUTES` (default 30) is used.
 
 Response includes the plaintext token **once** and an install command:
 
 ```json
 {
   "id": "enr_123",
-  "token": "rc_enroll_...",
+  "token": "sextant_enroll_...",
   "label": "Linux lab",
   "expires_at": "2026-11-06T08:30:00Z",
-  "install_command": "runner-agent enroll --server https://ops.example.com --token rc_enroll_..."
+  "install_command": "sextant-agent enroll --server https://ops.example.com --token sextant_enroll_..."
 }
 ```
 
@@ -712,7 +712,7 @@ POST /api/agent/enroll
 Content-Type: application/json
 
 {
-  "enrollment_token": "rc_enroll_...",
+  "enrollment_token": "sextant_enroll_...",
   "hostname": "box-01",
   "name": "box-01",
   "machine_id": "4f3c…",
@@ -734,7 +734,7 @@ Response (credentials shown once):
 ```json
 {
   "agent_id": "agt_123",
-  "agent_token": "rc_agent_...",
+  "agent_token": "sextant_agent_...",
   "reenrolled": false,
   "server_time": "2026-11-06T08:00:00Z",
   "heartbeat_interval": 30,
@@ -749,7 +749,7 @@ If `machine_id` matches an existing agent, the server updates that row, invalida
 
 ```http
 POST /api/agent/agt_123/heartbeat
-Authorization: Bearer rc_agent_...
+Authorization: Bearer sextant_agent_...
 Content-Type: application/json
 
 {
@@ -851,7 +851,7 @@ The server marks returned commands `dispatched` before sending. An agent that cr
 
 ```http
 POST /api/agent/agt_123/commands/cmd_123/output
-Authorization: Bearer rc_agent_...
+Authorization: Bearer sextant_agent_...
 Content-Type: application/json
 
 {"stream":"stdout","seq":1,"text":"line one\n"}
@@ -862,7 +862,7 @@ The command must belong to the authenticated agent (`404` otherwise), must be
 must increase strictly within each stream. Re-posting the same
 `(command_id, stream, seq)` and text is idempotent; using the same sequence with
 different text returns `409`. A chunk is limited to 64 KiB and the per-command
-stored total (stdout + stderr) is capped by `RC_COMMAND_OUTPUT_LIMIT`
+stored total (stdout + stderr) is capped by `SEXTANT_COMMAND_OUTPUT_LIMIT`
 (200,000 characters by default, `413` when exceeded). Output chunks leave the
 command status unchanged; the final result sets the terminal state.
 
@@ -874,13 +874,13 @@ the result below remains authoritative.
 
 ```http
 POST /api/agent/agt_123/commands/cmd_123/result
-Authorization: Bearer rc_agent_...
+Authorization: Bearer sextant_agent_...
 Content-Type: application/json
 
 {"status":"succeeded","exit_code":0,"stdout":"...","stderr":"","error":""}
 ```
 
-`status` is `succeeded` or `failed`. The server force-fails a “succeeded” result with a non-zero exit code. Output is truncated to `RC_COMMAND_OUTPUT_LIMIT` (200,000 chars). Re-posting a terminal command returns the stored result with `"idempotent": true`. The final result is stored on the command row; streamed chunks are supplemental and are pruned with the command retention window.
+`status` is `succeeded` or `failed`. The server force-fails a “succeeded” result with a non-zero exit code. Output is truncated to `SEXTANT_COMMAND_OUTPUT_LIMIT` (200,000 chars). Re-posting a terminal command returns the stored result with `"idempotent": true`. The final result is stored on the command row; streamed chunks are supplemental and are pruned with the command retention window.
 
 ## Status codes
 
@@ -893,7 +893,7 @@ Content-Type: application/json
 | `403` | Role or CSRF failure |
 | `404` | Unknown agent/command/target/user/saved view (or a view owned by another user) |
 | `409` | Duplicate username or saved-view name, result/output for an undispatched or finished command, output sequence conflict, queue full, offline-policy rejection, cancel after dispatch, revoking an already-used enrollment token |
-| `413` | Body over `RC_MAX_BODY_BYTES`, output chunk over 64 KiB, or per-command output over `RC_COMMAND_OUTPUT_LIMIT` |
+| `413` | Body over `SEXTANT_MAX_BODY_BYTES`, output chunk over 64 KiB, or per-command output over `SEXTANT_COMMAND_OUTPUT_LIMIT` |
 | `422` | Pydantic shape/field validation |
 | `429` | Login rate limit |
 | `502` | Wake packet send failure |

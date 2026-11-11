@@ -1,6 +1,6 @@
 # Architecture
 
-Runner Control is a small, single-node remote operations system. It has three planes:
+Sextant is a small, single-node remote operations system. It has three planes:
 
 1. **Admin plane** — browser → nginx/TLS → FastAPI dashboard/API.
 2. **Agent plane** — endpoint agents poll the server over outbound HTTPS.
@@ -12,14 +12,14 @@ There is no agent listener and no third-party relay.
 
 | Component | Location | Responsibility |
 | --- | --- | --- |
-| Web dashboard | `runner_control/static/` | Vanilla HTML/CSS/JS single page. Login, fleet view, drawers, terminal, admin pages. |
-| HTTP API | `runner_control/server.py` | FastAPI routes, session/CSRF checks, RBAC, command queue, WoL, enrollment, audit. |
-| SQLite store | `runner_control/db.py` | Users, sessions, agents, enrollment tokens, commands, audit events, wake targets. WAL mode. |
-| LDAP client | `runner_control/ldap_auth.py` | Service bind, user search, user credential bind, group→role mapping. |
-| Package store | `runner_control/store.py` | Content-addressed artifact blobs, SHA-256 integrity, quotas, GC. |
-| Update checker | `runner_control/updates.py` | Read-only server release check (GitHub or static JSON). |
-| Remote install | `runner_control/remote_install.py` | Key-based SSH install for Linux, job log, one-time enrollment. |
-| Agent | `runner_agent/` | Heartbeat, telemetry collectors, package inventory/actions, self-update, queued command execution, result posting. |
+| Web dashboard | `sextant_control/static/` | Vanilla HTML/CSS/JS single page. Login, fleet view, drawers, terminal, admin pages. |
+| HTTP API | `sextant_control/server.py` | FastAPI routes, session/CSRF checks, RBAC, command queue, WoL, enrollment, audit. |
+| SQLite store | `sextant_control/db.py` | Users, sessions, agents, enrollment tokens, commands, audit events, wake targets. WAL mode. |
+| LDAP client | `sextant_control/ldap_auth.py` | Service bind, user search, user credential bind, group→role mapping. |
+| Package store | `sextant_control/store.py` | Content-addressed artifact blobs, SHA-256 integrity, quotas, GC. |
+| Update checker | `sextant_control/updates.py` | Read-only server release check (GitHub or static JSON). |
+| Remote install | `sextant_control/remote_install.py` | Key-based SSH install for Linux, job log, one-time enrollment. |
+| Agent | `sextant_agent/` | Heartbeat, telemetry collectors, package inventory/actions, self-update, queued command execution, result posting. |
 | Deployment assets | `deploy/` | systemd units, nginx config, Linux/Windows installers, env template. |
 
 ## Request and command flow
@@ -47,13 +47,13 @@ agent                         server                         browser
 
 Key properties:
 
-- Commands are delivered only in response to a heartbeat. The default offline policy queues work until the agent returns; `RC_OFFLINE_COMMAND_POLICY=reject` refuses new work instead.
-- The server caps queued commands per agent (`RC_MAX_QUEUED_COMMANDS_PER_AGENT`).
+- Commands are delivered only in response to a heartbeat. The default offline policy queues work until the agent returns; `SEXTANT_OFFLINE_COMMAND_POLICY=reject` refuses new work instead.
+- The server caps queued commands per agent (`SEXTANT_MAX_QUEUED_COMMANDS_PER_AGENT`).
 - A command is marked `dispatched` in the same SQLite transaction that selects it, so two simultaneous heartbeats cannot dispatch the same command.
 - Only one command is in flight per agent. The agent polls again immediately after completing it, so a backlog drains without waiting a full heartbeat interval and the stale-command sweeper cannot fail a command that is simply queued behind another.
 - Results are idempotent: re-posting a completed command returns the existing row.
 - Queued commands can be cancelled; failed/cancelled commands can be retried as new command rows.
-- Dispatched commands are failed automatically after their timeout plus a grace period. Queued commands expire after `RC_QUEUED_COMMAND_TTL_HOURS` so an endpoint does not receive week-old work when it reconnects.
+- Dispatched commands are failed automatically after their timeout plus a grace period. Queued commands expire after `SEXTANT_QUEUED_COMMAND_TTL_HOURS` so an endpoint does not receive week-old work when it reconnects.
 - The server does not execute shell commands. It only stores them and returns them to the matching agent.
 - Shell/service/power commands are created only by `operator` or `admin` roles.
 - `POST /api/agents/bulk` fans one validated action out to at most 200 unique agents, reusing the single-agent queue, policy, WoL, and profile checks. Per-agent failures are returned in place and never abort the rest of the batch; the request and each action are audited.
@@ -81,19 +81,19 @@ Key properties:
 | `audit_log` | Actor, action, target, detail JSON, source IP, time |
 | `wake_targets` | Agent-less named MAC addresses, broadcast address, port, last wake |
 
-Telemetry is stored denormalized in the agent row (`disks`, `gpus`, `services`, `startup`, `extra`) because the dashboard only needs the latest sample. A separate `telemetry_samples` table keeps one bounded row per heartbeat for trend queries; it is pruned to `RC_TELEMETRY_RETENTION_DAYS` (default 7) and can be disabled with `RC_TELEMETRY_HISTORY=0`. Trend queries fill every requested bucket, so missing heartbeats are explicit `null` points with real timestamps rather than omitted rows. Command history is retained per agent (the drawer History tab paginates and filters it server-side, with CSV export; the overview keeps a bounded latest-50 preview) and terminal commands are pruned after `RC_COMMAND_RETENTION_DAYS` (default 90). Audit rows are pruned after `RC_AUDIT_RETENTION_DAYS` (default 365).
+Telemetry is stored denormalized in the agent row (`disks`, `gpus`, `services`, `startup`, `extra`) because the dashboard only needs the latest sample. A separate `telemetry_samples` table keeps one bounded row per heartbeat for trend queries; it is pruned to `SEXTANT_TELEMETRY_RETENTION_DAYS` (default 7) and can be disabled with `SEXTANT_TELEMETRY_HISTORY=0`. Trend queries fill every requested bucket, so missing heartbeats are explicit `null` points with real timestamps rather than omitted rows. Command history is retained per agent (the drawer History tab paginates and filters it server-side, with CSV export; the overview keeps a bounded latest-50 preview) and terminal commands are pruned after `SEXTANT_COMMAND_RETENTION_DAYS` (default 90). Audit rows are pruned after `SEXTANT_AUDIT_RETENTION_DAYS` (default 365).
 
-`agent_events` is an append-only, best-effort state-change log recording transitions rather than every heartbeat: an agent returning online after being offline, watched-service status changes, package additions/removals/version changes, agent version changes, profile assignments, and alert raise/clear/acknowledge/re-acknowledge/snooze/expiry lifecycle entries. Writes are fail-open so they cannot break a heartbeat or command path, and detail JSON is bounded. Events share the command retention policy (`RC_COMMAND_RETENTION_DAYS`, default 90).
+`agent_events` is an append-only, best-effort state-change log recording transitions rather than every heartbeat: an agent returning online after being offline, watched-service status changes, package additions/removals/version changes, agent version changes, profile assignments, and alert raise/clear/acknowledge/re-acknowledge/snooze/expiry lifecycle entries. Writes are fail-open so they cannot break a heartbeat or command path, and detail JSON is bounded. Events share the command retention policy (`SEXTANT_COMMAND_RETENTION_DAYS`, default 90).
 
-`saved_views` belongs to a user row and is scoped by `user_id`, with a case-insensitive unique name per user. The browser imports legacy `rc.savedViews` localStorage data after sign-in, skipping names already present, and uses localStorage only as an offline fallback; the database is authoritative when the API is reachable.
+`saved_views` belongs to a user row and is scoped by `user_id`, with a case-insensitive unique name per user. The browser imports legacy `sextant.savedViews` localStorage data after sign-in, skipping names already present, and uses localStorage only as an offline fallback; the database is authoritative when the API is reachable.
 
 ## Authentication and authorization
 
 Admin users authenticate with either a local account or LDAP:
 
 1. Local: `scrypt` with per-password salt; format `scrypt$n$r$p$salt$hash`.
-2. AD/Samba: service bind to search `RC_LDAP_USER_FILTER`, then a second bind as the user's DN to verify the password. Role comes from direct `memberOf` group DNs.
-3. A signed session cookie contains `uid`, `session version`, `session ID`, `csrf`, issue time, and expiry. The signature is HMAC-SHA-256 using `secret.key` or `RC_SECRET_KEY`.
+2. AD/Samba: service bind to search `SEXTANT_LDAP_USER_FILTER`, then a second bind as the user's DN to verify the password. Role comes from direct `memberOf` group DNs.
+3. A signed session cookie contains `uid`, `session version`, `session ID`, `csrf`, issue time, and expiry. The signature is HMAC-SHA-256 using `secret.key` or `SEXTANT_SECRET_KEY`.
 4. Every state-changing `/api/` request (except login and agent endpoints) must include `X-CSRF-Token`.
 5. Every authenticated request checks the server-side session row: not revoked, not expired, user active, and session version current.
 6. Password changes, admin password resets, disabling a user, and “revoke all” increment `session_version` and revoke the relevant session rows. Revoking all on your own account issues a fresh session for the current browser.
@@ -189,15 +189,15 @@ The computed conditions are reconciled into `alert_states` on every heartbeat an
 - a condition that disappears gets `cleared_at` and loses its acknowledgement and snooze;
 - if the same key reappears after being cleared, it starts a new incident with a new id and fresh first-seen time, so the old acknowledgement cannot mute it.
 
-Acknowledgements are also bounded by `RC_ALERT_ACK_TTL_HOURS` (default 168, range 1–8760) from `acknowledged_at`; an expired acknowledgement is cleared so a persistent alert eventually becomes active again. Snoozes keep their explicit `snoozed_until` expiry. `alert_count` counts only current, unacknowledged, unexpired alerts. Raise/clear/acknowledge/re-acknowledge/snooze/expiry transitions are written to `agent_events`; steady heartbeats do not create events.
+Acknowledgements are also bounded by `SEXTANT_ALERT_ACK_TTL_HOURS` (default 168, range 1–8760) from `acknowledged_at`; an expired acknowledgement is cleared so a persistent alert eventually becomes active again. Snoozes keep their explicit `snoozed_until` expiry. `alert_count` counts only current, unacknowledged, unexpired alerts. Raise/clear/acknowledge/re-acknowledge/snooze/expiry transitions are written to `agent_events`; steady heartbeats do not create events.
 
 ## Package store and application management
 
-- Artifacts are stored as immutable blobs under `RC_DATA_DIR/store/blobs/sha256/<prefix>/<hash>`. The server computes SHA-256 and size at upload; agents re-verify after download. Tier 0 (no signature, no CA) is the current decision.
+- Artifacts are stored as immutable blobs under `SEXTANT_DATA_DIR/store/blobs/sha256/<prefix>/<hash>`. The server computes SHA-256 and size at upload; agents re-verify after download. Tier 0 (no signature, no CA) is the current decision.
 - The store hosts agent wheels (`artifact_type=agent-wheel`), `.deb`/`.rpm`/`.msi`/`.msix`/portable artifacts, and is the distribution point for self-update.
 - Agents are assigned a server-managed profile (`workstation`, `server`, or custom) at enrollment, by an admin, or through a tag assignment. The profile controls heartbeat cadence, service/package inventory cadence, enabled modules, action gates, output caps, and self-update policy. The current profile is returned on every heartbeat; profile edits apply without reinstalling.
 - Package inventory is revisioned: the agent sends a hash and revision every heartbeat, deltas (upserts + deletes) at the package cadence, and a full snapshot weekly, on first contact, or when the server requests one. The server applies deltas only when the base revision matches.
-- The server update checker is read-only: it reads `RC_UPDATE_FEED` metadata and shows an admin banner. Applying a server update is not automated in this version.
+- The server update checker is read-only: it reads `SEXTANT_UPDATE_FEED` metadata and shows an admin banner. Applying a server update is not automated in this version.
 - `POST /api/agents/{id}/packages/sync` queues one batched `package` command (at most 25 install/remove/upgrade actions). Actions execute with argv (no shell) and require both the local and server `allow_packages` flags.
 - Remote install is an admin SSH job for Linux: fixed install script, one server key, host-key verification disabled for rebuilt hosts, one job at a time, job log in SQLite.
 - Agent self-update verifies the wheel hash/size, stages a versioned venv, health-checks it, switches the `current` symlink, and keeps previous releases. Windows currently stages and requires a manual task switch.
@@ -222,7 +222,7 @@ The server must be on the same layer-2 broadcast domain as the target (or have a
 
 The server validates service names and power actions, but `shell` is intentionally arbitrary. Agent-local flags can disable shell, power, or service execution entirely.
 
-Output is bounded to 200,000 characters per stream by default (`RC_COMMAND_OUTPUT_LIMIT` on the server, `max_output_bytes` in agent config). The agent reads stdout/stderr incrementally into bounded buffers and kills the whole process group on timeout or when the cap is exceeded, returning a failed result.
+Output is bounded to 200,000 characters per stream by default (`SEXTANT_COMMAND_OUTPUT_LIMIT` on the server, `max_output_bytes` in agent config). The agent reads stdout/stderr incrementally into bounded buffers and kills the whole process group on timeout or when the cap is exceeded, returning a failed result.
 
 ## Deployment topology
 
@@ -231,7 +231,7 @@ Recommended:
 ```text
 admin VPN / trusted LAN
         │ 443
-    nginx TLS ──► 127.0.0.1:8080 Runner Control
+    nginx TLS ──► 127.0.0.1:8080 Sextant
                               │
                               ├── LDAPS 636 → domain controllers
                               └── UDP 9 broadcast → LAN
@@ -239,7 +239,7 @@ admin VPN / trusted LAN
 endpoints ── outbound 443 ──► nginx
 ```
 
-The app server binds loopback by default in the provided unit. nginx terminates TLS and forwards client IP/proto. `RC_COOKIE_SECURE=1`, `RC_TRUST_PROXY=1`, and `RC_PUBLIC_URL=https://…` must be set for this topology.
+The app server binds loopback by default in the provided unit. nginx terminates TLS and forwards client IP/proto. `SEXTANT_COOKIE_SECURE=1`, `SEXTANT_TRUST_PROXY=1`, and `SEXTANT_PUBLIC_URL=https://…` must be set for this topology.
 
 ## Deliberate limits
 

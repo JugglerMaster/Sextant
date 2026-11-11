@@ -1,10 +1,10 @@
 # Agents
 
-Runner agents run on each managed Linux or Windows host. They only make outbound HTTP(S) requests. The server never connects inbound to an endpoint.
+Sextant agents run on each managed Linux or Windows host. They only make outbound HTTP(S) requests. The server never connects inbound to an endpoint.
 
 For OS-specific install commands, see [INSTALL.md](INSTALL.md). This page covers configuration, policy, and day-to-day operation.
 
-The agent binary is a Python package (`runner_agent`) installed by the same `runner-control` distribution.
+The agent binary is a Python package (`sextant_agent`) installed by the same `sextant` distribution.
 
 ## Linux
 
@@ -24,17 +24,17 @@ sudo SOURCE_DIR=/path/to/ccdadisman \
   WATCH_SERVICES=ssh,nginx,postgresql \
   ./deploy/install-linux-agent.sh \
   https://ops.example.com \
-  rc_enroll_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+  sextant_enroll_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   "fileserver-01"
 ```
 
 The installer:
 
-1. creates `/opt/runner-agent/.venv`;
+1. creates `/opt/sextant-agent/.venv`;
 2. installs this project into it;
-3. writes `/etc/runner-agent/config.json` (mode 0600);
+3. writes `/etc/sextant-agent/config.json` (mode 0600);
 4. enrolls with the one-time token;
-5. installs and starts `/etc/systemd/system/runner-agent.service`.
+5. installs and starts `/etc/systemd/system/sextant-agent.service`.
 
 Environment options for the installer:
 
@@ -47,43 +47,43 @@ Environment options for the installer:
 | `ALLOW_PACKAGES` | Set to `0` to disable managed package actions locally (default `1`) |
 | `NO_SELF_UPDATE` | Set to `1` to disable agent self-update |
 | `PROFILE` | Profile slug selected at enrollment (default `workstation`) |
-| `INSTALL_DIR` | Default `/opt/runner-agent` |
-| `CONFIG_DIR` | Default `/etc/runner-agent` |
+| `INSTALL_DIR` | Default `/opt/sextant-agent` |
+| `CONFIG_DIR` | Default `/etc/sextant-agent` |
 | `CONFIG_FILE` | Default `$CONFIG_DIR/config.json` |
 
 Check it:
 
 ```bash
-systemctl status runner-agent --no-pager
-journalctl -u runner-agent -n 50 --no-pager
-sudo /opt/runner-agent/.venv/bin/runner-agent check --config /etc/runner-agent/config.json
+systemctl status sextant-agent --no-pager
+journalctl -u sextant-agent -n 50 --no-pager
+sudo /opt/sextant-agent/.venv/bin/sextant-agent check --config /etc/sextant-agent/config.json
 ```
 
 ### Manual install
 
 ```bash
 sudo apt install -y python3 python3-venv
-sudo install -d -m 0755 /opt/runner-agent
-sudo python3 -m venv /opt/runner-agent/.venv
-sudo /opt/runner-agent/.venv/bin/pip install --upgrade pip
-sudo /opt/runner-agent/.venv/bin/pip install --no-deps /path/to/ccdadisman
-sudo ln -sfn .venv /opt/runner-agent/current
-sudo install -d -m 0700 /etc/runner-agent
+sudo install -d -m 0755 /opt/sextant-agent
+sudo python3 -m venv /opt/sextant-agent/.venv
+sudo /opt/sextant-agent/.venv/bin/pip install --upgrade pip
+sudo /opt/sextant-agent/.venv/bin/pip install --no-deps /path/to/ccdadisman
+sudo ln -sfn .venv /opt/sextant-agent/current
+sudo install -d -m 0700 /etc/sextant-agent
 
-sudo /opt/runner-agent/.venv/bin/runner-agent enroll \
-  --config /etc/runner-agent/config.json \
+sudo /opt/sextant-agent/.venv/bin/sextant-agent enroll \
+  --config /etc/sextant-agent/config.json \
   --server https://ops.example.com \
-  --token rc_enroll_... \
+  --token sextant_enroll_... \
   --name "$(hostname)" \
   --profile server \
   --watch-service ssh \
   --watch-service nginx
 
-sudo chmod 0600 /etc/runner-agent/config.json
-sudo install -m 0644 /path/to/ccdadisman/deploy/runner-agent.service \
-  /etc/systemd/system/runner-agent.service
+sudo chmod 0600 /etc/sextant-agent/config.json
+sudo install -m 0644 /path/to/ccdadisman/deploy/sextant-agent.service \
+  /etc/systemd/system/sextant-agent.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now runner-agent
+sudo systemctl enable --now sextant-agent
 ```
 
 ## Windows
@@ -104,7 +104,7 @@ Copy the source tree to the Windows host, then run an elevated PowerShell. The W
 Set-Location C:\path\to\ccdadisman
 .\deploy\install-windows-agent.ps1 `
   -Server https://ops.example.com `
-  -Token rc_enroll_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx `
+  -Token sextant_enroll_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx `
   -Name "Studio PC" `
   -WatchServices Spooler, WSearch
 ```
@@ -114,26 +114,26 @@ If you copied only the script, point it at the package source directory:
 ```powershell
 .\install-windows-agent.ps1 `
   -Server https://ops.example.com `
-  -Token rc_enroll_... `
-  -SourcePath C:\packages\runner-control `
+  -Token sextant_enroll_... `
+  -SourcePath C:\packages\sextant `
   -CaFile C:\certs\corp-root-ca.pem
 ```
 
 The installer:
 
-1. creates `C:\ProgramData\RunnerAgent\venv`;
+1. creates `C:\ProgramData\SextantAgent\venv`;
 2. installs the package;
-3. enrolls and writes `C:\ProgramData\RunnerAgent\config.json`;
+3. enrolls and writes `C:\ProgramData\SextantAgent\config.json`;
 4. restricts the config ACL to SYSTEM and Administrators;
-5. registers the **RunnerControlAgent** scheduled task at startup, running as SYSTEM;
+5. registers the **SextantAgent** scheduled task at startup, running as SYSTEM;
 6. starts the task immediately.
 
 Check it:
 
 ```powershell
-Get-ScheduledTask RunnerControlAgent | Format-List
-Get-Content C:\ProgramData\RunnerAgent\agent.log -Tail 50
-C:\ProgramData\RunnerAgent\venv\Scripts\runner-agent.exe check --config C:\ProgramData\RunnerAgent\config.json
+Get-ScheduledTask SextantAgent | Format-List
+Get-Content C:\ProgramData\SextantAgent\agent.log -Tail 50
+C:\ProgramData\SextantAgent\venv\Scripts\sextant-agent.exe check --config C:\ProgramData\SextantAgent\config.json
 ```
 
 If Python was installed after the script started, open a new elevated PowerShell so `py` is on `PATH`.
@@ -141,29 +141,29 @@ If Python was installed after the script started, open a new elevated PowerShell
 ### Uninstall
 
 ```powershell
-Stop-ScheduledTask -TaskName RunnerControlAgent -ErrorAction SilentlyContinue
-Unregister-ScheduledTask -TaskName RunnerControlAgent -Confirm:$false
-Remove-Item -Recurse -Force C:\ProgramData\RunnerAgent
+Stop-ScheduledTask -TaskName SextantAgent -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName SextantAgent -Confirm:$false
+Remove-Item -Recurse -Force C:\ProgramData\SextantAgent
 ```
 
 For Linux:
 
 ```bash
-sudo systemctl disable --now runner-agent
-sudo rm /etc/systemd/system/runner-agent.service
-sudo rm -rf /opt/runner-agent /etc/runner-agent
+sudo systemctl disable --now sextant-agent
+sudo rm /etc/systemd/system/sextant-agent.service
+sudo rm -rf /opt/sextant-agent /etc/sextant-agent
 sudo systemctl daemon-reload
 ```
 
 ## Configuration file
 
-`runner-agent enroll` writes this JSON (token redacted):
+`sextant-agent enroll` writes this JSON (token redacted):
 
 ```json
 {
   "server_url": "https://ops.example.com",
   "agent_id": "agt_...",
-  "agent_token": "rc_agent_...",
+  "agent_token": "sextant_agent_...",
   "name": "fileserver-01",
   "verify_tls": true,
   "ca_file": "",
@@ -205,7 +205,7 @@ sudo systemctl daemon-reload
 | `allow_power` | If false, reject shutdown/reboot/cancel locally |
 | `allow_service` | If false, reject service start/stop/restart/enable/disable locally |
 | `allow_packages` | Enabled by default; set false (or enroll with `--no-packages`) to reject managed package actions locally |
-| `allow_self_update` | If false, ignore agent update notices and refuse `runner-agent update --apply` |
+| `allow_self_update` | If false, ignore agent update notices and refuse `sextant-agent update --apply` |
 | `max_output_bytes` | Local cap before upload (server also caps) |
 
 The local flags are a hard ceiling. Server-side policy can disable an action, but it cannot re-enable one denied locally. The effective permission is the intersection of local config and server policy.
@@ -254,7 +254,7 @@ For a zero-delay shutdown, the machine may go down before the result is posted; 
 
 Queue behavior:
 
-- The server may queue work for offline agents or reject it, depending on `RC_OFFLINE_COMMAND_POLICY`.
+- The server may queue work for offline agents or reject it, depending on `SEXTANT_OFFLINE_COMMAND_POLICY`.
 - A per-agent queue cap limits how much work can wait.
 - Queued commands can be cancelled before dispatch.
 - Failed/cancelled commands can be retried from history.
@@ -273,31 +273,31 @@ Admin-only:
 CLI listing:
 
 ```bash
-sudo -u runner-control RC_DATA_DIR=/var/lib/runner-control \
-  /opt/runner-control/.venv/bin/runner-control list-agents
+sudo -u sextant SEXTANT_DATA_DIR=/var/lib/sextant \
+  /opt/sextant/.venv/bin/sextant list-agents
 ```
 
 ## Updating an agent
 
-The supported self-update path uses the server package store. Publish an `agent-wheel` release under the `runner-agent` slug, then:
+The supported self-update path uses the server package store. Publish an `agent-wheel` release under the `sextant-agent` slug, then:
 
 ```bash
 # Check only
-sudo /opt/runner-agent/current/bin/runner-agent update --config /etc/runner-agent/config.json
+sudo /opt/sextant-agent/current/bin/sextant-agent update --config /etc/sextant-agent/config.json
 
 # Download, verify SHA-256/size, stage a new venv, health-check, switch `current`, restart
-sudo /opt/runner-agent/current/bin/runner-agent update \
-  --config /etc/runner-agent/config.json --apply --restart
+sudo /opt/sextant-agent/current/bin/sextant-agent update \
+  --config /etc/sextant-agent/config.json --apply --restart
 ```
 
-The service unit runs `/opt/runner-agent/current/bin/runner-agent`; the installer creates `current -> .venv`. The updater keeps versioned releases under `/opt/runner-agent/releases/` and prunes to the last three. If the staged health check fails, the current version is left untouched.
+The service unit runs `/opt/sextant-agent/current/bin/sextant-agent`; the installer creates `current -> .venv`. The updater keeps versioned releases under `/opt/sextant-agent/releases/` and prunes to the last three. If the staged health check fails, the current version is left untouched.
 
-Windows stages the new version under `%ProgramData%\RunnerAgent\releases\` and reports `staged`; automatic scheduled-task switching is not enabled yet. Use the manual path:
+Windows stages the new version under `%ProgramData%\SextantAgent\releases\` and reports `staged`; automatic scheduled-task switching is not enabled yet. Use the manual path:
 
 ```powershell
-C:\ProgramData\RunnerAgent\venv\Scripts\pip.exe install --no-deps --upgrade C:\packages\runner-control
-Stop-ScheduledTask RunnerControlAgent
-Start-ScheduledTask RunnerControlAgent
+C:\ProgramData\SextantAgent\venv\Scripts\pip.exe install --no-deps --upgrade C:\packages\sextant
+Stop-ScheduledTask SextantAgent
+Start-ScheduledTask SextantAgent
 ```
 
 Config and agent identity survive updates unless you re-enroll.
@@ -305,8 +305,8 @@ Config and agent identity survive updates unless you re-enroll.
 ## Diagnose
 
 ```bash
-sudo /opt/runner-agent/.venv/bin/runner-agent check --config /etc/runner-agent/config.json
-sudo /opt/runner-agent/.venv/bin/runner-agent run --config /etc/runner-agent/config.json --once --log-level DEBUG
+sudo /opt/sextant-agent/.venv/bin/sextant-agent check --config /etc/sextant-agent/config.json
+sudo /opt/sextant-agent/.venv/bin/sextant-agent run --config /etc/sextant-agent/config.json --once --log-level DEBUG
 ```
 
 `--once` sends one heartbeat, executes any returned commands, posts results, and exits. It is useful for testing but not for normal operation.

@@ -1,7 +1,7 @@
 # Built-in agent self-update — plan
 
-**Status:** U1–U2 implemented (server advertises a store agent wheel; Linux `runner-agent update` verifies/stages/switches; Windows stages only). U3 is notify-on-check-in; auto-apply is not enabled.
-**Scope:** update enrolled Linux and Windows agents from artifacts published by the Runner Control server, with **Tier 0 integrity** (TLS + agent auth + SHA-256 + size), staged rollout, health checks, and rollback. Signatures are deferred; the manifest fields remain reserved.
+**Status:** U1–U2 implemented (server advertises a store agent wheel; Linux `sextant-agent update` verifies/stages/switches; Windows stages only). U3 is notify-on-check-in; auto-apply is not enabled.
+**Scope:** update enrolled Linux and Windows agents from artifacts published by the Sextant server, with **Tier 0 integrity** (TLS + agent auth + SHA-256 + size), staged rollout, health checks, and rollback. Signatures are deferred; the manifest fields remain reserved.
 
 Related: [Installation](INSTALL.md), [Agents](AGENTS.md), [Architecture](ARCHITECTURE.md), [Server update orchestration](SERVER_UPDATE.md), [Package store](PACKAGE_STORE.md), [Roadmap](ROADMAP.md).
 
@@ -9,7 +9,7 @@ Related: [Installation](INSTALL.md), [Agents](AGENTS.md), [Architecture](ARCHITE
 
 ## 1. Current state
 
-- The agent reports `agent_version` on every heartbeat (`runner_agent/collectors.py`), and the server stores/displays it (`runner_control/server.py`, `static/app.js`).
+- The agent reports `agent_version` on every heartbeat (`sextant_agent/collectors.py`), and the server stores/displays it (`sextant_control/server.py`, `static/app.js`).
 - There is **no update channel**: the heartbeat response contains policy and queued commands, not releases.
 - There is **no file-transfer or package-hosting feature**.
 - Updates are manual: copy a wheel/source tree to the endpoint, `pip install --no-deps --upgrade`, restart systemd/scheduled task.
@@ -60,7 +60,7 @@ Related: [Installation](INSTALL.md), [Agents](AGENTS.md), [Architecture](ARCHITE
 ## 4. Architecture
 
 ```text
- build host                     Runner Control server              agent
+ build host                     Sextant server              agent
  ──────────                     ───────────────────────            ─────
  build wheel                    store blobs + manifests          heartbeat (version, caps)
  sign manifest + artifact  ──►  release registry             ◄─────
@@ -85,7 +85,7 @@ Pull model: the server never connects to an agent. The agent fetches only what t
 
 ### Artifact
 
-- Primary: a **wheel** of the `runner-control` distribution (`runner_control` + `runner_agent`). The agent is stdlib-only, so no dependency resolution is needed.
+- Primary: a **wheel** of the `sextant` distribution (`sextant_control` + `sextant_agent`). The agent is stdlib-only, so no dependency resolution is needed.
 - Hosting: artifacts live in the built-in [package store](PACKAGE_STORE.md), not PyPI. GitHub is the source/build/CI home; it is not the agent update channel. Agents pull through the authenticated store download endpoint.
 - Later: a Windows single-file `.exe` or MSI for hosts without Python. That is a packaging project; the update protocol below stays the same.
 
@@ -99,7 +99,7 @@ Pull model: the server never connects to an agent. The agent fetches only what t
   "platform": "any",
   "python_requires": ">=3.11",
   "artifact": {
-    "filename": "runner_control-0.3.0-py3-none-any.whl",
+    "filename": "sextant-0.3.0-py3-none-any.whl",
     "sha256": "…",
     "size": 123456
   },
@@ -188,12 +188,12 @@ The download endpoint serves only the artifact matching the agent’s platform a
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RC_UPDATE_ENABLED` | `0` | Master switch; off means no update directives |
-| `RC_UPDATE_CHANNEL` | `stable` | Default channel |
-| `RC_UPDATE_AUTO` | `0` | Global auto-update default; per-policy override |
-| `RC_UPDATE_ALLOWED_HOSTS` | server host | Optional external download host allowlist |
-| `RC_UPDATE_MAX_ARTIFACT_MB` | `50` | Upload/download cap |
-| `RC_UPDATE_RETENTION` | `3` | Releases kept per channel/platform |
+| `SEXTANT_UPDATE_ENABLED` | `0` | Master switch; off means no update directives |
+| `SEXTANT_UPDATE_CHANNEL` | `stable` | Default channel |
+| `SEXTANT_UPDATE_AUTO` | `0` | Global auto-update default; per-policy override |
+| `SEXTANT_UPDATE_ALLOWED_HOSTS` | server host | Optional external download host allowlist |
+| `SEXTANT_UPDATE_MAX_ARTIFACT_MB` | `50` | Upload/download cap |
+| `SEXTANT_UPDATE_RETENTION` | `3` | Releases kept per channel/platform |
 
 ---
 
@@ -213,8 +213,8 @@ The agent advertises `update_capable: 1` and its current version in the heartbea
 1. **Preflight** — free disk space ≥ 3× artifact size; writable release root; no active command; update lock acquired.
 2. **Download** — fetch manifest then artifact over the authenticated HTTPS channel; no redirects; cap size; write to a temp directory.
 3. **Verify** — SHA-256, size, platform, `min_version`, Python version, monotonic version. Reject on any mismatch. (Tier 1 would add a signature check here.)
-4. **Stage** — create `/opt/runner-agent/releases/<version>/` with a fresh venv and install the wheel `--no-deps`; keep the current release untouched.
-5. **Health check** — run the staged `runner-agent check --config …` (and a local import/`--help` check). Optionally send one reconciliation heartbeat from the staged interpreter.
+4. **Stage** — create `/opt/sextant-agent/releases/<version>/` with a fresh venv and install the wheel `--no-deps`; keep the current release untouched.
+5. **Health check** — run the staged `sextant-agent check --config …` (and a local import/`--help` check). Optionally send one reconciliation heartbeat from the staged interpreter.
 6. **Switch** — atomically repoint `current` (symlink on Linux; directory/task action on Windows).
 7. **Restart** — see OS notes below.
 8. **Report** — write a pending-result file before restart; on next start, post `succeeded`/`failed` with old/new versions and error. A stale “restarting” state is failed after a timeout.
@@ -222,12 +222,12 @@ The agent advertises `update_capable: 1` and its current version in the heartbea
 
 ### Linux (systemd)
 
-`ExecStart` points at `/opt/runner-agent/current/bin/runner-agent`. Updating:
+`ExecStart` points at `/opt/sextant-agent/current/bin/sextant-agent`. Updating:
 
 - `current` is a symlink to a versioned release directory;
 - the switch is a single `rename()`/symlink replacement (atomic);
 - restart from inside the service’s own cgroup is unsafe (restarting kills the updater). Use one of:
-  - a transient unit: `systemd-run --unit=runner-agent-update --collect /opt/runner-agent/current/bin/runner-agent-update-switch <version>`;
+  - a transient unit: `systemd-run --unit=sextant-agent-update --collect /opt/sextant-agent/current/bin/sextant-agent-update-switch <version>`;
   - or a small root helper script invoked outside the service cgroup;
   - or exit with a special code and let a `Restart=on-failure`/watchdog unit start the new version.
 - Keep the previous release directory; prune to the last N.
@@ -235,10 +235,10 @@ The agent advertises `update_capable: 1` and its current version in the heartbea
 
 ### Windows (scheduled task)
 
-- Release root: `C:\ProgramData\RunnerAgent\releases\<version>\`.
-- The scheduled task action points at `C:\ProgramData\RunnerAgent\current\Scripts\runner-agent.exe`; `current` is a directory junction/symlink (SYSTEM can create it) or the task action is updated to the new path.
+- Release root: `C:\ProgramData\SextantAgent\releases\<version>\`.
+- The scheduled task action points at `C:\ProgramData\SextantAgent\current\Scripts\sextant-agent.exe`; `current` is a directory junction/symlink (SYSTEM can create it) or the task action is updated to the new path.
 - A detached updater PowerShell process runs as SYSTEM:
-  1. stops `RunnerControlAgent`;
+  1. stops `SextantAgent`;
   2. installs the new wheel into the new release venv;
   3. health-checks;
   4. updates the junction or task action;
@@ -295,9 +295,9 @@ Updates never run while a command is executing, and the agent takes a file lock 
 The implemented CLI is:
 
 ```bash
-runner-agent update --config /etc/runner-agent/config.json          # check
-runner-agent update --config /etc/runner-agent/config.json --apply  # stage + switch
-runner-agent update --config /etc/runner-agent/config.json --apply --restart
+sextant-agent update --config /etc/sextant-agent/config.json          # check
+sextant-agent update --config /etc/sextant-agent/config.json --apply  # stage + switch
+sextant-agent update --config /etc/sextant-agent/config.json --apply --restart
 ```
 
 ---
@@ -346,7 +346,7 @@ The installer should:
 | Phase | Deliverable | Effort | Risk |
 |---|---|---|---|
 | U1 | Release registry, hash-pinned manifest format, upload/list/yank API, download endpoint; validation tests | M | low |
-| U2 | Agent staging/verification/health check; manual `runner-agent update` / `update --apply`; per-agent manual trigger | M | medium |
+| U2 | Agent staging/verification/health check; manual `sextant-agent update` / `update --apply`; per-agent manual trigger | M | medium |
 | U3 | Atomic switch + restart + result reporting on Linux and Windows; rollback helper; audit | M–L | high |
 | U4 | Policies (tag/percentage/window), auto-update, pause/yank, UI panels | M | medium |
 | U5 | Windows single-file/MSI packaging; canary automation; server self-update (separate); optional Tier 1 signing | L | high |
@@ -361,7 +361,7 @@ Start with U1–U3 on Linux; add Windows once the task/junction switch is proven
 2. Hosting: server-hosted artifacts through the built-in store only, or allow an external HTTPS mirror? (Store-hosted is the default; an external mirror is optional and still hash-verified.)
 3. Auto-update default: off (manual approve) vs on for `stable` with maintenance windows?
 4. Tier 1 signing: deferred. When revisited, choose minisign/Ed25519 vs a stdlib RSA verifier; the manifest fields are already reserved.
-5. Restart mechanism on Linux: transient `systemd-run` helper vs a dedicated `runner-agent-updater` unit.
+5. Restart mechanism on Linux: transient `systemd-run` helper vs a dedicated `sextant-agent-updater` unit.
 6. Windows layout: directory junction under `current` vs rewriting the scheduled-task action. Junction is simpler but needs testing.
 7. How long to retain old releases (disk vs rollback safety)?
 8. Should `mandatory` releases bypass maintenance windows? (Recommend: only with explicit admin action until approval exists.)

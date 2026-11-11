@@ -13,7 +13,7 @@ from .collectors import MetricsCollector
 from .config import AgentConfig
 from .executor import execute_command
 
-logger = logging.getLogger("runner_agent")
+logger = logging.getLogger("sextant_agent")
 
 OUTPUT_BATCH_SECONDS = 0.15
 OUTPUT_BATCH_CHARS = 16 * 1024
@@ -240,7 +240,7 @@ class AgentRunner:
             return
         self._update_notice = version
         logger.warning(
-            "Agent update %s is available (current %s). Run: runner-agent update --apply --restart",
+            "Agent update %s is available (current %s). Run: sextant-agent update --apply --restart",
             info.get("version"),
             info.get("current_version"),
         )

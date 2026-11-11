@@ -1,7 +1,7 @@
 # Server package store — plan
 
 **Status:** Tier 0 S1 implemented (backend + CLI); S2 partial (per-device store installs are not wired yet). No signatures.
-**Scope:** a self-hosted artifact and application store on the Runner Control server for packages that are **not** in apt, dnf, the Windows Store, winget, or Chocolatey — and for hosting **agent self-update** artifacts without publishing to PyPI.
+**Scope:** a self-hosted artifact and application store on the Sextant server for packages that are **not** in apt, dnf, the Windows Store, winget, or Chocolatey — and for hosting **agent self-update** artifacts without publishing to PyPI.
 
 Related: [Package management](PACKAGE_MANAGEMENT.md), [Self-update](SELF_UPDATE.md), [Architecture](ARCHITECTURE.md), [Security](SECURITY.md).
 
@@ -51,7 +51,7 @@ GitHub remains the source/build/CI home. The store is the **distribution point f
 
 | Artifact type | Examples | Install path |
 |---|---|---|
-| `agent-wheel` | `runner_control-0.3.0-py3-none-any.whl` | Self-update staging/switch |
+| `agent-wheel` | `sextant-0.3.0-py3-none-any.whl` | Self-update staging/switch |
 | `deb` | internal agent, VPN client, printer driver | `apt-get install ./file.deb` (resolves deps) |
 | `rpm` | internal tooling | `dnf install ./file.rpm` |
 | `msi` | vendor agent, internal app | `msiexec /i … /qn /norestart` |
@@ -68,7 +68,7 @@ It does **not** store secrets (agent tokens, private keys), user data, or OS ima
 ## 4. Architecture
 
 ```text
- build host / GitHub Actions                Runner Control server                 agent
+ build host / GitHub Actions                Sextant server                 agent
  ─────────────────────────                  ───────────────────────                ─────
  build artifact                             store_packages / store_releases       heartbeat: assignments
  write manifest                             blobs/sha256/ab/<hash>                desired state
@@ -123,7 +123,7 @@ Package assignment and installed-state tables are shared with the package-manage
 ## 6. Storage layout
 
 ```text
-$RC_DATA_DIR/store/
+$SEXTANT_DATA_DIR/store/
   blobs/
     sha256/
       ab/
@@ -135,8 +135,8 @@ $RC_DATA_DIR/store/
 - **Atomic writes:** upload to `tmp/`, fsync, verify hash, then `rename()` into `blobs/`.
 - **No user-controlled paths:** the filename is metadata; the blob path comes only from the hash.
 - **Permissions:** `0700` directory, `0600` files, owned by the service user.
-- **Quotas:** `RC_STORE_MAX_BLOB_MB` (default 512), `RC_STORE_MAX_TOTAL_GB` (default 20), per-package release count.
-- **GC:** unreferenced blobs older than `RC_STORE_GC_DAYS` (default 30) are deleted; assigned/in-use releases are never removed. A release must be yanked and unreferenced before its blob is collected.
+- **Quotas:** `SEXTANT_STORE_MAX_BLOB_MB` (default 512), `SEXTANT_STORE_MAX_TOTAL_GB` (default 20), per-package release count.
+- **GC:** unreferenced blobs older than `SEXTANT_STORE_GC_DAYS` (default 30) are deleted; assigned/in-use releases are never removed. A release must be yanked and unreferenced before its blob is collected.
 - **Backup:** SQLite + `store/blobs/` must be backed up together; blobs are immutable so `rsync --ignore-existing` works after the DB snapshot.
 
 Later option: an S3-compatible backend for larger installations. Keep the local filesystem for v1.
@@ -250,7 +250,7 @@ Prefer `apt-get install ./file.deb` / `dnf install ./file.rpm` over raw `dpkg -i
 1. Build the artifact (CI or release engineer).
 2. Upload it via the admin API or CLI; the **server** computes SHA-256 and size:
    ```bash
-   runner-control store-publish \
+   sextant store-publish \
      --slug acme-vpn \
      --version 4.2.1 \
      --file acme-vpn_4.2.1_amd64.deb \
@@ -267,7 +267,7 @@ Raw API upload uses `PUT /api/store/packages/{slug}/releases/{version}` with hea
 Yank:
 
 ```bash
-runner-control store yank --slug acme-vpn --version 4.2.1 --reason "CVE-2026-…"
+sextant store yank --slug acme-vpn --version 4.2.1 --reason "CVE-2026-…"
 ```
 
 Yanked releases are not offered or downloadable for new installs; already-installed copies are reported and can be replaced by an assigned newer/pinned release.

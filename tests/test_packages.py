@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from runner_agent import packages
-from runner_agent.config import AgentConfig
-from runner_agent.executor import execute_command
+from sextant_agent import packages
+from sextant_agent.config import AgentConfig
+from sextant_agent.executor import execute_command
 from tests.helpers import enroll_agent, heartbeat, headers, issue_token, sample_metrics
 
 
@@ -84,7 +84,7 @@ def test_package_actions_respect_policy(monkeypatch):
         calls.append((args, env))
         return {"status": "succeeded", "exit_code": 0, "stdout": "ok", "stderr": "", "error": ""}
 
-    monkeypatch.setattr("runner_agent.executor.run_capture", fake_run_capture)
+    monkeypatch.setattr("sextant_agent.executor.run_capture", fake_run_capture)
     allowed = packages.apply_actions(
         [{"manager": "apt", "action": "install", "package": "nginx"}],
         _agent(),

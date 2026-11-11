@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 SERVICE_UNIT = """[Unit]
-Description=Runner Control agent
+Description=Sextant agent
 After=network-online.target
 Wants=network-online.target
 
@@ -22,7 +22,7 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 NoNewPrivileges=true
 UMask=0077
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
-ExecStart=/opt/runner-agent/current/bin/runner-agent run --config /etc/runner-agent/config.json
+ExecStart=/opt/sextant-agent/current/bin/sextant-agent run --config /etc/sextant-agent/config.json
 Restart=on-failure
 RestartSec=10
 RestartPreventExitStatus=2
@@ -126,7 +126,7 @@ def _key_check(key_path: str) -> None:
     path = Path(key_path)
     if not path.is_file():
         raise RemoteInstallError(
-            f"SSH key not found at {key_path}. Place one at RC_SSH_KEY_PATH or the default data/ssh/install_key."
+            f"SSH key not found at {key_path}. Place one at SEXTANT_SSH_KEY_PATH or the default data/ssh/install_key."
         )
     if os.name != "nt":
         mode = path.stat().st_mode
@@ -186,8 +186,8 @@ def run_install(
     if not wheel.is_file():
         raise RemoteInstallError("Agent wheel is missing from the package store.")
 
-    remote_wheel = f"/tmp/runner-control-{wheel.name}"
-    remote_unit = "/tmp/runner-agent.service"
+    remote_wheel = f"/tmp/sextant-{wheel.name}"
+    remote_unit = "/tmp/sextant-agent.service"
     log(f"Checking prerequisites on {user}@{host}:{port}")
     log(test_connection(key_path=key_path, host=host, port=port, user=user, timeout=60))
 
@@ -196,7 +196,7 @@ def run_install(
     uploaded = _run([*scp, str(wheel), f"{user}@{host}:{remote_wheel}"], timeout=120)
     if uploaded.returncode != 0:
         raise RemoteInstallError((uploaded.stderr or uploaded.stdout)[-2000:])
-    unit_file = Path("/tmp") / f"runner-agent-unit-{os.getpid()}.service"
+    unit_file = Path("/tmp") / f"sextant-agent-unit-{os.getpid()}.service"
     unit_file.write_text(SERVICE_UNIT, encoding="utf-8")
     try:
         uploaded = _run([*scp, str(unit_file), f"{user}@{host}:{remote_unit}"], timeout=60)
@@ -206,10 +206,10 @@ def run_install(
         unit_file.unlink(missing_ok=True)
 
     enroll_args = [
-        "/opt/runner-agent/.venv/bin/runner-agent",
+        "/opt/sextant-agent/.venv/bin/sextant-agent",
         "enroll",
         "--config",
-        "/etc/runner-agent/config.json",
+        "/etc/sextant-agent/config.json",
         "--server",
         server_url,
         "--token",
@@ -226,19 +226,19 @@ def run_install(
     script = f"""set -euo pipefail
 WHEEL={shlex.quote(remote_wheel)}
 UNIT={shlex.quote(remote_unit)}
-sudo -n install -d -m 0755 /opt/runner-agent
-sudo -n install -d -m 0700 /etc/runner-agent
-if [ ! -x /opt/runner-agent/.venv/bin/python ]; then
-  sudo -n python3 -m venv /opt/runner-agent/.venv
+sudo -n install -d -m 0755 /opt/sextant-agent
+sudo -n install -d -m 0700 /etc/sextant-agent
+if [ ! -x /opt/sextant-agent/.venv/bin/python ]; then
+  sudo -n python3 -m venv /opt/sextant-agent/.venv
 fi
-sudo -n /opt/runner-agent/.venv/bin/pip install --no-deps --upgrade "$WHEEL"
-sudo -n ln -sfn .venv /opt/runner-agent/current
+sudo -n /opt/sextant-agent/.venv/bin/pip install --no-deps --upgrade "$WHEEL"
+sudo -n ln -sfn .venv /opt/sextant-agent/current
 {enroll_command}
-sudo -n chmod 0600 /etc/runner-agent/config.json
-sudo -n install -m 0644 "$UNIT" /etc/systemd/system/runner-agent.service
+sudo -n chmod 0600 /etc/sextant-agent/config.json
+sudo -n install -m 0644 "$UNIT" /etc/systemd/system/sextant-agent.service
 sudo -n systemctl daemon-reload
-sudo -n systemctl enable --now runner-agent
-sudo -n systemctl is-active runner-agent
+sudo -n systemctl enable --now sextant-agent
+sudo -n systemctl is-active sextant-agent
 rm -f "$WHEEL" "$UNIT"
 """
     log("Installing and enrolling the agent")

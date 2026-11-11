@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from runner_control.db import Database
+from sextant_control.db import Database
 
 
 OLD_SCHEMA = """

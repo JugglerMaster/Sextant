@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from runner_control.db import dumps
+from sextant_control.db import dumps
 from tests.helpers import enroll_agent, headers, login
 
 

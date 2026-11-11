@@ -3,6 +3,14 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   python:
@@ -22,8 +30,8 @@ jobs:
         run: python -m pytest
       - name: Static checks
         run: |
-          python -m compileall -q runner_control runner_agent
-          python -m pyflakes runner_control runner_agent tests
+          python -m compileall -q sextant_control sextant_agent
+          python -m pyflakes sextant_control sextant_agent tests
       - name: Dependency audit
         run: pip-audit
 
@@ -44,4 +52,20 @@ jobs:
       - run: npm test
       - name: Dashboard syntax
         working-directory: .
-        run: node --check runner_control/static/app.js
+        run: node --check sextant_control/static/app.js
+
+  browser:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui-tests/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:visual

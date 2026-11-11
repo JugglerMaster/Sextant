@@ -27,7 +27,7 @@ async function preparePage(page, { theme = "dark" } = {}) {
   await page.addInitScript(
     ({ selectedTheme, fixedNow }) => {
       try {
-        localStorage.setItem("rc.theme", selectedTheme);
+        localStorage.setItem("sextant.theme", selectedTheme);
       } catch (_error) {
         // The document may not have an origin yet.
       }

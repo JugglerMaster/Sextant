@@ -13,8 +13,8 @@ from . import __version__
 from .client import AgentClient
 from .config import AgentConfig
 
-DEFAULT_LINUX_INSTALL_DIR = Path("/opt/runner-agent")
-DEFAULT_WINDOWS_INSTALL_DIR = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "RunnerAgent"
+DEFAULT_LINUX_INSTALL_DIR = Path("/opt/sextant-agent")
+DEFAULT_WINDOWS_INSTALL_DIR = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "SextantAgent"
 
 
 def default_install_dir() -> Path:
@@ -68,7 +68,7 @@ def _stage_venv(version: str, wheel: Path, install_dir: Path) -> Path:
 
 
 def _health_check(venv_dir: Path, config_path: Path) -> bool:
-    exe = venv_dir / ("Scripts/runner-agent.exe" if os.name == "nt" else "bin/runner-agent")
+    exe = venv_dir / ("Scripts/sextant-agent.exe" if os.name == "nt" else "bin/sextant-agent")
     if not exe.exists():
         return False
     checked = _run([str(exe), "show", "--config", str(config_path)], timeout=60)
@@ -124,8 +124,8 @@ def apply_update(
     install_dir = Path(install_dir) if install_dir else default_install_dir()
     config_path = Path(config_path) if config_path else _config_path()
     client = AgentClient(config)
-    with tempfile.TemporaryDirectory(prefix="runner-agent-update-") as temp:
-        wheel = Path(temp) / str(info.get("filename") or f"runner_control-{version}-py3-none-any.whl")
+    with tempfile.TemporaryDirectory(prefix="sextant-agent-update-") as temp:
+        wheel = Path(temp) / str(info.get("filename") or f"sextant-{version}-py3-none-any.whl")
         client.download(download_url, wheel, max_bytes=max(1024 * 1024, size + 1024 * 1024))
         actual_size = wheel.stat().st_size
         actual_sha = _sha256(wheel)
@@ -148,7 +148,7 @@ def apply_update(
             "restart_required": True,
             "instructions": (
                 "The new version is staged under the install directory. "
-                "Update the RunnerControlAgent scheduled task to point at the new release and restart it. "
+                "Update the SextantAgent scheduled task to point at the new release and restart it. "
                 "Automatic Windows switching is not enabled yet."
             ),
         }
@@ -162,7 +162,7 @@ def apply_update(
         "restart_required": True,
     }
     if restart:
-        restarted = _run(["systemctl", "restart", "runner-agent"], timeout=60)
+        restarted = _run(["systemctl", "restart", "sextant-agent"], timeout=60)
         result["restart_required"] = restarted.returncode != 0
         if restarted.returncode != 0:
             result["restart_error"] = restarted.stderr[-500:]

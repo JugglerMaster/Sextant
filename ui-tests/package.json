@@ -1,8 +1,8 @@
 {
-  "name": "runner-control-ui-tests",
+  "name": "sextant-ui-tests",
   "private": true,
   "version": "0.1.0",
-  "description": "Browser accessibility/visual tests and a fast DOM smoke test for the Runner Control dashboard",
+  "description": "Browser accessibility/visual tests and a fast DOM smoke test for the Sextant dashboard",
   "scripts": {
     "test": "node ui-smoke.js",
     "test:visual": "playwright test",

@@ -86,7 +86,7 @@ from .views import (
 )
 from .wol import normalize_mac, send_magic_packet
 
-logger = logging.getLogger("runner_control")
+logger = logging.getLogger("sextant_control")
 
 SSE_HEARTBEAT_SECONDS = 15
 DASHBOARD_SAFETY_REFRESH_SECONDS = 10
@@ -298,7 +298,7 @@ def _ensure_bootstrap_admin(settings: Settings, db: Database) -> None:
         problem = validate_password(password)
         if problem:
             raise RuntimeError(
-                f"RC_ADMIN_PASSWORD is not acceptable: {problem} "
+                f"SEXTANT_ADMIN_PASSWORD is not acceptable: {problem} "
                 "Remove it to auto-generate a strong bootstrap password instead."
             )
     assert password is not None
@@ -313,7 +313,7 @@ def _ensure_bootstrap_admin(settings: Settings, db: Database) -> None:
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         file = settings.bootstrap_file
         file.write_text(
-            "Runner Control bootstrap administrator\n"
+            "Sextant bootstrap administrator\n"
             f"Username: {settings.admin_user}\n"
             f"Password: {password}\n\n"
             "Sign in and change this password immediately, then delete this file.\n",
@@ -325,7 +325,7 @@ def _ensure_bootstrap_admin(settings: Settings, db: Database) -> None:
             pass
         logger.warning("Created bootstrap admin at %s. Read the password from that file.", file)
     else:
-        logger.warning("Created administrator %r from RC_ADMIN_PASSWORD.", settings.admin_user)
+        logger.warning("Created administrator %r from SEXTANT_ADMIN_PASSWORD.", settings.admin_user)
 
 
 def _public_settings(settings: Settings) -> dict[str, Any]:
@@ -582,7 +582,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.prune_telemetry(settings.telemetry_retention_days)
 
     app = FastAPI(
-        title="Runner Control",
+        title="Sextant",
         version=__version__,
         docs_url=None,
         redoc_url=None,
@@ -2381,7 +2381,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database: Database = Depends(get_db),
         config: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
-        token = new_token("rc_enroll_")
+        token = new_token("sextant_enroll_")
         token_id = "enr_" + secrets.token_hex(8)
         now = utcnow()
         minutes = payload.expires_minutes if payload.expires_minutes is not None else config.enrollment_ttl_minutes
@@ -2414,7 +2414,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "token": token,
             "label": payload.label,
             "expires_at": expires.isoformat(timespec="seconds").replace("+00:00", "Z"),
-            "install_command": f"runner-agent enroll --server {base} --token {token}",
+            "install_command": f"sextant-agent enroll --server {base} --token {token}",
         }
 
     @app.get("/api/enrollment-tokens")
@@ -2606,7 +2606,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database: Database = Depends(get_db),
         config: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
-        token = new_token("rc_agent_")
+        token = new_token("sextant_agent_")
         with database.connection() as conn:
             row = conn.execute("SELECT id, name FROM agents WHERE id = ?", (agent_id,)).fetchone()
             if row is None:
@@ -2716,7 +2716,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 }
             )
             agent_id = existing["id"] if existing else "agt_" + secrets.token_hex(12)
-            agent_token = new_token("rc_agent_")
+            agent_token = new_token("sextant_agent_")
             update = conn.execute(
                 "UPDATE enrollment_tokens SET used_at = ?, used_by_agent = ? WHERE id = ? AND used_at IS NULL",
                 (utcnow_iso(), agent_id, row["id"]),
@@ -3856,7 +3856,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="Unknown agent profile.")
         release = _latest_agent_release(database)
         if release is None:
-            raise HTTPException(status_code=400, detail="Publish an agent-wheel release under 'runner-agent' first.")
+            raise HTTPException(status_code=400, detail="Publish an agent-wheel release under 'sextant-agent' first.")
         wheel_path = store.blob_path(release["sha256"])
         if not wheel_path.is_file():
             raise HTTPException(status_code=400, detail="The agent wheel blob is missing from the store.")
@@ -3949,7 +3949,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(
             output.getvalue(),
             media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="runner-control-agents.csv"'},
+            headers={"Content-Disposition": 'attachment; filename="sextant-agents.csv"'},
         )
 
     @app.get("/api/export/packages.csv")
@@ -3994,7 +3994,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(
             output.getvalue(),
             media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="runner-control-packages.csv"'},
+            headers={"Content-Disposition": 'attachment; filename="sextant-packages.csv"'},
         )
 
     @app.get("/api/export/commands.csv")
@@ -4060,7 +4060,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(
             output.getvalue(),
             media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="runner-control-commands.csv"'},
+            headers={"Content-Disposition": 'attachment; filename="sextant-commands.csv"'},
         )
 
     return app
@@ -4108,7 +4108,7 @@ def _normalize_saved_view_filters(filters: dict[str, Any]) -> dict[str, str]:
 
 
 def _latest_agent_release(database: Database) -> Any:
-    package = database.get_store_package("runner-agent")
+    package = database.get_store_package("sextant-agent")
     if package is None:
         return None
     releases = [
@@ -4170,7 +4170,7 @@ def _remote_job_dict(row: Any) -> dict[str, Any]:
 
 
 def _issue_remote_enrollment_token(database: Database, actor: str, label: str) -> str:
-    token = new_token("rc_enroll_")
+    token = new_token("sextant_enroll_")
     token_id = "enr_" + secrets.token_hex(8)
     now = utcnow()
     expires = now + timedelta(minutes=30)

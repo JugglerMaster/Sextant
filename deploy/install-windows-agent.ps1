@@ -1,17 +1,17 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-  Install and enroll a Runner Control agent on Windows.
+  Install and enroll a Sextant agent on Windows.
 
 .DESCRIPTION
   Creates a Python virtual environment under ProgramData, installs the
-  runner-control package, enrolls with a one-time token, locks down the config
+  sextant package, enrolls with a one-time token, locks down the config
   file, and registers a SYSTEM scheduled task at startup.
 
   Python 3.11+ must already be installed and available as `py -3` or `python`.
 
 .EXAMPLE
-  .\install-windows-agent.ps1 -Server https://ops.example.com -Token rc_enroll_... -Name "Studio PC"
+  .\install-windows-agent.ps1 -Server https://ops.example.com -Token sextant_enroll_... -Name "Studio PC"
 #>
 [CmdletBinding()]
 param(
@@ -19,7 +19,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Token,
     [string]$Name = $env:COMPUTERNAME,
     [string]$SourcePath = (Split-Path -Parent $PSScriptRoot),
-    [string]$InstallDir = (Join-Path $env:ProgramData 'RunnerAgent'),
+    [string]$InstallDir = (Join-Path $env:ProgramData 'SextantAgent'),
     [string[]]$WatchServices = @(),
     [string]$CaFile = "",
     [string]$Profile = "workstation",
@@ -53,12 +53,12 @@ if ($Server.StartsWith('http://')) {
     Write-Warning "This agent will use plain HTTP. Use HTTPS for any non-lab network."
 }
 if (-not (Test-Path (Join-Path $SourcePath 'pyproject.toml'))) {
-    throw "SourcePath must point at the runner-control source tree or a built wheel. Current: $SourcePath"
+    throw "SourcePath must point at the sextant source tree or a built wheel. Current: $SourcePath"
 }
 
 $venvDir = Join-Path $InstallDir 'venv'
 $venvPython = Join-Path $venvDir 'Scripts\python.exe'
-$agentExe = Join-Path $venvDir 'Scripts\runner-agent.exe'
+$agentExe = Join-Path $venvDir 'Scripts\sextant-agent.exe'
 $configPath = Join-Path $InstallDir 'config.json'
 $logPath = Join-Path $InstallDir 'agent.log'
 
@@ -74,7 +74,7 @@ if (-not (Test-Path $venvPython)) {
     if ($LASTEXITCODE -ne 0) { throw "Failed to create the Python virtual environment." }
 }
 
-Write-Host "Installing runner-control from $SourcePath"
+Write-Host "Installing sextant from $SourcePath"
 & (Join-Path $venvDir 'Scripts\pip.exe') install --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed." }
 & (Join-Path $venvDir 'Scripts\pip.exe') install --no-deps --upgrade $SourcePath
@@ -132,18 +132,18 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit ([TimeSpan]::Zero)
 
 Register-ScheduledTask `
-    -TaskName 'RunnerControlAgent' `
+    -TaskName 'SextantAgent' `
     -Action $action `
     -Trigger $trigger `
     -Principal $principal `
     -Settings $settings `
-    -Description 'Runner Control agent: heartbeat, telemetry, and audited remote operations' `
+    -Description 'Sextant agent: heartbeat, telemetry, and audited remote operations' `
     -Force | Out-Null
-Start-ScheduledTask -TaskName 'RunnerControlAgent'
+Start-ScheduledTask -TaskName 'SextantAgent'
 
 Write-Host ""
 Write-Host "Agent enrolled and started." -ForegroundColor Green
 Write-Host "  Config: $configPath"
 Write-Host "  Log:    $logPath"
-Write-Host "  Task:   RunnerControlAgent"
-Write-Host "Check status with: Get-ScheduledTask RunnerControlAgent"
+Write-Host "  Task:   SextantAgent"
+Write-Host "Check status with: Get-ScheduledTask SextantAgent"

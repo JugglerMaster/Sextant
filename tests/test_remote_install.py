@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from runner_control import remote_install
-from runner_control.server import create_app
+from sextant_control import remote_install
+from sextant_control.server import create_app
 from tests.helpers import headers, login
 
 
@@ -50,7 +50,7 @@ def test_ssh_disables_host_key_checking(monkeypatch, tmp_path):
 
 
 def test_install_script_contains_expected_steps_and_redacts_token(monkeypatch, tmp_path):
-    wheel = tmp_path / "runner_control-1.0-py3-none-any.whl"
+    wheel = tmp_path / "sextant-1.0-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
     calls = []
     logs = []
@@ -66,7 +66,7 @@ def test_install_script_contains_expected_steps_and_redacts_token(monkeypatch, t
         port=22,
         user="root",
         server_url="https://ops.example.com",
-        token="rc_enroll_secret_token",
+        token="sextant_enroll_secret_token",
         name="box-01",
         profile="server",
         watch_services=["ssh", "nginx"],
@@ -74,12 +74,12 @@ def test_install_script_contains_expected_steps_and_redacts_token(monkeypatch, t
         log=logs.append,
     )
     install_script = calls[-1][1]
-    assert "systemctl enable --now runner-agent" in install_script
+    assert "systemctl enable --now sextant-agent" in install_script
     assert "--token" in install_script
     assert "--profile server" in install_script
     assert "sudo -n" in install_script
-    assert "rc_enroll_secret_token" in install_script
-    assert all("rc_enroll_secret_token" not in line for line in logs)
+    assert "sextant_enroll_secret_token" in install_script
+    assert all("sextant_enroll_secret_token" not in line for line in logs)
 
 
 def test_remote_install_rejects_bad_target(tmp_path):
@@ -90,16 +90,16 @@ def test_remote_install_rejects_bad_target(tmp_path):
 def _publish_agent_wheel(client, admin):
     client.post(
         "/api/store/packages",
-        json={"slug": "runner-agent", "name": "Runner Agent", "kind": "agent"},
+        json={"slug": "sextant-agent", "name": "Sextant Agent", "kind": "agent"},
         headers=headers(admin),
     )
     response = client.put(
-        "/api/store/packages/runner-agent/releases/1.0.0",
+        "/api/store/packages/sextant-agent/releases/1.0.0",
         content=b"remote-wheel",
         headers={
             **headers(admin),
             "X-Artifact-Type": "agent-wheel",
-            "X-Filename": "runner_control-1.0.0-py3-none-any.whl",
+            "X-Filename": "sextant-1.0.0-py3-none-any.whl",
         },
     )
     assert response.status_code == 200, response.text

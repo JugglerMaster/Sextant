@@ -151,7 +151,7 @@ See §12 for the directory options and why plain “SMB groups” are not a dire
 `package_events`
 `at`, `agent_id`, `manager`, `package`, `action`, `from_version`, `to_version`, `status`, `detail`, `actor`.
 
-Retention follows the command/audit policy (`RC_COMMAND_RETENTION_DAYS`, `RC_AUDIT_RETENTION_DAYS`).
+Retention follows the command/audit policy (`SEXTANT_COMMAND_RETENTION_DAYS`, `SEXTANT_AUDIT_RETENTION_DAYS`).
 
 ---
 
@@ -211,12 +211,12 @@ Validation is server-side and agent-side. The agent checks `allow_packages` befo
 
 ## 8. Agent implementation
 
-New module: `runner_agent/packages.py` (stdlib only).
+New module: `sextant_agent/packages.py` (stdlib only).
 
 - **Manager detection:** `shutil.which("apt-get")`, `dnf`, `pacman`, `snap`, `flatpak`, `winget`, `choco`.
 - **Inventory adapters** per manager, bounded to a configurable number of packages (for example 2,000) and cached; send a hash plus only changed/new rows if the payload would be large.
 - **Action adapters** with argv lists, timeouts, bounded output, and structured results.
-- **Locking:** `/run/runner-agent-packages.lock` (Linux) / a named mutex or lock file (Windows).
+- **Locking:** `/run/sextant-agent-packages.lock` (Linux) / a named mutex or lock file (Windows).
 - **Environment:** `DEBIAN_FRONTEND=noninteractive`, `APT_LISTCHANGES_FRONTEND=none`, `NEEDRESTART_MODE=a` only if explicitly enabled.
 - **Reboot detection:** `/var/run/reboot-required`, `needrestart -b`, or Windows pending-reboot registry keys. Report `reboot_required`; do not reboot automatically unless policy allows it.
 - **Local flags:** `allow_packages` (default `true`, set `false` or `--no-packages` to deny), `package_managers` (allowlist), `package_max_actions` (default 25). Profiles/policy cannot widen a local denial.

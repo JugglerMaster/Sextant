@@ -1,12 +1,12 @@
-// Deterministic static server for the real Runner Control dashboard files.
+// Deterministic static server for the real Sextant dashboard files.
 // The browser tests intercept /api/** themselves, so this only serves the
-// production index.html, app.css, and app.js from runner_control/static.
+// production index.html, app.css, and app.js from sextant_control/static.
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
 const root = path.resolve(__dirname, "..", "..");
-const staticRoot = path.join(root, "runner_control", "static");
+const staticRoot = path.join(root, "sextant_control", "static");
 const host = process.env.UI_HOST || "127.0.0.1";
 const port = Number(process.env.UI_PORT || 4173);
 

@@ -26,101 +26,101 @@ Plan for:
 ## 2. Create the service account and directories
 
 ```bash
-sudo useradd --system --home /opt/runner-control --shell /usr/sbin/nologin runner-control
-sudo install -d -o root -g runner-control -m 0755 /opt/runner-control
-sudo install -d -o runner-control -g runner-control -m 0700 /var/lib/runner-control
+sudo useradd --system --home /opt/sextant --shell /usr/sbin/nologin sextant
+sudo install -d -o root -g sextant -m 0755 /opt/sextant
+sudo install -d -o sextant -g sextant -m 0700 /var/lib/sextant
 ```
 
 The service does **not** run as root. WoL, SQLite, and LDAP do not require root. Only the endpoint agents need elevated privileges for shutdown/service management.
 
 ## 3. Install the application
 
-Copy the source tree to `/opt/runner-control` (or clone it), then:
+Copy the source tree to `/opt/sextant` (or clone it), then:
 
 ```bash
-sudo rsync -a --delete --exclude .venv --exclude data ./ /opt/runner-control/
-sudo python3 -m venv /opt/runner-control/.venv
-sudo /opt/runner-control/.venv/bin/pip install --upgrade pip
-sudo /opt/runner-control/.venv/bin/pip install --require-hashes -r /opt/runner-control/requirements.lock
-sudo /opt/runner-control/.venv/bin/pip install --no-deps /opt/runner-control
-sudo chown -R root:runner-control /opt/runner-control
+sudo rsync -a --delete --exclude .venv --exclude data ./ /opt/sextant/
+sudo python3 -m venv /opt/sextant/.venv
+sudo /opt/sextant/.venv/bin/pip install --upgrade pip
+sudo /opt/sextant/.venv/bin/pip install --require-hashes -r /opt/sextant/requirements.lock
+sudo /opt/sextant/.venv/bin/pip install --no-deps /opt/sextant
+sudo chown -R root:sextant /opt/sextant
 ```
 
 Check the console script:
 
 ```bash
-sudo -u runner-control /opt/runner-control/.venv/bin/runner-control --help
+sudo -u sextant /opt/sextant/.venv/bin/sextant --help
 ```
 
 ## 4. Configure environment
 
 ```bash
-sudo install -m 0640 -o root -g runner-control \
-  /opt/runner-control/deploy/runner-control.env.example \
-  /etc/runner-control.env
-sudoedit /etc/runner-control.env
+sudo install -m 0640 -o root -g sextant \
+  /opt/sextant/deploy/sextant.env.example \
+  /etc/sextant.env
+sudoedit /etc/sextant.env
 ```
 
 At minimum set:
 
 ```dotenv
-RC_DATA_DIR=/var/lib/runner-control
-RC_PUBLIC_URL=https://ops.example.com
-RC_ALLOWED_HOSTS=ops.example.com,127.0.0.1,localhost
-RC_COOKIE_SECURE=1
-RC_TRUST_PROXY=1
+SEXTANT_DATA_DIR=/var/lib/sextant
+SEXTANT_PUBLIC_URL=https://ops.example.com
+SEXTANT_ALLOWED_HOSTS=ops.example.com,127.0.0.1,localhost
+SEXTANT_COOKIE_SECURE=1
+SEXTANT_TRUST_PROXY=1
 
 # Recommended command safety posture:
-RC_OFFLINE_COMMAND_POLICY=reject
-RC_MAX_QUEUED_COMMANDS_PER_AGENT=50
-RC_QUEUED_COMMAND_TTL_HOURS=24
-RC_DISPATCHED_GRACE_SECONDS=120
-RC_SESSION_CLEANUP_DAYS=7
-RC_COMMAND_RETENTION_DAYS=90
-RC_AUDIT_RETENTION_DAYS=365
+SEXTANT_OFFLINE_COMMAND_POLICY=reject
+SEXTANT_MAX_QUEUED_COMMANDS_PER_AGENT=50
+SEXTANT_QUEUED_COMMAND_TTL_HOURS=24
+SEXTANT_DISPATCHED_GRACE_SECONDS=120
+SEXTANT_SESSION_CLEANUP_DAYS=7
+SEXTANT_COMMAND_RETENTION_DAYS=90
+SEXTANT_AUDIT_RETENTION_DAYS=365
 
 # Package store (Tier 0: SHA-256 integrity, no signatures).
-RC_STORE_ENABLED=1
-RC_STORE_MAX_BLOB_MB=512
-RC_STORE_MAX_TOTAL_GB=20
+SEXTANT_STORE_ENABLED=1
+SEXTANT_STORE_MAX_BLOB_MB=512
+SEXTANT_STORE_MAX_TOTAL_GB=20
 
 # Remote install over SSH (Linux only, key-based, one job at a time).
-# RC_SSH_INSTALL_ENABLED=1
-# RC_SSH_KEY_PATH=/var/lib/runner-control/ssh/install_key
+# SEXTANT_SSH_INSTALL_ENABLED=1
+# SEXTANT_SSH_KEY_PATH=/var/lib/sextant/ssh/install_key
 
 # Server update check (notify-only). github:owner/repo or an HTTPS JSON URL.
-# RC_UPDATE_FEED=github:owner/repo
-# RC_UPDATE_CHECK_HOURS=6
+# SEXTANT_UPDATE_FEED=github:owner/repo
+# SEXTANT_UPDATE_CHECK_HOURS=6
 ```
 
-The package store lives in `RC_DATA_DIR/store`. Back it up with the database. The update check only reads release metadata; it does not apply server updates automatically.
+The package store lives in `SEXTANT_DATA_DIR/store`. Back it up with the database. The update check only reads release metadata; it does not apply server updates automatically.
 
-`RC_OFFLINE_COMMAND_POLICY=queue` is the default. Use `reject` if you do not want an operator to accidentally schedule a shutdown or shell command for a machine that is currently offline.
+`SEXTANT_OFFLINE_COMMAND_POLICY=queue` is the default. Use `reject` if you do not want an operator to accidentally schedule a shutdown or shell command for a machine that is currently offline.
 
 Notes:
 
-- If `RC_ADMIN_PASSWORD` is unset and the database is empty, the first start creates a random administrator password in `/var/lib/runner-control/bootstrap-admin.txt` (mode 0600). Sign in, change it, and delete the file.
-- If you prefer to seed the password, set `RC_ADMIN_PASSWORD` before first start and remove it afterward. The value must satisfy the password policy (at least 12 characters, not a common/repeated/sequential password); startup refuses a weak value. Environment files are readable by root and the service group.
-- `RC_SECRET_KEY`, when set, must be at least 32 bytes of high-entropy data. Otherwise the server generates `secret.key` on first start.
-- `RC_ALLOWED_HOSTS` is a comma-separated allowlist for the `Host` header. It is derived from `RC_PUBLIC_URL` when unset; set it explicitly if the console is reached by several names or IPs. Include `127.0.0.1,localhost` if you use local health checks.
-- Do not set `RC_COOKIE_SECURE=0` on a real HTTPS deployment. The browser will not send the cookie over plain HTTP; that is intentional.
-- `RC_TRUST_PROXY=1` is required for correct client IPs/rate limiting behind nginx, and only safe when nginx overwrites `X-Forwarded-For` with `$remote_addr`.
+- If `SEXTANT_ADMIN_PASSWORD` is unset and the database is empty, the first start creates a random administrator password in `/var/lib/sextant/bootstrap-admin.txt` (mode 0600). Sign in, change it, and delete the file.
+- If you prefer to seed the password, set `SEXTANT_ADMIN_PASSWORD` before first start and remove it afterward. The value must satisfy the password policy (at least 12 characters, not a common/repeated/sequential password); startup refuses a weak value. Environment files are readable by root and the service group.
+- `SEXTANT_SECRET_KEY`, when set, must be at least 32 bytes of high-entropy data. Otherwise the server generates `secret.key` on first start.
+- `SEXTANT_ALLOWED_HOSTS` is a comma-separated allowlist for the `Host` header. It is derived from `SEXTANT_PUBLIC_URL` when unset; set it explicitly if the console is reached by several names or IPs. Include `127.0.0.1,localhost` if you use local health checks.
+- Do not set `SEXTANT_COOKIE_SECURE=0` on a real HTTPS deployment. The browser will not send the cookie over plain HTTP; that is intentional.
+- `SEXTANT_TRUST_PROXY=1` is required for correct client IPs/rate limiting behind nginx, and only safe when nginx overwrites `X-Forwarded-For` with `$remote_addr`.
 
 Optional directory settings are documented in [AD_LDAP.md](AD_LDAP.md).
 
 ## 5. Install the systemd unit
 
 ```bash
-sudo install -m 0644 /opt/runner-control/deploy/runner-control.service /etc/systemd/system/runner-control.service
+sudo install -m 0644 /opt/sextant/deploy/sextant.service /etc/systemd/system/sextant.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now runner-control
-sudo systemctl status runner-control --no-pager
+sudo systemctl enable --now sextant
+sudo systemctl status sextant --no-pager
 ```
 
 If the generated bootstrap password was used:
 
 ```bash
-sudo cat /var/lib/runner-control/bootstrap-admin.txt
+sudo cat /var/lib/sextant/bootstrap-admin.txt
 ```
 
 Then sign in at `https://ops.example.com` (after step 6), change the password, and delete the file.
@@ -134,8 +134,8 @@ curl -fsS http://127.0.0.1:8080/api/health
 ## 6. Put TLS in front with nginx
 
 ```bash
-sudo cp /opt/runner-control/deploy/nginx.conf /etc/nginx/sites-available/runner-control
-sudo ln -s /etc/nginx/sites-available/runner-control /etc/nginx/sites-enabled/runner-control
+sudo cp /opt/sextant/deploy/nginx.conf /etc/nginx/sites-available/sextant
+sudo ln -s /etc/nginx/sites-available/sextant /etc/nginx/sites-enabled/sextant
 sudo nginx -t
 sudo systemctl reload nginx
 ```
@@ -147,22 +147,22 @@ Edit `server_name`, certificate paths, and the upstream if needed. Obtain a cert
 - overwrites `X-Forwarded-For` with `$remote_addr` and sets `X-Forwarded-Proto`;
 - rate-limits `/api/auth/login`.
 
-The sample allows large uploads (`client_max_body_size 512m`) for the package store. The application still enforces its own per-file and total limits, and non-store API bodies remain capped by `RC_MAX_BODY_BYTES`.
+The sample allows large uploads (`client_max_body_size 512m`) for the package store. The application still enforces its own per-file and total limits, and non-store API bodies remain capped by `SEXTANT_MAX_BODY_BYTES`.
 
-The app also sets CSP, frame denial, MIME sniffing protection, referrer policy, and HSTS (when `RC_COOKIE_SECURE=1`).
+The app also sets CSP, frame denial, MIME sniffing protection, referrer policy, and HSTS (when `SEXTANT_COOKIE_SECURE=1`).
 
 ### Direct TLS alternative
 
 You can skip nginx and give uvicorn a certificate:
 
 ```bash
-/opt/runner-control/.venv/bin/runner-control serve \
+/opt/sextant/.venv/bin/sextant serve \
   --host 0.0.0.0 --port 8443 \
   --ssl-keyfile /etc/ssl/private/ops.key \
   --ssl-certfile /etc/ssl/certs/ops.crt
 ```
 
-Set `RC_COOKIE_SECURE=1` and update the systemd unit. nginx is still recommended for certificate renewal, access logging, and request limits.
+Set `SEXTANT_COOKIE_SECURE=1` and update the systemd unit. nginx is still recommended for certificate renewal, access logging, and request limits.
 
 ## 7. Firewall
 
@@ -190,10 +190,10 @@ Do not allow 8080 from untrusted networks.
 Use the CLI as the service account so the SQLite file stays writable by the service:
 
 ```bash
-sudo -u runner-control \
-  RC_DATA_DIR=/var/lib/runner-control \
-  RC_PUBLIC_URL=https://ops.example.com \
-  /opt/runner-control/.venv/bin/runner-control issue-enrollment \
+sudo -u sextant \
+  SEXTANT_DATA_DIR=/var/lib/sextant \
+  SEXTANT_PUBLIC_URL=https://ops.example.com \
+  /opt/sextant/.venv/bin/sextant issue-enrollment \
   --label "first Linux box" --minutes 30
 ```
 
@@ -213,8 +213,8 @@ Automated (run in a development checkout; the production venv intentionally omit
 ```bash
 cd /path/to/ccdadisman
 .venv/bin/pytest -q
-.venv/bin/python -m compileall -q runner_control runner_agent
-node --check runner_control/static/app.js
+.venv/bin/python -m compileall -q sextant_control sextant_agent
+node --check sextant_control/static/app.js
 cd ui-tests && npm ci && npm test
 ```
 
@@ -243,7 +243,7 @@ curl -fsS -b /tmp/rc.cookies \
 # 4. Poll commands/agent detail or use the dashboard Remote tab for the result.
 ```
 
-A healthy agent heartbeat appears as online within `RC_OFFLINE_AFTER_SECONDS` (default 90) and should show disk/service telemetry.
+A healthy agent heartbeat appears as online within `SEXTANT_OFFLINE_AFTER_SECONDS` (default 90) and should show disk/service telemetry.
 
 ## Backups
 
@@ -252,15 +252,15 @@ The database contains command output, agent identities, users, sessions, and aud
 Online backup:
 
 ```bash
-sudo install -d -o runner-control -g runner-control -m 0700 /var/backups/runner-control
-sudo -u runner-control sqlite3 /var/lib/runner-control/runner-control.sqlite3 \
-  ".backup '/var/backups/runner-control/runner-control-$(date +%F).sqlite3'"
+sudo install -d -o sextant -g sextant -m 0700 /var/backups/sextant
+sudo -u sextant sqlite3 /var/lib/sextant/sextant.sqlite3 \
+  ".backup '/var/backups/sextant/sextant-$(date +%F).sqlite3'"
 ```
 
 Also back up:
 
-- `/var/lib/runner-control/secret.key` (or `RC_SECRET_KEY`) — losing it invalidates all sessions;
-- `/etc/runner-control.env`;
+- `/var/lib/sextant/secret.key` (or `SEXTANT_SECRET_KEY`) — losing it invalidates all sessions;
+- `/etc/sextant.env`;
 - nginx TLS material (standard backup).
 
 The database is written in WAL mode. A plain `cp` while running can be inconsistent; use `.backup` or stop the service first.
@@ -268,13 +268,13 @@ The database is written in WAL mode. A plain `cp` while running can be inconsist
 ## Upgrade
 
 ```bash
-sudo systemctl stop runner-control
-sudo -u runner-control sqlite3 /var/lib/runner-control/runner-control.sqlite3 \
-  ".backup '/var/backups/runner-control/pre-upgrade.sqlite3'"
-# update /opt/runner-control source
-sudo /opt/runner-control/.venv/bin/pip install --require-hashes -r /opt/runner-control/requirements.lock
-sudo /opt/runner-control/.venv/bin/pip install --no-deps --upgrade /opt/runner-control
-sudo systemctl start runner-control
+sudo systemctl stop sextant
+sudo -u sextant sqlite3 /var/lib/sextant/sextant.sqlite3 \
+  ".backup '/var/backups/sextant/pre-upgrade.sqlite3'"
+# update /opt/sextant source
+sudo /opt/sextant/.venv/bin/pip install --require-hashes -r /opt/sextant/requirements.lock
+sudo /opt/sextant/.venv/bin/pip install --no-deps --upgrade /opt/sextant
+sudo systemctl start sextant
 curl -fsS http://127.0.0.1:8080/api/health
 ```
 
@@ -285,10 +285,10 @@ Upgrading from v0.1 to v0.2 introduces the server-side session registry. Existin
 ## Uninstall
 
 ```bash
-sudo systemctl disable --now runner-control
-sudo rm /etc/systemd/system/runner-control.service
+sudo systemctl disable --now sextant
+sudo rm /etc/systemd/system/sextant.service
 sudo systemctl daemon-reload
-# Keep /var/lib/runner-control if you may need the audit log or command history.
+# Keep /var/lib/sextant if you may need the audit log or command history.
 ```
 
 Remove the nginx site and TLS certificate separately.
@@ -297,10 +297,10 @@ Remove the nginx site and TLS certificate separately.
 
 | Symptom | Check |
 | --- | --- |
-| 502 from nginx | `systemctl status runner-control`; app bound to `127.0.0.1:8080` |
-| Session immediately expires | `RC_COOKIE_SECURE=1` while browsing over HTTP, or proxy not setting `X-Forwarded-Proto` |
-| Client IP is `127.0.0.1` | Set `RC_TRUST_PROXY=1` and make nginx overwrite `X-Forwarded-For` with `$remote_addr` |
-| Login says directory unavailable | LDAPS reachability, CA file, bind DN/password; `journalctl -u runner-control` |
+| 502 from nginx | `systemctl status sextant`; app bound to `127.0.0.1:8080` |
+| Session immediately expires | `SEXTANT_COOKIE_SECURE=1` while browsing over HTTP, or proxy not setting `X-Forwarded-Proto` |
+| Client IP is `127.0.0.1` | Set `SEXTANT_TRUST_PROXY=1` and make nginx overwrite `X-Forwarded-For` with `$remote_addr` |
+| Login says directory unavailable | LDAPS reachability, CA file, bind DN/password; `journalctl -u sextant` |
 | Agent 401 | Token rotated/deleted, agent re-enrolled elsewhere, wrong config path, wrong server URL |
 | User cannot sign in | Account disabled, session revoked, or directory password changed; check the audit log and Users page |
 | Command stays queued | Offline policy is `queue` and agent has not heartbeated; check queue cap and TTL |
@@ -312,8 +312,8 @@ Remove the nginx site and TLS certificate separately.
 Logs:
 
 ```bash
-sudo journalctl -u runner-control -f
-sudo journalctl -u runner-agent -f
+sudo journalctl -u sextant -f
+sudo journalctl -u sextant-agent -f
 ```
 
 ## Validation status

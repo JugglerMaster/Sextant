@@ -8,7 +8,7 @@ import time
 
 from fastapi.testclient import TestClient
 
-import runner_control.server as server_module
+import sextant_control.server as server_module
 from tests.helpers import enroll_agent, headers, heartbeat, login
 
 
@@ -33,7 +33,7 @@ def _read_dashboard_events(app, cookie: str, events: queue.Queue, count: int) ->
     """Read ``count`` events from a fresh client in a background thread."""
     try:
         with TestClient(app) as stream_client:
-            stream_client.cookies.set("rc_session", cookie)
+            stream_client.cookies.set("sextant_session", cookie)
             with stream_client.stream("GET", "/api/events") as response:
                 lines = response.iter_lines()
                 for _ in range(count):
@@ -45,7 +45,7 @@ def _read_dashboard_events(app, cookie: str, events: queue.Queue, count: int) ->
 def _read_dashboard_until_closed(app, cookie: str, events: queue.Queue) -> None:
     try:
         with TestClient(app) as stream_client:
-            stream_client.cookies.set("rc_session", cookie)
+            stream_client.cookies.set("sextant_session", cookie)
             with stream_client.stream("GET", "/api/events") as response:
                 lines = response.iter_lines()
                 while True:
@@ -86,7 +86,7 @@ def test_dashboard_sse_emits_dashboard_payload(client, admin):
 
 def test_dashboard_sse_emits_after_heartbeat_without_waiting_for_interval(app, client, admin):
     agent = enroll_agent(admin)
-    cookie = client.cookies.get("rc_session")
+    cookie = client.cookies.get("sextant_session")
     events: queue.Queue = queue.Queue()
     reader = threading.Thread(target=_read_dashboard_events, args=(app, cookie, events, 2), daemon=True)
     reader.start()
@@ -112,7 +112,7 @@ def test_dashboard_sse_emits_after_heartbeat_without_waiting_for_interval(app, c
 
 def test_dashboard_sse_does_not_repeat_unchanged_revision(app, client, admin):
     enroll_agent(admin)
-    cookie = client.cookies.get("rc_session")
+    cookie = client.cookies.get("sextant_session")
     events: queue.Queue = queue.Queue()
     reader = threading.Thread(target=_read_dashboard_events, args=(app, cookie, events, 2), daemon=True)
     reader.start()
@@ -163,7 +163,7 @@ def test_dashboard_cache_builds_once_per_revision(app):
 
 def test_dashboard_stream_closes_when_session_revoked(app, client, admin, monkeypatch):
     monkeypatch.setattr(server_module, "DASHBOARD_AUTH_RECHECK_SECONDS", 0.2)
-    cookie = client.cookies.get("rc_session")
+    cookie = client.cookies.get("sextant_session")
     events: queue.Queue = queue.Queue()
     reader = threading.Thread(target=_read_dashboard_until_closed, args=(app, cookie, events), daemon=True)
     reader.start()
@@ -183,7 +183,7 @@ def test_dashboard_stream_closes_when_session_revoked(app, client, admin, monkey
 
 def test_dashboard_stream_closes_when_session_expires(app, client, admin, monkeypatch):
     monkeypatch.setattr(server_module, "DASHBOARD_AUTH_RECHECK_SECONDS", 0.2)
-    cookie = client.cookies.get("rc_session")
+    cookie = client.cookies.get("sextant_session")
     events: queue.Queue = queue.Queue()
     reader = threading.Thread(target=_read_dashboard_until_closed, args=(app, cookie, events), daemon=True)
     reader.start()

@@ -1,6 +1,6 @@
 # Active Directory and Samba AD
 
-Runner Control can authenticate users against Active Directory, Samba AD, or another LDAP v3 directory. Authorization is mapped from direct group membership to `admin`, `operator`, or `viewer`.
+Sextant can authenticate users against Active Directory, Samba AD, or another LDAP v3 directory. Authorization is mapped from direct group membership to `admin`, `operator`, or `viewer`.
 
 Local accounts remain available. This is deliberate: if the directory is unavailable, a break-glass local admin can still sign in.
 
@@ -16,21 +16,21 @@ The base `requirements.lock` intentionally omits `ldap3` (LGPL-3.0, optional) so
 
 ## How login works
 
-1. The app binds to LDAP with the service account (`RC_LDAP_BIND_DN` / `RC_LDAP_BIND_PASSWORD`).
-2. It searches under `RC_LDAP_BASE_DN` using `RC_LDAP_USER_FILTER`, default `(sAMAccountName={username})`.
+1. The app binds to LDAP with the service account (`SEXTANT_LDAP_BIND_DN` / `SEXTANT_LDAP_BIND_PASSWORD`).
+2. It searches under `SEXTANT_LDAP_BASE_DN` using `SEXTANT_LDAP_USER_FILTER`, default `(sAMAccountName={username})`.
 3. Exactly one entry must match.
 4. It binds as that user's DN with the supplied password.
 5. It maps `memberOf` DNs to a role:
    - any admin group → `admin`
    - else any operator group → `operator`
    - else any viewer group → `viewer`
-   - else `RC_LDAP_DEFAULT_ROLE` (default `viewer`)
+   - else `SEXTANT_LDAP_DEFAULT_ROLE` (default `viewer`)
 6. The user is created/updated in SQLite with `source=ad`.
 
 The username in the login box is the value matched by the filter. With the default filter, use the `sAMAccountName` (for example `jdoe`), not `JDOE@corp.example.com`. Change the filter if you want UPN login:
 
 ```dotenv
-RC_LDAP_USER_FILTER=(userPrincipalName={username})
+SEXTANT_LDAP_USER_FILTER=(userPrincipalName={username})
 ```
 
 ## Samba AD example
@@ -50,8 +50,8 @@ samba-tool group add "RC Admins"
 samba-tool group add "RC Operators"
 samba-tool group add "RC Viewers"
 
-samba-tool user create svc-runner-control 'use-a-password-manager'
-samba-tool user setexpiry svc-runner-control --noexpiry
+samba-tool user create svc-sextant 'use-a-password-manager'
+samba-tool user setexpiry svc-sextant --noexpiry
 # The service account only needs to read directory user attributes.
 ```
 
@@ -71,43 +71,43 @@ CN=RC Operators,OU=Groups,DC=corp,DC=example,DC=com
 CN=RC Viewers,OU=Groups,DC=corp,DC=example,DC=com
 ```
 
-If you override `RC_LDAP_USER_FILTER`, keep the `{username}` placeholder exactly once.
+If you override `SEXTANT_LDAP_USER_FILTER`, keep the `{username}` placeholder exactly once.
 
 ## Environment
 
-Uncomment and set in `/etc/runner-control.env`:
+Uncomment and set in `/etc/sextant.env`:
 
 ```dotenv
-RC_LDAP_ENABLED=1
-RC_LDAP_SERVER=dc1.corp.example.com
-RC_LDAP_PORT=636
-RC_LDAP_USE_SSL=1
-RC_LDAP_CA_CERT=/etc/ssl/certs/corp-root-ca.pem
+SEXTANT_LDAP_ENABLED=1
+SEXTANT_LDAP_SERVER=dc1.corp.example.com
+SEXTANT_LDAP_PORT=636
+SEXTANT_LDAP_USE_SSL=1
+SEXTANT_LDAP_CA_CERT=/etc/ssl/certs/corp-root-ca.pem
 
-RC_LDAP_BASE_DN=DC=corp,DC=example,DC=com
-RC_LDAP_BIND_DN=CN=svc-runner-control,OU=Service Accounts,DC=corp,DC=example,DC=com
-RC_LDAP_BIND_PASSWORD=use-a-password-manager
+SEXTANT_LDAP_BASE_DN=DC=corp,DC=example,DC=com
+SEXTANT_LDAP_BIND_DN=CN=svc-sextant,OU=Service Accounts,DC=corp,DC=example,DC=com
+SEXTANT_LDAP_BIND_PASSWORD=use-a-password-manager
 
-RC_LDAP_USER_FILTER=(sAMAccountName={username})
-RC_LDAP_ADMIN_GROUPS=CN=RC Admins,OU=Groups,DC=corp,DC=example,DC=com
-RC_LDAP_OPERATOR_GROUPS=CN=RC Operators,OU=Groups,DC=corp,DC=example,DC=com
-RC_LDAP_VIEWER_GROUPS=CN=RC Viewers,OU=Groups,DC=corp,DC=example,DC=com
-RC_LDAP_DEFAULT_ROLE=viewer
+SEXTANT_LDAP_USER_FILTER=(sAMAccountName={username})
+SEXTANT_LDAP_ADMIN_GROUPS=CN=RC Admins,OU=Groups,DC=corp,DC=example,DC=com
+SEXTANT_LDAP_OPERATOR_GROUPS=CN=RC Operators,OU=Groups,DC=corp,DC=example,DC=com
+SEXTANT_LDAP_VIEWER_GROUPS=CN=RC Viewers,OU=Groups,DC=corp,DC=example,DC=com
+SEXTANT_LDAP_DEFAULT_ROLE=viewer
 ```
 
 Then restart:
 
 ```bash
-sudo systemctl restart runner-control
+sudo systemctl restart sextant
 ```
 
-The login page shows an **Active Directory / Samba** mode selector when `RC_LDAP_ENABLED=1`.
+The login page shows an **Active Directory / Samba** mode selector when `SEXTANT_LDAP_ENABLED=1`.
 
 ## LDAPS certificate
 
-`RC_LDAP_CA_CERT` is a PEM bundle containing the issuing CA. This is useful when Samba AD uses an internal CA. Export the root/issuing CA from your PKI and install it with mode 0644, readable by the service group.
+`SEXTANT_LDAP_CA_CERT` is a PEM bundle containing the issuing CA. This is useful when Samba AD uses an internal CA. Export the root/issuing CA from your PKI and install it with mode 0644, readable by the service group.
 
-When `RC_LDAP_CA_CERT` is set, the client requires a valid server certificate chain (`CERT_REQUIRED`) verified against that bundle. When it is omitted, the client still requires `CERT_REQUIRED` and validates against the host operating system trust store. Set `RC_LDAP_CA_CERT` when Samba AD uses an internal CA that is not installed system-wide.
+When `SEXTANT_LDAP_CA_CERT` is set, the client requires a valid server certificate chain (`CERT_REQUIRED`) verified against that bundle. When it is omitted, the client still requires `CERT_REQUIRED` and validates against the host operating system trust store. Set `SEXTANT_LDAP_CA_CERT` when Samba AD uses an internal CA that is not installed system-wide.
 
 Never use plain LDAP over an untrusted network. The bind password and user password are cleartext without TLS.
 
@@ -115,7 +115,7 @@ Never use plain LDAP over an untrusted network. The bind password and user passw
 
 ```bash
 ldapsearch -H ldaps://dc1.corp.example.com:636 \
-  -D "CN=svc-runner-control,OU=Service Accounts,DC=corp,DC=example,DC=com" \
+  -D "CN=svc-sextant,OU=Service Accounts,DC=corp,DC=example,DC=com" \
   -W -b "DC=corp,DC=example,DC=com" \
   "(sAMAccountName=alice)" displayName mail memberOf
 ```
@@ -147,12 +147,12 @@ The next login rewrites the SQLite role. An existing signed-in session continues
 | User logs in as viewer despite group | Group DN typo, group not assigned, nested group, or wrong `memberOf` attribute |
 | Local account and AD account share a name | Local account takes precedence; AD login is rejected by design |
 | Works with `ldapsearch` but not the app | CA not trusted by the service, filter placeholder changed, duplicate entries |
-| Slow login | Directory latency; check `RC_LDAP_TIMEOUT` (default 8s) |
+| Slow login | Directory latency; check `SEXTANT_LDAP_TIMEOUT` (default 8s) |
 
 The app logs the exception type, not the password, on LDAP failure:
 
 ```bash
-sudo journalctl -u runner-control -n 100 --no-pager
+sudo journalctl -u sextant -n 100 --no-pager
 ```
 
 ## Limits

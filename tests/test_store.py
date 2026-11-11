@@ -5,17 +5,17 @@ from dataclasses import replace
 
 from fastapi.testclient import TestClient
 
-from runner_control.server import create_app
+from sextant_control.server import create_app
 from tests.helpers import enroll_agent, headers, issue_token, login
 
 
-def _create_package(client, admin, slug="runner-agent", kind="agent"):
+def _create_package(client, admin, slug="sextant-agent", kind="agent"):
     response = client.post(
         "/api/store/packages",
         json={
             "slug": slug,
-            "name": "Runner Agent",
-            "vendor": "Runner Control",
+            "name": "Sextant Agent",
+            "vendor": "Sextant",
             "description": "Agent wheel",
             "kind": kind,
             "platforms": ["linux", "windows"],
@@ -46,7 +46,7 @@ def test_store_publish_list_and_download(client, admin):
     artifact = b"agent-wheel-bytes" * 10
     digest = hashlib.sha256(artifact).hexdigest()
 
-    published = _upload(client, admin, "runner-agent", "0.3.0", artifact)
+    published = _upload(client, admin, "sextant-agent", "0.3.0", artifact)
     assert published.status_code == 200, published.text
     release = published.json()
     assert release["sha256"] == digest
@@ -55,9 +55,9 @@ def test_store_publish_list_and_download(client, admin):
 
     listing = client.get("/api/store/packages", headers=headers(admin))
     assert listing.status_code == 200
-    assert listing.json()["packages"][0]["slug"] == "runner-agent"
+    assert listing.json()["packages"][0]["slug"] == "sextant-agent"
 
-    detail = client.get("/api/store/packages/runner-agent", headers=headers(admin))
+    detail = client.get("/api/store/packages/sextant-agent", headers=headers(admin))
     assert detail.status_code == 200
     assert len(detail.json()["releases"]) == 1
 
@@ -73,17 +73,17 @@ def test_store_publish_list_and_download(client, admin):
 
 def test_store_rejects_bad_hash_and_duplicate_version(client, admin):
     _create_package(client, admin)
-    bad = _upload(client, admin, "runner-agent", "0.3.0", b"data", sha="0" * 64)
+    bad = _upload(client, admin, "sextant-agent", "0.3.0", b"data", sha="0" * 64)
     assert bad.status_code == 400
 
-    assert _upload(client, admin, "runner-agent", "0.3.0", b"data").status_code == 200
-    duplicate = _upload(client, admin, "runner-agent", "0.3.0", b"other")
+    assert _upload(client, admin, "sextant-agent", "0.3.0", b"data").status_code == 200
+    duplicate = _upload(client, admin, "sextant-agent", "0.3.0", b"other")
     assert duplicate.status_code == 409
 
 
 def test_store_yank_blocks_download(client, admin):
     _create_package(client, admin)
-    release = _upload(client, admin, "runner-agent", "0.3.0", b"data").json()
+    release = _upload(client, admin, "sextant-agent", "0.3.0", b"data").json()
     yank = client.post(
         f"/api/store/releases/{release['id']}/yank?reason=bad",
         headers=headers(admin),
@@ -127,5 +127,5 @@ def test_store_per_file_limit(settings):
     with TestClient(app) as client:
         admin = login(client)
         _create_package(client, admin)
-        response = _upload(client, admin, "runner-agent", "0.3.0", b"x" * (1024 * 1024 + 1))
+        response = _upload(client, admin, "sextant-agent", "0.3.0", b"x" * (1024 * 1024 + 1))
         assert response.status_code == 413

@@ -152,15 +152,15 @@ Enrollment body accepts `"profile": "server"`. An empty profile keeps the existi
 ## CLI
 
 ```bash
-runner-control profile-list
-runner-control profile-create --slug lab --name "Lab" --from server
-runner-control profile-create --slug strict --name "Strict" --settings-file strict.json
-runner-control profile-update --slug lab --settings-file lab.json
-runner-control profile-reset --slug server
-runner-control profile-delete --slug lab
+sextant profile-list
+sextant profile-create --slug lab --name "Lab" --from server
+sextant profile-create --slug strict --name "Strict" --settings-file strict.json
+sextant profile-update --slug lab --settings-file lab.json
+sextant profile-reset --slug server
+sextant profile-delete --slug lab
 ```
 
-Run these as the service user with `RC_DATA_DIR` set, or use the API from the dashboard/admin session.
+Run these as the service user with `SEXTANT_DATA_DIR` set, or use the API from the dashboard/admin session.
 
 ---
 

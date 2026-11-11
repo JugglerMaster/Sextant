@@ -45,12 +45,12 @@
 |---|---|---|---|
 | P1-1 | Batch dispatch (10 commands) + serial agent execution: the sweeper fails commands that are still queued behind others; the agent executes them anyway, the late result is discarded as idempotent, and retry can duplicate destructive work. | Reproduced with forced stale `dispatched_at` | **fixed** — one command in flight per agent; agent re-polls immediately after completing it |
 | P1-2 | `X-Forwarded-For` spoofing: app trusts the first entry; sample nginx appends rather than overwrites. Defeats the login limiter and poisons audit IPs. | Reproduced with rotating XFF | **fixed** — rightmost valid hop; nginx uses `$remote_addr`; regression tests |
-| P1-3 | Chunked request bodies bypass `RC_MAX_BODY_BYTES`; only `Content-Length` is checked. | Reproduced 2.1 MB chunked body accepted past the limit | **fixed** — chunked API mutations rejected with `411` |
+| P1-3 | Chunked request bodies bypass `SEXTANT_MAX_BODY_BYTES`; only `Content-Length` is checked. | Reproduced 2.1 MB chunked body accepted past the limit | **fixed** — chunked API mutations rejected with `411` |
 | P1-4 | Agent buffers unbounded stdout/stderr before truncating; a noisy command can OOM the endpoint as root/SYSTEM. | Verified by inspection (`executor.py`) | **fixed** — incremental bounded readers; process group killed on cap |
-| P1-5 | Session cookie `uid` is not bound to the session row; a valid signed cookie can be re-signed for another user if `RC_SECRET_KEY` is weak or leaked. No minimum secret strength. | Reproduced viewer→admin with re-signed cookie | **fixed** — `uid`/`user_id` binding; 32-byte minimum secret |
-| P1-6 | `RC_ADMIN_PASSWORD` bypasses the password policy; `RC_ADMIN_PASSWORD=admin` creates a working admin. | Reproduced | **fixed** — startup validates the bootstrap password and refuses weak values |
+| P1-5 | Session cookie `uid` is not bound to the session row; a valid signed cookie can be re-signed for another user if `SEXTANT_SECRET_KEY` is weak or leaked. No minimum secret strength. | Reproduced viewer→admin with re-signed cookie | **fixed** — `uid`/`user_id` binding; 32-byte minimum secret |
+| P1-6 | `SEXTANT_ADMIN_PASSWORD` bypasses the password policy; `SEXTANT_ADMIN_PASSWORD=admin` creates a working admin. | Reproduced | **fixed** — startup validates the bootstrap password and refuses weak values |
 | P1-7 | Agent installation is not reproducible and installs server/non-permissive deps as root/SYSTEM even though the agent is stdlib-only. | Installer inspection | **fixed (partial)** — hash-pinned lockfiles, agent installs use `--no-deps`, `ldap3` is an optional `[ldap]` extra; signed wheels remain future work |
-| P1-8 | `runner-agent.service` runs as root with none of the control unit's hardening. | Unit comparison | **fixed** — fixed `PATH`, `NoNewPrivileges`, `UMask`, restricted address families; explicitly not a sandbox |
+| P1-8 | `sextant-agent.service` runs as root with none of the control unit's hardening. | Unit comparison | **fixed** — fixed `PATH`, `NoNewPrivileges`, `UMask`, restricted address families; explicitly not a sandbox |
 
 ### P2
 
@@ -59,7 +59,7 @@
 | P2-1 | Re-enrollment by `machine_id` + leaked enrollment token can take over an existing agent row. | Plausible | **deferred** — documented; requires a re-enrollment challenge design |
 | P2-2 | Last-active-admin invariant is not checked under `BEGIN IMMEDIATE`; concurrent demotions can leave zero active admins. | Plausible | **fixed** — update runs in `BEGIN IMMEDIATE` |
 | P2-3 | Late agent result can overwrite a sweeper-terminal state because the result update has no status predicate. | Verified by code | **fixed** — update restricted to `dispatched`/`running`; late results are idempotent |
-| P2-4 | `RC_ENROLLMENT_TTL_MINUTES` is parsed but never used. | Verified | **fixed** — used as the default when the request omits `expires_minutes` |
+| P2-4 | `SEXTANT_ENROLLMENT_TTL_MINUTES` is parsed but never used. | Verified | **fixed** — used as the default when the request omits `expires_minutes` |
 | P2-5 | Service names may start with `-`, enabling `systemctl` option injection (not shell injection). | Verified | **fixed** — leading `-` rejected by the service-name pattern |
 | P2-6 | Login timing can enumerate local usernames (unknown users skip scrypt). | Plausible | **fixed** — dummy scrypt verification for unknown local users |
 | P2-7 | Sweeper runs on many read paths and scans all queued/dispatched rows; telemetry prune has no index led by `at`; no command/audit retention. | Verified by code; performance plausible | **fixed** — sweeper limited to dashboard/heartbeat, status indexes added, telemetry `at` index added, command/audit retention added |
@@ -67,7 +67,7 @@
 | P2-9 | AD role changes are not applied to existing sessions until re-login. | Verified; documented | **deferred** — documented; periodic group re-check is future work |
 | P2-10 | Every new agent defaults `allow_shell`/`allow_power`/`allow_service` to true. | Verified | **accepted risk** — product is a root-capable control plane; installers should make this explicit |
 | P2-11 | Security headers are missing on early middleware rejections. | Verified | **fixed** — headers applied to early 400/401/403/411/413 responses |
-| P2-12 | `RC_SESSION_HOURS` has no upper bound; >366 days fails session decoding. | Verified | **fixed** — clamped to 8784 hours (366 days) |
+| P2-12 | `SEXTANT_SESSION_HOURS` has no upper bound; >366 days fails session decoding. | Verified | **fixed** — clamped to 8784 hours (366 days) |
 
 ---
 
@@ -96,7 +96,7 @@ Host-header bypass, chunked bodies, XFF spoofing, sweeper vs in-flight commands,
 Completed:
 
 1. **P0-1** — upgraded to FastAPI 0.162.2 / Starlette 1.10.0; middleware uses `request.scope["path"]`; optional `TrustedHostMiddleware`; regression tests for Host-header CSRF and trusted hosts.
-2. **P1 quick wins** — rightmost-hop XFF + nginx `$remote_addr`; chunked API bodies rejected with `411`; session `uid` bound to the session row; 32-byte minimum `RC_SECRET_KEY`; bootstrap password policy; leading `-` service names rejected; agent redirects refused and responses capped; security headers on early rejections; `RC_SESSION_HOURS` clamped; `RC_ENROLLMENT_TTL_MINUTES` used.
+2. **P1 quick wins** — rightmost-hop XFF + nginx `$remote_addr`; chunked API bodies rejected with `411`; session `uid` bound to the session row; 32-byte minimum `SEXTANT_SECRET_KEY`; bootstrap password policy; leading `-` service names rejected; agent redirects refused and responses capped; security headers on early rejections; `SEXTANT_SESSION_HOURS` clamped; `SEXTANT_ENROLLMENT_TTL_MINUTES` used.
 3. **P1 medium** — one in-flight command per agent with immediate re-poll; result updates restricted to `dispatched`/`running`; incremental bounded stdout/stderr with process-group kill on cap.
 4. **P1 packaging** — hash-pinned `requirements.lock` and `requirements-dev.lock`; agent installers use `--no-deps`; `ldap3` moved to the `[ldap]` extra; agent unit hardened with a fixed `PATH`.
 5. **P2** — last-admin update in `BEGIN IMMEDIATE`; status-specific command indexes and a telemetry `at` index; command and audit retention; sweeper limited to dashboard/heartbeat; dummy scrypt verification for unknown users.

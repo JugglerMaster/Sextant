@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install and enroll a Runner Control agent on a systemd Linux host.
+# Install and enroll a Sextant agent on a systemd Linux host.
 # Run as root from a checked-out/published source tree:
 #   sudo ./deploy/install-linux-agent.sh https://ops.example.com <TOKEN> [NAME]
 set -euo pipefail
@@ -19,21 +19,21 @@ fi
 
 SOURCE_DIR="${SOURCE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="${INSTALL_DIR:-/opt/runner-agent}"
-CONFIG_DIR="${CONFIG_DIR:-/etc/runner-agent}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/sextant-agent}"
+CONFIG_DIR="${CONFIG_DIR:-/etc/sextant-agent}"
 CONFIG_FILE="${CONFIG_FILE:-$CONFIG_DIR/config.json}"
 PROFILE="${PROFILE:-workstation}"
 
 if [[ -n "${SERVICE_FILE:-}" ]]; then
   :
-elif [[ -f "$SOURCE_DIR/deploy/runner-agent.service" ]]; then
-  SERVICE_FILE="$SOURCE_DIR/deploy/runner-agent.service"
-elif [[ -f "$SCRIPT_DIR/deploy/runner-agent.service" ]]; then
-  SERVICE_FILE="$SCRIPT_DIR/deploy/runner-agent.service"
-elif [[ -f "$SCRIPT_DIR/../deploy/runner-agent.service" ]]; then
-  SERVICE_FILE="$SCRIPT_DIR/../deploy/runner-agent.service"
+elif [[ -f "$SOURCE_DIR/deploy/sextant-agent.service" ]]; then
+  SERVICE_FILE="$SOURCE_DIR/deploy/sextant-agent.service"
+elif [[ -f "$SCRIPT_DIR/deploy/sextant-agent.service" ]]; then
+  SERVICE_FILE="$SCRIPT_DIR/deploy/sextant-agent.service"
+elif [[ -f "$SCRIPT_DIR/../deploy/sextant-agent.service" ]]; then
+  SERVICE_FILE="$SCRIPT_DIR/../deploy/sextant-agent.service"
 else
-  echo "Could not find deploy/runner-agent.service. Set SERVICE_FILE explicitly." >&2
+  echo "Could not find deploy/sextant-agent.service. Set SERVICE_FILE explicitly." >&2
   exit 1
 fi
 
@@ -90,12 +90,12 @@ if [[ "${NO_SELF_UPDATE:-0}" == "1" ]]; then
   ENROLL_ARGS+=(--no-self-update)
 fi
 
-"$INSTALL_DIR/.venv/bin/runner-agent" "${ENROLL_ARGS[@]}"
+"$INSTALL_DIR/.venv/bin/sextant-agent" "${ENROLL_ARGS[@]}"
 chmod 0600 "$CONFIG_FILE"
 chown root:root "$CONFIG_FILE"
 
-install -m 0644 "$SERVICE_FILE" /etc/systemd/system/runner-agent.service
+install -m 0644 "$SERVICE_FILE" /etc/systemd/system/sextant-agent.service
 systemctl daemon-reload
-systemctl enable --now runner-agent.service
+systemctl enable --now sextant-agent.service
 
-echo "Agent installed and started. Inspect logs with: journalctl -u runner-agent -f"
+echo "Agent installed and started. Inspect logs with: journalctl -u sextant-agent -f"

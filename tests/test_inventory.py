@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from runner_agent import packages
-from runner_agent.collectors import MetricsCollector
-from runner_agent.config import AgentConfig
+from sextant_agent import packages
+from sextant_agent.collectors import MetricsCollector
+from sextant_agent.config import AgentConfig
 from tests.helpers import enroll_agent, heartbeat, headers, sample_metrics
 
 
@@ -162,7 +162,7 @@ def test_agent_package_payload_is_change_gated(monkeypatch):
 
 
 def test_agent_applies_server_profile_cadence():
-    from runner_agent.agent import AgentRunner
+    from sextant_agent.agent import AgentRunner
 
     config = AgentConfig(server_url="https://example.test", agent_id="a", agent_token="b")
     runner = AgentRunner(config)

@@ -6,10 +6,10 @@ import time
 import pytest
 from starlette.requests import Request
 
-import runner_control.security as security
-from runner_control.config import LdapSettings
-from runner_control.ldap_auth import LdapIdentity, authenticate_ldap, escape_filter_chars, role_for_groups
-from runner_control.security import (
+import sextant_control.security as security
+from sextant_control.config import LdapSettings
+from sextant_control.ldap_auth import LdapIdentity, authenticate_ldap, escape_filter_chars, role_for_groups
+from sextant_control.security import (
     MAX_SESSION_PAYLOAD_BYTES,
     MAX_SESSION_TOKEN_LENGTH,
     LoginRateLimiter,
@@ -23,7 +23,7 @@ from runner_control.security import (
     validate_password,
     verify_password,
 )
-from runner_control.wol import build_magic_packet, normalize_mac, send_magic_packet
+from sextant_control.wol import build_magic_packet, normalize_mac, send_magic_packet
 
 
 def test_password_hashing_and_verification():
@@ -63,7 +63,7 @@ def test_session_signing_and_tampering():
 
 
 def test_token_hash_and_match():
-    token = "rc_agent_secret"
+    token = "sextant_agent_secret"
     digest = hash_token(token)
     assert token_matches(token, digest)
     assert not token_matches(token + "x", digest)
@@ -218,8 +218,8 @@ def test_password_policy_rejects_common_and_trivial_values():
         "administrator",
         "letmein12345",
         "qwertyuiop12",
-        "runnercontrol",
-        "runnercontrol123",
+        "sextant",
+        "sextant123",
         "aaaaaaaaaaaa",
         "abcabcabcabc",
         "123456789012",

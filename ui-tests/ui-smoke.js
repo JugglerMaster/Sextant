@@ -3,8 +3,8 @@ const { JSDOM, VirtualConsole } = require("jsdom");
 
 const path = require("path");
 const root = path.resolve(__dirname, "..");
-const html = fs.readFileSync(`${root}/runner_control/static/index.html`, "utf8");
-const source = fs.readFileSync(`${root}/runner_control/static/app.js`, "utf8");
+const html = fs.readFileSync(`${root}/sextant_control/static/index.html`, "utf8");
+const source = fs.readFileSync(`${root}/sextant_control/static/app.js`, "utf8");
 const errors = [];
 const virtualConsole = new VirtualConsole();
 virtualConsole.on("jsdomError", (error) => errors.push(`jsdom: ${error.message}`));
@@ -64,7 +64,7 @@ const agent = {
   ip: "192.168.1.20",
   mac: "AA:BB:CC:DD:EE:FF",
   machine_id: "machine-demo",
-  agent_version: "0.2.0",
+  agent_version: "0.3.0",
   tags: ["office", "gpu"],
   notes: "",
   watch_services: ["Spooler"],
@@ -145,7 +145,7 @@ const historyCommands = [
 ];
 
 const responses = {
-  "/api/auth/config": { status: 200, body: { ldap_enabled: false, version: "0.2.0", public_url: "" } },
+  "/api/auth/config": { status: 200, body: { ldap_enabled: false, version: "0.3.0", public_url: "" } },
   "/api/me": { status: 401, body: { detail: "Authentication required." } },
   "/api/auth/login": {
     status: 200,
@@ -162,14 +162,14 @@ const responses = {
       },
       csrf: "csrf-demo",
       permissions: { viewer: true, operate: true, admin: true },
-      settings: { ldap_enabled: false, local_auth: true, offline_after_seconds: 90, version: "0.2.0", public_url: "" },
+      settings: { ldap_enabled: false, local_auth: true, offline_after_seconds: 90, version: "0.3.0", public_url: "" },
     },
   },
   "/api/update/status": {
     status: 200,
     body: {
       update_available: true,
-      current_version: "0.2.0",
+      current_version: "0.3.0",
       latest_version: "9.9.9",
       url: "https://example.test/releases",
     },
@@ -413,7 +413,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 (async () => {
   window.localStorage.setItem(
-    "rc.savedViews",
+    "sextant.savedViews",
     JSON.stringify([{ name: "Migrated fleet", status: "online", profile: "", tag: "", search: "studio" }]),
   );
   window.eval(source);
@@ -439,7 +439,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (savedViews.filter((view) => view.name === "Migrated fleet").length !== 1) {
     throw new Error("localStorage saved view migration duplicated a name");
   }
-  if (window.localStorage.getItem("rc.savedViews")) {
+  if (window.localStorage.getItem("sextant.savedViews")) {
     throw new Error("migrated localStorage saved views should be cleared");
   }
   const liveSource = window.__eventSources[0];
@@ -694,7 +694,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (savedViews.filter((view) => view.name === "GPU hosts").length !== 1) {
     throw new Error("saved view was not stored on the server");
   }
-  if (window.localStorage.getItem("rc.savedViews")) {
+  if (window.localStorage.getItem("sextant.savedViews")) {
     throw new Error("server-backed saved views should not keep a localStorage copy");
   }
   if (!savedViewSelect.textContent.includes("GPU hosts")) throw new Error("saved view option missing");
@@ -1057,7 +1057,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   themeToggle.click();
   await sleep(10);
   if (window.document.documentElement.dataset.theme !== "light") throw new Error("theme toggle did not switch to light");
-  if (window.localStorage.getItem("rc.theme") !== "light") throw new Error("light theme was not persisted");
+  if (window.localStorage.getItem("sextant.theme") !== "light") throw new Error("light theme was not persisted");
   if (themeToggle.getAttribute("aria-pressed") !== "true") throw new Error("theme toggle aria-pressed missing");
   themeToggle.click();
   await sleep(10);

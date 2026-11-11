@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from .config import AgentConfig
 
-TRUNCATION_NOTE = "\n\n[output truncated by runner-agent]"
+TRUNCATION_NOTE = "\n\n[output truncated by sextant-agent]"
 ChunkCallback = Callable[[str, str], None]
 
 
@@ -275,7 +275,7 @@ def build_power_command(action: str, delay: int, os_name: str | None = None) -> 
         if action == "cancel":
             return ["shutdown.exe", "/a"]
         flag = "/s" if action == "shutdown" else "/r"
-        return ["shutdown.exe", flag, "/t", str(max(0, int(delay))), "/c", "Runner Control power request"]
+        return ["shutdown.exe", flag, "/t", str(max(0, int(delay))), "/c", "Sextant power request"]
     shutdown = shutil.which("shutdown") or "/sbin/shutdown"
     if action == "cancel":
         return [shutdown, "-c"]

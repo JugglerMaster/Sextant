@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from runner_agent.agent import AgentRunner
-from runner_agent.collectors import (
+from sextant_agent.agent import AgentRunner
+from sextant_agent.collectors import (
     MetricsCollector,
     _windows_disks,
     enrollment_identity,
@@ -23,8 +23,8 @@ from runner_agent.collectors import (
     parse_systemctl_units,
     parse_unit_files,
 )
-from runner_agent.config import AgentConfig, load_config, save_config
-from runner_agent.executor import (
+from sextant_agent.config import AgentConfig, load_config, save_config
+from sextant_agent.executor import (
     build_power_command,
     build_service_command,
     execute_command,
@@ -90,7 +90,7 @@ def test_config_save_and_load(tmp_path: Path):
     config = AgentConfig(
         server_url="https://ops.example.com",
         agent_id="agt_123",
-        agent_token="rc_agent_secret",
+        agent_token="sextant_agent_secret",
         name="box",
         watch_services=["sshd"],
         tags=["lab"],
@@ -99,7 +99,7 @@ def test_config_save_and_load(tmp_path: Path):
     loaded = load_config(path)
     assert loaded.agent_id == "agt_123"
     assert loaded.watch_services == ["sshd"]
-    assert json.loads(path.read_text())["agent_token"] == "rc_agent_secret"
+    assert json.loads(path.read_text())["agent_token"] == "sextant_agent_secret"
     if os.name != "nt":
         assert (path.stat().st_mode & 0o777) == 0o600
     redacted = loaded.redacted()
@@ -448,7 +448,7 @@ def test_inventory_interval_expiry(monkeypatch):
     collector = MetricsCollector(config)
     calls = _stub_linux_collector(monkeypatch, collector)
     now = [1000.0]
-    monkeypatch.setattr("runner_agent.collectors.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("sextant_agent.collectors.time.monotonic", lambda: now[0])
 
     collector.snapshot()
     now[0] += 59
@@ -569,7 +569,7 @@ def test_windows_snapshot_caches_inventory(monkeypatch):
         calls["processes"] += 1
         return []
 
-    monkeypatch.setattr("runner_agent.collectors._powershell_script", fake_powershell)
+    monkeypatch.setattr("sextant_agent.collectors._powershell_script", fake_powershell)
     monkeypatch.setattr(collector, "_nvidia_gpus", fake_gpus)
     monkeypatch.setattr(collector, "_nvidia_processes", fake_processes)
 

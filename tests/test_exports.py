@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import io
 
-from runner_control.db import dumps
+from sextant_control.db import dumps
 from tests.helpers import enroll_agent, heartbeat, headers, sample_metrics
 
 

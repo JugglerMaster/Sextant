@@ -52,7 +52,7 @@ Run the whole suite:
 | `tests/test_assets.py` | Static assets stay compatible with the strict CSP: no inline style attributes or DOM inline-style writes |
 | `tests/test_hardening.py` | Failed-login audit, session registry and revocation, user disable/reset, command cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication |
 | `tests/test_security.py` | Password hashing/policy, session signing/tampering/expiry, token hashing, magic packets, LDAP escaping and role mapping, fake LDAP bind flow |
-| `tests/test_agent.py` | Linux/metric parsers, collector normalization, config persistence, executor builders and policy intersection, agent runner smoke test |
+| `tests/test_agent.py` | Linux/metric parsers, collector normalization, config persistence, executor builders and policy intersection, agent loop smoke test |
 | `tests/test_ad_login.py` | AD login provisioning, role mapping, bad credentials, directory outage, local-account precedence |
 | `tests/test_db.py` | Schema initialization and migration of legacy schemas, including alert incident lifecycle columns |
 
@@ -63,9 +63,9 @@ The contract tests also exercise the request body guard. They set an explicit `C
 ## Compile and static checks
 
 ```bash
-.venv/bin/python -m compileall -q runner_control runner_agent
-.venv/bin/python -m pyflakes runner_control runner_agent tests
-node --check runner_control/static/app.js
+.venv/bin/python -m compileall -q sextant_control sextant_agent
+.venv/bin/python -m pyflakes sextant_control sextant_agent tests
+node --check sextant_control/static/app.js
 ```
 
 `make check` runs all three. These checks do not execute the application; they catch syntax and basic unused-name errors.
@@ -88,13 +88,13 @@ npm ci
 npm test
 ```
 
-`npm test` runs `ui-tests/ui-smoke.js`. It loads the real `runner_control/static/index.html` and `app.js` in jsdom, replaces `window.fetch` with mocked API responses and `EventSource` with a controllable mock, signs in, and checks the fleet view, update banner, SSE live updates and polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer tabs, package inventory and rule editor, service filters, GPU process list, gap-aware trends charts (timestamp-positioned points and broken lines over null buckets), persistent state-change timeline entries with real event timestamps, the What changed summary, alert first/last-seen and acknowledgement-age labels, recurrence rendering as a fresh active incident, alert actions, paginated command history (search, status filter, page sizes, Previous/Next, X-Y of Z count, and filter-aware CSV export), remote terminal, profiles page, remote install page, and the policy/user/session dialogs. It is a DOM smoke test, not a browser end-to-end test.
+`npm test` runs `ui-tests/ui-smoke.js`. It loads the real `sextant_control/static/index.html` and `app.js` in jsdom, replaces `window.fetch` with mocked API responses and `EventSource` with a controllable mock, signs in, and checks the fleet view, update banner, SSE live updates and polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer tabs, package inventory and rule editor, service filters, GPU process list, gap-aware trends charts (timestamp-positioned points and broken lines over null buckets), persistent state-change timeline entries with real event timestamps, the What changed summary, alert first/last-seen and acknowledgement-age labels, recurrence rendering as a fresh active incident, alert actions, paginated command history (search, status filter, page sizes, Previous/Next, X-Y of Z count, and filter-aware CSV export), remote terminal, profiles page, remote install page, and the policy/user/session dialogs. It is a DOM smoke test, not a browser end-to-end test.
 
 `ui-tests/node_modules` is not committed. `npm ci` needs network access to fetch jsdom; if the directory is absent and the environment is offline, skip the UI test rather than vendoring dependencies.
 
 ## Browser accessibility and visual tests
 
-`npm run test:visual` runs Playwright against the real dashboard in Chromium. The harness serves the production `runner_control/static/index.html`, `app.css`, and `app.js` from a small static server, intercepts every `/api/**` request with deterministic fixtures, and replaces `EventSource` with an in-page mock. The date is frozen, the timezone is UTC, and the runner is pinned to one worker so screenshots are reproducible.
+`npm run test:visual` runs Playwright against the real dashboard in Chromium. The harness serves the production `sextant_control/static/index.html`, `app.css`, and `app.js` from a small static server, intercepts every `/api/**` request with deterministic fixtures, and replaces `EventSource` with an in-page mock. The date is frozen, the timezone is UTC, and the runner is pinned to one worker so screenshots are reproducible.
 
 Install the test dependencies and the matching Chromium build once:
 
@@ -129,9 +129,9 @@ npm test
 
 A real-agent smoke test was run on a Raspberry Pi (Raspbian 13, armv7l, Python 3.13.5) against a temporary server:
 
-- Built `runner_control-0.2.0-py3-none-any.whl`, installed it with `deploy/install-linux-agent.sh`, enrolled as `pi-live` with the `server` profile, and started the systemd unit.
+- Built `sextant-0.2.0-py3-none-any.whl`, installed it with `deploy/install-linux-agent.sh`, enrolled as `pi-live` with the `server` profile, and started the systemd unit.
 - Verified heartbeat telemetry (CPU, memory, root and boot disks, 211 services, 962 apt packages, `arch=armv7l`).
-- Published `0.3.0` to the server package store and ran `runner-agent update --apply --restart`; the agent verified SHA-256, staged a new venv, switched `current`, restarted, and reported `0.3.0`.
+- Published `0.3.0` to the server package store and ran `sextant-agent update --apply --restart`; the agent verified SHA-256, staged a new venv, switched `current`, restarted, and reported `0.3.0`.
 - Ran a six-line shell command and consumed `/api/commands/{id}/events`: 12 output events arrived once per second before the terminal event, followed by the canonical final stdout/stderr.
 - Verified `/api/events` sends the next dashboard snapshot immediately after a command mutation and closes an open stream with an `auth` event when the session is logged out.
 - Drove the real dashboard in Playwright: login, drawer, gap-aware Trends, paginated History, 50-row package/service tables, live terminal output, command palette, and light-theme toggle.

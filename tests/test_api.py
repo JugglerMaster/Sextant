@@ -22,7 +22,7 @@ def test_public_health_and_security_headers(client):
 
     index = client.get("/")
     assert index.status_code == 200
-    assert "Runner Control" in index.text
+    assert "Sextant" in index.text
     assert "/static/app.js" in index.text
     assert client.get("/static/app.css").status_code == 200
     assert client.get("/static/app.js").status_code == 200
@@ -146,7 +146,7 @@ def test_full_agent_command_wol_and_audit_flow(client, admin, monkeypatch):
         assert mac == "AA:BB:CC:DD:EE:FF"
         return 3
 
-    monkeypatch.setattr("runner_control.server.send_magic_packet", fake_send)
+    monkeypatch.setattr("sextant_control.server.send_magic_packet", fake_send)
     wake = client.post(
         f"/api/agents/{agent['agent_id']}/wake",
         json={"broadcast": "192.168.1.255", "port": 9, "packets": 3},
@@ -201,7 +201,7 @@ def test_service_command_validation_and_viewer_read_only(app, client, admin):
 
 
 def test_wake_targets_crud(client, admin, monkeypatch):
-    monkeypatch.setattr("runner_control.server.send_magic_packet", lambda *args, **kwargs: 3)
+    monkeypatch.setattr("sextant_control.server.send_magic_packet", lambda *args, **kwargs: 3)
     created = client.post(
         "/api/wake-targets",
         json={"name": "Office PC", "mac": "aa-bb-cc-dd-ee-ff", "broadcast": "192.168.1.255", "port": 9},

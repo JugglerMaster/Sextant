@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from fastapi.testclient import TestClient
 
-from runner_control.server import create_app
+from sextant_control.server import create_app
 from tests.helpers import (
     enroll_agent,
     headers,

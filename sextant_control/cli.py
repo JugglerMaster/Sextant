@@ -57,7 +57,7 @@ def cmd_init(args: argparse.Namespace, settings: Settings) -> int:
     print(f"Database: {settings.database_path}")
     if settings.bootstrap_file.exists():
         print(f"Bootstrap credentials: {settings.bootstrap_file}")
-    print("Create an enrollment token with: runner-control issue-enrollment")
+    print("Create an enrollment token with: sextant issue-enrollment")
     return 0
 
 
@@ -116,7 +116,7 @@ def cmd_reset_password(args: argparse.Namespace, settings: Settings) -> int:
 def cmd_issue_enrollment(args: argparse.Namespace, settings: Settings) -> int:
     db = _db(settings)
     _ensure_bootstrap_admin(settings, db)
-    token = new_token("rc_enroll_")
+    token = new_token("sextant_enroll_")
     token_id = "enr_" + new_token()[:16]
     now = utcnow()
     expires = now + timedelta(minutes=args.minutes)
@@ -137,7 +137,7 @@ def cmd_issue_enrollment(args: argparse.Namespace, settings: Settings) -> int:
     base = settings.public_url or "https://YOUR-SERVER"
     print(f"Enrollment token (shown once): {token}")
     print(f"Expires: {expires.isoformat(timespec='seconds')}")
-    print(f"Agent command: runner-agent enroll --server {base} --token {token}")
+    print(f"Agent command: sextant-agent enroll --server {base} --token {token}")
     return 0
 
 
@@ -341,7 +341,7 @@ def cmd_profile_delete(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="runner-control", description="Runner Control server")
+    parser = argparse.ArgumentParser(prog="sextant", description="Sextant server")
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser("serve", help="Run the web console")

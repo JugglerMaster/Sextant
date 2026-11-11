@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from runner_control.config import Settings
+from sextant_control.config import Settings
 from tests.helpers import enroll_agent, headers, heartbeat, login, sample_metrics
 
 DISK_ALERT_KEY = "disk:!2F"
@@ -185,14 +185,14 @@ def test_acknowledgement_ttl_expiry_requires_re_ack(client, admin, app):
 
 
 def test_ack_ttl_setting_is_bounded(monkeypatch, tmp_path):
-    monkeypatch.setenv("RC_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("RC_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("SEXTANT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("SEXTANT_SECRET_KEY", "x" * 32)
     assert Settings.from_env().alert_ack_ttl_hours == 168
-    monkeypatch.setenv("RC_ALERT_ACK_TTL_HOURS", "0")
+    monkeypatch.setenv("SEXTANT_ALERT_ACK_TTL_HOURS", "0")
     assert Settings.from_env().alert_ack_ttl_hours == 1
-    monkeypatch.setenv("RC_ALERT_ACK_TTL_HOURS", "48")
+    monkeypatch.setenv("SEXTANT_ALERT_ACK_TTL_HOURS", "48")
     assert Settings.from_env().alert_ack_ttl_hours == 48
-    monkeypatch.setenv("RC_ALERT_ACK_TTL_HOURS", "99999")
+    monkeypatch.setenv("SEXTANT_ALERT_ACK_TTL_HOURS", "99999")
     assert Settings.from_env().alert_ack_ttl_hours == 8760
 
 

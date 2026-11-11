@@ -1,0 +1,25 @@
+[Unit]
+Description=Sextant server
+Documentation=file:/opt/sextant/docs/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sextant
+Group=sextant
+WorkingDirectory=/opt/sextant
+EnvironmentFile=/etc/sextant.env
+ExecStart=/opt/sextant/.venv/bin/sextant serve --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sextant
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

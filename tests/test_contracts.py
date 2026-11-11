@@ -81,7 +81,7 @@ def test_viewer_can_read_but_cannot_operate_or_administer(app, client, admin):
 def test_operator_can_operate_but_cannot_administer(app, client, admin, monkeypatch):
     agent = enroll_agent(admin)
     user = _create_user(client, admin, "contract-operator", "operator")
-    monkeypatch.setattr("runner_control.server.send_magic_packet", lambda *args, **kwargs: 3)
+    monkeypatch.setattr("sextant_control.server.send_magic_packet", lambda *args, **kwargs: 3)
 
     with TestClient(app) as operator_client:
         operator = login(operator_client, user["username"], USER_PASSWORD)
@@ -120,7 +120,7 @@ def test_operator_can_operate_but_cannot_administer(app, client, admin, monkeypa
 
 def test_admin_can_use_admin_routes(client, admin, monkeypatch):
     agent = enroll_agent(admin)
-    monkeypatch.setattr("runner_control.server.send_magic_packet", lambda *args, **kwargs: 3)
+    monkeypatch.setattr("sextant_control.server.send_magic_packet", lambda *args, **kwargs: 3)
 
     created_user = _create_user(client, admin, "contract-admin-target", "viewer")
     assert created_user["role"] == "viewer"

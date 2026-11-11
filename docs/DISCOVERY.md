@@ -29,10 +29,10 @@ Discovery closes that gap and enables:
 
 ## Current state (verified)
 
-- `runner_agent` reports only its own host: default-route interface, IP, MAC, disks, GPU, services, startup.
-- `runner_control` has no scanning, probing, or passive network code.
+- `sextant_agent` reports only its own host: default-route interface, IP, MAC, disks, GPU, services, startup.
+- `sextant_control` has no scanning, probing, or passive network code.
 - WoL sends a magic packet to the server's broadcast domain; agents are not relays.
-- The server runs unprivileged (`deploy/runner-control.service`, `User=runner-control`, no `CAP_NET_RAW`), binds loopback, and is normally fronted by nginx.
+- The server runs unprivileged (`deploy/sextant.service`, `User=sextant`, no `CAP_NET_RAW`), binds loopback, and is normally fronted by nginx.
 - Agents run as root/SYSTEM, make outbound HTTPS only, and execute queued work.
 - Roles: `viewer` (read), `operator` (commands/WoL), `admin` (users/tokens/agents).
 - Alerts are computed at read time; there is no push notification yet.
@@ -219,19 +219,19 @@ New **Discovery** page:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RC_DISCOVERY_ENABLED` | `0` | Master switch; requires audited acknowledgement |
-| `RC_DISCOVERY_CIDRS` | unset | Allowlisted scan scopes |
-| `RC_DISCOVERY_EXCLUDE` | gateway/DC suggestions | Never-scan ranges |
-| `RC_DISCOVERY_METHODS` | `neigh,dns,oui,ssdp` | Enabled probe set |
-| `RC_DISCOVERY_PROBE_PORTS` | v1 port set | TCP fingerprint ports |
-| `RC_DISCOVERY_ACTIVE_PROBES` | `0` | TCP/ICMP probing off by default |
-| `RC_DISCOVERY_INTERVAL_HOURS` | `0` (manual) | Scheduled scans; `0` disables |
-| `RC_DISCOVERY_MAX_HOSTS` | `1024` | Per-scan cap |
-| `RC_DISCOVERY_CONCURRENCY` | `32` | Probe concurrency |
-| `RC_DISCOVERY_TIMEOUT_MS` | `600` | Per-probe timeout |
-| `RC_DISCOVERY_RETENTION_DAYS` | `90` | Events/scan retention |
-| `RC_DISCOVERY_AGENT_RELAY` | `0` | Allow agent-relayed scans |
-| `RC_DISCOVERY_EXPORT_LIMIT` | `10000` | Max export rows |
+| `SEXTANT_DISCOVERY_ENABLED` | `0` | Master switch; requires audited acknowledgement |
+| `SEXTANT_DISCOVERY_CIDRS` | unset | Allowlisted scan scopes |
+| `SEXTANT_DISCOVERY_EXCLUDE` | gateway/DC suggestions | Never-scan ranges |
+| `SEXTANT_DISCOVERY_METHODS` | `neigh,dns,oui,ssdp` | Enabled probe set |
+| `SEXTANT_DISCOVERY_PROBE_PORTS` | v1 port set | TCP fingerprint ports |
+| `SEXTANT_DISCOVERY_ACTIVE_PROBES` | `0` | TCP/ICMP probing off by default |
+| `SEXTANT_DISCOVERY_INTERVAL_HOURS` | `0` (manual) | Scheduled scans; `0` disables |
+| `SEXTANT_DISCOVERY_MAX_HOSTS` | `1024` | Per-scan cap |
+| `SEXTANT_DISCOVERY_CONCURRENCY` | `32` | Probe concurrency |
+| `SEXTANT_DISCOVERY_TIMEOUT_MS` | `600` | Per-probe timeout |
+| `SEXTANT_DISCOVERY_RETENTION_DAYS` | `90` | Events/scan retention |
+| `SEXTANT_DISCOVERY_AGENT_RELAY` | `0` | Allow agent-relayed scans |
+| `SEXTANT_DISCOVERY_EXPORT_LIMIT` | `10000` | Max export rows |
 
 Agent-side: `allow_discovery` in `config.json` (default `false`), settable by installer, and server policy can restrict but never widen it.
 

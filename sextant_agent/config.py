@@ -13,10 +13,10 @@ from typing import Any
 def default_config_path() -> Path:
     if sys.platform.startswith("win"):
         base = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
-        return Path(base) / "RunnerAgent" / "config.json"
+        return Path(base) / "SextantAgent" / "config.json"
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        return Path("/etc/runner-agent/config.json")
-    return Path.home() / ".config" / "runner-agent" / "config.json"
+        return Path("/etc/sextant-agent/config.json")
+    return Path.home() / ".config" / "sextant-agent" / "config.json"
 
 
 @dataclass
@@ -86,7 +86,7 @@ def save_config(config: AgentConfig, path: Path | str | None = None) -> Path:
     config_path = Path(path) if path else default_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(asdict(config), indent=2) + "\n"
-    fd, temp_name = tempfile.mkstemp(prefix=".runner-agent-", dir=config_path.parent)
+    fd, temp_name = tempfile.mkstemp(prefix=".sextant-agent-", dir=config_path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(payload)

@@ -12,7 +12,7 @@ const demoAgent = {
   ip: "192.168.1.20",
   mac: "AA:BB:CC:DD:EE:FF",
   machine_id: "machine-demo",
-  agent_version: "0.2.0",
+  agent_version: "0.3.0",
   tags: ["office", "gpu"],
   notes: "",
   watch_services: ["Spooler"],
@@ -279,7 +279,7 @@ function loginPayload() {
       ldap_enabled: false,
       local_auth: true,
       offline_after_seconds: 90,
-      version: "0.2.0",
+      version: "0.3.0",
       public_url: "",
     },
   };
@@ -367,7 +367,7 @@ function createApi(session) {
   return function respond(url, method) {
     const key = url.pathname;
     if (key === "/api/auth/config") {
-      return { status: 200, body: { ldap_enabled: false, version: "0.2.0", public_url: "" } };
+      return { status: 200, body: { ldap_enabled: false, version: "0.3.0", public_url: "" } };
     }
     if (key === "/api/me") {
       return session.authenticated
@@ -388,7 +388,7 @@ function createApi(session) {
         status: 200,
         body: {
           update_available: true,
-          current_version: "0.2.0",
+          current_version: "0.3.0",
           latest_version: "9.9.9",
           url: "https://example.test/releases",
         },

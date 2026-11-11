@@ -11,7 +11,7 @@ Related: [Self-update](SELF_UPDATE.md), [Package store](PACKAGE_STORE.md), [Inst
 
 - Server updates are manual: copy the new source/wheel, reinstall the venv, restart systemd, verify health.
 - There is no update feed, no version check, and no admin notification.
-- The server and agent ship from the **same distribution** (`runner_control` + `runner_agent`, shared version). A server release therefore contains the matching agent code.
+- The server and agent ship from the **same distribution** (`sextant_control` + `sextant_agent`, shared version). A server release therefore contains the matching agent code.
 - The package store and agent self-update plans provide blob storage, hash-verified manifests, and the agent pull/verify/switch path. Tier 0 integrity is the current scope; signatures are deferred.
 
 ---
@@ -77,16 +77,16 @@ Two supported sources:
 
 ### A. GitHub Releases API (default for this project)
 
-- Configure `RC_UPDATE_FEED=github:<owner>/<repo>`.
+- Configure `SEXTANT_UPDATE_FEED=github:<owner>/<repo>`.
 - The server calls `GET /repos/{owner}/{repo}/releases?per_page=20` and selects releases by channel/tag pattern.
 - Prefer **release assets** (wheel, checksums, manifest) over source tarballs. This feed is for the **server release only**; app packages are never downloaded from GitHub.
-- Use an optional `RC_GITHUB_TOKEN` for private repos and higher rate limits. Public GitHub allows 60 requests/hour unauthenticated; authenticated allows 5,000/hour.
-- Poll at most every `RC_UPDATE_CHECK_HOURS` (default 6), plus once at startup.
+- Use an optional `SEXTANT_GITHUB_TOKEN` for private repos and higher rate limits. Public GitHub allows 60 requests/hour unauthenticated; authenticated allows 5,000/hour.
+- Poll at most every `SEXTANT_UPDATE_CHECK_HOURS` (default 6), plus once at startup.
 - Cache the result; do not call GitHub on every login.
 
 ### B. Static feed
 
-- `RC_UPDATE_FEED_URL=https://ops.example.com/updates/server.json`
+- `SEXTANT_UPDATE_FEED_URL=https://ops.example.com/updates/server.json`
 - The feed is a small JSON document listing versions, channels, artifacts, SHA-256, changelog, and `min_version`.
 - Works on restricted networks and avoids GitHub dependency; can be served by the store or a static web server.
 - Verify the artifact SHA-256 and size before staging. The feed itself can be allowlisted/pinned; Tier 1 feed signing is deferred.
@@ -104,7 +104,7 @@ An importer copies GitHub release assets into the store automatically. That is u
 If a newer release exists, show an admin-only banner/notice:
 
 ```text
-Runner Control 0.4.0 is available (you are on 0.3.2).
+Sextant 0.4.0 is available (you are on 0.3.2).
 Released 2026-11-20 · stable · 4.2 MB · SHA-256 verified
 Changelog: …
 [View details] [Update now] [Remind me later] [Skip this version]
@@ -150,12 +150,12 @@ The server cannot cleanly restart itself from inside its own process/service cgr
 
 | Option | Notes |
 |---|---|
-| **Transient unit** | `systemd-run --unit=runner-control-update --collect /opt/runner-control/current/bin/runner-control-updater <release>` runs outside the service cgroup, performs the switch, then `systemctl restart runner-control` |
-| **Dedicated updater unit** | A small `runner-control-updater.service` triggered by the server; simplest to make idempotent and audit |
+| **Transient unit** | `systemd-run --unit=sextant-update --collect /opt/sextant/current/bin/sextant-updater <release>` runs outside the service cgroup, performs the switch, then `systemctl restart sextant` |
+| **Dedicated updater unit** | A small `sextant-updater.service` triggered by the server; simplest to make idempotent and audit |
 | **Exit-and-restart** | Server exits with a special code; systemd `Restart=on-failure` restarts into the new `current` symlink. Works only if the switch is already complete and the unit uses `RestartSec` |
 | **External supervisor** | Ansible/CI performs the update; the UI only notifies |
 
-Recommendation: a small `runner-control-updater` helper invoked via `systemd-run` or a dedicated unit. It owns:
+Recommendation: a small `sextant-updater` helper invoked via `systemd-run` or a dedicated unit. It owns:
 - stopping the service,
 - switching `current`,
 - starting the service,
@@ -171,7 +171,7 @@ nginx keeps serving while the app restarts (502 briefly); use a short maintenanc
 
 Because server and agent share a version, a successful server update gives the server the matching agent wheel.
 
-1. **Publish** the bundled `runner_control-<version>-py3-none-any.whl` as a store release (`artifact_type=agent-wheel`). Tier 0 uses hash/size verification; no signing key is involved.
+1. **Publish** the bundled `sextant-<version>-py3-none-any.whl` as a store release (`artifact_type=agent-wheel`). Tier 0 uses hash/size verification; no signing key is involved.
 2. **Create or update** an agent update policy:
    - default: `manual` (admins see “agent update available” and can approve per device/tag);
    - optional: `auto` for a canary tag, then a percentage, then the fleet;

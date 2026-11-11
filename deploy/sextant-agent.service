@@ -1,5 +1,5 @@
 [Unit]
-Description=Runner Control agent
+Description=Sextant agent
 After=network-online.target
 Wants=network-online.target
 
@@ -12,7 +12,7 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 NoNewPrivileges=true
 UMask=0077
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
-ExecStart=/opt/runner-agent/current/bin/runner-agent run --config /etc/runner-agent/config.json
+ExecStart=/opt/sextant-agent/current/bin/sextant-agent run --config /etc/sextant-agent/config.json
 Restart=on-failure
 RestartSec=10
 RestartPreventExitStatus=2

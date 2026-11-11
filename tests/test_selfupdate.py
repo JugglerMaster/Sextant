@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from runner_agent import selfupdate
-from runner_agent.config import AgentConfig
+from sextant_agent import selfupdate
+from sextant_agent.config import AgentConfig
 from tests.helpers import enroll_agent, headers, issue_token, sample_metrics, heartbeat
 
 
@@ -20,17 +20,17 @@ def _agent_config() -> AgentConfig:
 def _publish_agent_wheel(client, admin, version="9.9.9", data=b"wheel-bytes"):
     package = client.post(
         "/api/store/packages",
-        json={"slug": "runner-agent", "name": "Runner Agent", "kind": "agent"},
+        json={"slug": "sextant-agent", "name": "Sextant Agent", "kind": "agent"},
         headers=headers(admin),
     )
     assert package.status_code == 200, package.text
     response = client.put(
-        f"/api/store/packages/runner-agent/releases/{version}",
+        f"/api/store/packages/sextant-agent/releases/{version}",
         content=data,
         headers={
             **headers(admin),
             "X-Artifact-Type": "agent-wheel",
-            "X-Filename": f"runner_control-{version}-py3-none-any.whl",
+            "X-Filename": f"sextant-{version}-py3-none-any.whl",
         },
     )
     assert response.status_code == 200, response.text
@@ -66,7 +66,7 @@ def test_agent_update_endpoint_and_heartbeat(client, admin):
 def test_selfupdate_check_uses_client(monkeypatch):
     config = _agent_config()
     monkeypatch.setattr(
-        "runner_agent.selfupdate.AgentClient.get_update",
+        "sextant_agent.selfupdate.AgentClient.get_update",
         lambda self, current: {"available": True, "version": "1.2.3", "current_version": current},
     )
     info = selfupdate.check(config)
@@ -82,7 +82,7 @@ def test_selfupdate_apply_verifies_and_switches(monkeypatch, tmp_path):
         "version": "1.2.3",
         "sha256": sha,
         "size": len(data),
-        "filename": "runner_control-1.2.3-py3-none-any.whl",
+        "filename": "sextant-1.2.3-py3-none-any.whl",
         "download_url": "/api/agent/agt_test/store/releases/rel_test/download",
     }
 
@@ -91,11 +91,11 @@ def test_selfupdate_apply_verifies_and_switches(monkeypatch, tmp_path):
         return len(data)
 
     switched = []
-    monkeypatch.setattr("runner_agent.selfupdate.AgentClient.download", fake_download)
-    monkeypatch.setattr("runner_agent.selfupdate._stage_venv", lambda version, wheel, install_dir: tmp_path / "venv")
-    monkeypatch.setattr("runner_agent.selfupdate._health_check", lambda venv, cfg: True)
-    monkeypatch.setattr("runner_agent.selfupdate._switch_current", lambda install_dir, version: switched.append(version))
-    monkeypatch.setattr("runner_agent.selfupdate._prune_releases", lambda install_dir: None)
+    monkeypatch.setattr("sextant_agent.selfupdate.AgentClient.download", fake_download)
+    monkeypatch.setattr("sextant_agent.selfupdate._stage_venv", lambda version, wheel, install_dir: tmp_path / "venv")
+    monkeypatch.setattr("sextant_agent.selfupdate._health_check", lambda venv, cfg: True)
+    monkeypatch.setattr("sextant_agent.selfupdate._switch_current", lambda install_dir, version: switched.append(version))
+    monkeypatch.setattr("sextant_agent.selfupdate._prune_releases", lambda install_dir: None)
 
     result = selfupdate.apply_update(
         _agent_config(),
@@ -121,7 +121,7 @@ def test_selfupdate_rejects_bad_hash(monkeypatch, tmp_path):
         Path(destination).write_bytes(b"data")
         return 4
 
-    monkeypatch.setattr("runner_agent.selfupdate.AgentClient.download", fake_download)
+    monkeypatch.setattr("sextant_agent.selfupdate.AgentClient.download", fake_download)
     result = selfupdate.apply_update(
         _agent_config(),
         info,

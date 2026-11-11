@@ -1,10 +1,66 @@
-# Runner Control
+# Sextant
 
-A self-hosted remote operations console for a private network: a Linux server, cross-platform runner agents, and a web dashboard for wake-on-LAN, health monitoring, disk/GPU telemetry, service management, shutdown/reboot, and audited remote shells.
+**Jesus is my guiding light.**
+
+A self-hosted fleet operations console for a private network: a Linux server, cross-platform agents, and a web dashboard for wake-on-LAN, health monitoring, disk/GPU telemetry, service management, shutdown/reboot, and audited remote shells.
 
 It is intentionally a single-tenant, self-hosted tool. There is no cloud relay. The server initiates nothing toward agents; agents make outbound authenticated HTTPS requests and pick up queued work.
 
 > **Security first:** an operator account can execute arbitrary commands as the agent's OS user (root/SYSTEM by default). Read [docs/SECURITY.md](docs/SECURITY.md), put the console behind HTTPS and a VPN or trusted admin network, and do not expose it directly to the public internet.
+
+## Screenshots
+
+| Fleet dashboard (dark) | Fleet dashboard (light) |
+| --- | --- |
+| ![Sextant fleet dashboard in the dark theme](docs/images/dashboard-dark.png) | ![Sextant fleet dashboard in the light theme](docs/images/dashboard-light.png) |
+
+![Sextant trends, persistent event timeline, and What changed summary](docs/images/trends-dark.png)
+
+*Gap-aware 24h/7d trends, a persistent state-change timeline, and the What changed summary.*
+
+<details>
+<summary>Login screen and remote terminal</summary>
+
+![Sextant login screen with the project motto](docs/images/login-dark.png)
+
+![Sextant remote terminal with live streamed output](docs/images/remote-terminal-dark.png)
+
+</details>
+
+## Live-tested on real hardware
+
+Sextant 0.3.0 was installed and exercised on a Raspberry Pi — not a mock or a
+container:
+
+| Host | OS | Architecture | Python | Hardware |
+| --- | --- | --- | --- | --- |
+| `pivideo1` | Raspbian GNU/Linux 13 (trixie) | `armv7l` (32-bit) | 3.13.5 | Raspberry Pi, 920 MB RAM, 6.8 GB root disk |
+
+The live run covered:
+
+- a `py3-none-any` wheel install through the systemd installer;
+- heartbeat telemetry for CPU, memory, both disks, **211 services**, and **962 apt packages**;
+- a six-line shell command that streamed **12 stdout/stderr events once per second** before the final result;
+- a dashboard SSE update within half a second of a command mutation, and stream closure on logout;
+- self-update from 0.2.0 to 0.3.0 with SHA-256 verification, a staged venv, and a service restart;
+- login, drawer tabs, trends, history, packages, services, live terminal, command palette, and both themes in Chromium.
+
+Example install on a comparable Pi:
+
+```bash
+sudo SOURCE_DIR=/path/to/sextant-0.3.0-py3-none-any.whl \
+  PROFILE=server \
+  WATCH_SERVICES=ssh \
+  AGENT_TAGS=raspberry-pi,armv7 \
+  ./deploy/install-linux-agent.sh \
+  https://ops.example.com \
+  <ENROLLMENT_TOKEN> \
+  pivideo1
+```
+
+The 32-bit `armv7l` result is expected: the agent is standard-library-only and the
+wheel is platform-independent. An `arm64` Raspberry Pi OS install works the same
+way.
 
 ## Features
 
@@ -42,7 +98,7 @@ It is intentionally a single-tenant, self-hosted tool. There is no cloud relay. 
                     └─────────┬─────────┘
                               │ 127.0.0.1:8080
                     ┌─────────▼─────────┐
-                    │ Runner Control    │
+                    │ Sextant Console   │
                     │ FastAPI + SQLite  │◄──── LDAP(S) ──── AD / Samba AD
                     │ dashboard + API   │
                     └──────┬──────┬─────┘
@@ -70,9 +126,9 @@ python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 source .venv/bin/activate
 
-export RC_DATA_DIR="$PWD/data"
-export RC_ADMIN_PASSWORD='a long password for local admin'
-.venv/bin/runner-control serve --host 127.0.0.1 --port 8080
+export SEXTANT_DATA_DIR="$PWD/data"
+export SEXTANT_ADMIN_PASSWORD='a long password for local admin'
+.venv/bin/sextant serve --host 127.0.0.1 --port 8080
 ```
 
 Open <http://127.0.0.1:8080>, sign in as `admin`, then create an enrollment token under **Enrollment**. On a Linux target:
@@ -84,8 +140,8 @@ Open <http://127.0.0.1:8080>, sign in as `admin`, then create an enrollment toke
 Or enroll manually:
 
 ```bash
-runner-agent enroll --server http://127.0.0.1:8080 --token <TOKEN> --name my-linux-box --watch-service ssh
-runner-agent run --config /etc/runner-agent/config.json
+sextant-agent enroll --server http://127.0.0.1:8080 --token <TOKEN> --name my-linux-box --watch-service ssh
+sextant-agent run --config /etc/sextant-agent/config.json
 ```
 
 For a Windows target, run PowerShell as Administrator:
@@ -100,14 +156,22 @@ The development server uses HTTP. Put TLS in front of it for any real deployment
 
 ```bash
 .venv/bin/pytest -q
-.venv/bin/python -m compileall -q runner_control runner_agent
-node --check runner_control/static/app.js
+.venv/bin/python -m pyflakes sextant_control sextant_agent tests
+.venv/bin/python -m compileall -q sextant_control sextant_agent
+node --check sextant_control/static/app.js
 
-# Browser-side dashboard smoke test (jsdom)
-cd ui-tests && npm ci && npm test
+cd ui-tests
+npm ci
+npm test
+npx playwright install chromium
+npm run test:visual
 ```
 
-The Python suite covers password/session/CSRF security, the API RBAC and authentication contract, local and AD login, session revocation, user disable/reset, failed-login audit, enrollment, heartbeat, command dispatch/idempotency/cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication, WoL, audit logging, agent parsers, executor behavior, config handling, the Tier 0 package store, server update checks, agent self-update, package inventory/desired-state sync, agent profiles, revisioned inventory, and key-based SSH remote install. The jsdom test loads the real dashboard, logs in against mocked API responses, and verifies the fleet, drawer, history actions, policy/user/session dialogs, GPU process list, and remote terminal render. A real end-to-end server/agent smoke test is described in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#validation). See [docs/TESTING.md](docs/TESTING.md) for the full run commands and current coverage gaps.
+The Python suite has **192 tests**. It covers password/session/CSRF security, the API RBAC and authentication contract, local and AD login, session revocation, user disable/reset, failed-login audit, enrollment, heartbeat, command dispatch/idempotency/cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication, WoL, audit logging, agent parsers, executor behavior, config handling, the Tier 0 package store, server update checks, agent self-update, package inventory/desired-state sync, agent profiles, revisioned inventory, and key-based SSH remote install.
+
+The jsdom smoke test loads the real dashboard and verifies the fleet, live SSE fallback, drawer, paginated history, trends, timeline, alert lifecycle, bulk actions, saved views, policy/user/session dialogs, GPU process list, and remote terminal. The **10 Playwright + axe-core tests** cover dark/light themes at desktop and mobile widths, login, dashboard, drawer tabs, command-palette keyboard flow, focus trap/return, and serious/critical accessibility violations.
+
+A real end-to-end server/agent smoke test is described in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#validation), and the Raspberry Pi run is recorded in [docs/TESTING.md](docs/TESTING.md#manual-live-validation). See [docs/TESTING.md](docs/TESTING.md) for the full coverage gaps.
 
 ## Configuration
 
@@ -115,32 +179,32 @@ All server configuration is environment variables. The common ones:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `RC_DATA_DIR` | `./data` | SQLite DB, server secret, bootstrap admin file |
-| `RC_PUBLIC_URL` | empty | Public base URL used in enrollment commands |
-| `RC_COOKIE_SECURE` | `0` | Set to `1` when serving over HTTPS |
-| `RC_TRUST_PROXY` | `0` | Trust `X-Forwarded-For` / proxy headers (the proxy must overwrite the header) |
-| `RC_ALLOWED_HOSTS` | from `RC_PUBLIC_URL` | Comma-separated `Host` header allowlist |
-| `RC_ADMIN_USER` | `admin` | Bootstrap username, only when DB has no users |
-| `RC_ADMIN_PASSWORD` | unset | Bootstrap password; otherwise one is generated |
-| `RC_SESSION_HOURS` | `12` | Session lifetime |
-| `RC_OFFLINE_AFTER_SECONDS` | `90` | Online/offline threshold |
-| `RC_OFFLINE_COMMAND_POLICY` | `queue` | `reject` refuses commands for offline agents |
-| `RC_MAX_QUEUED_COMMANDS_PER_AGENT` | `50` | Queue cap per agent |
-| `RC_QUEUED_COMMAND_TTL_HOURS` | `24` | Expire work queued for offline agents |
-| `RC_DISPATCHED_GRACE_SECONDS` | `120` | Extra time before a dispatched command is failed |
-| `RC_SESSION_CLEANUP_DAYS` | `7` | Retention for expired/revoked session rows |
-| `RC_COMMAND_RETENTION_DAYS` | `90` | Retention for terminal command rows |
-| `RC_AUDIT_RETENTION_DAYS` | `365` | Retention for audit rows |
-| `RC_TELEMETRY_HISTORY` | `1` | Store bounded per-heartbeat telemetry history |
-| `RC_TELEMETRY_RETENTION_DAYS` | `7` | Telemetry history retention (1–365 days) |
-| `RC_STORE_ENABLED` | `1` | Enable the package store |
-| `RC_STORE_MAX_BLOB_MB` | `512` | Per-artifact upload limit |
-| `RC_STORE_MAX_TOTAL_GB` | `20` | Total store quota |
-| `RC_UPDATE_FEED` | empty | `github:owner/repo` or HTTPS JSON for the server update check |
-| `RC_UPDATE_CHECK_HOURS` | `6` | Update-check cache interval |
-| `RC_LDAP_*` | unset | AD/Samba LDAP settings; see the env example |
+| `SEXTANT_DATA_DIR` | `./data` | SQLite DB, server secret, bootstrap admin file |
+| `SEXTANT_PUBLIC_URL` | empty | Public base URL used in enrollment commands |
+| `SEXTANT_COOKIE_SECURE` | `0` | Set to `1` when serving over HTTPS |
+| `SEXTANT_TRUST_PROXY` | `0` | Trust `X-Forwarded-For` / proxy headers (the proxy must overwrite the header) |
+| `SEXTANT_ALLOWED_HOSTS` | from `SEXTANT_PUBLIC_URL` | Comma-separated `Host` header allowlist |
+| `SEXTANT_ADMIN_USER` | `admin` | Bootstrap username, only when DB has no users |
+| `SEXTANT_ADMIN_PASSWORD` | unset | Bootstrap password; otherwise one is generated |
+| `SEXTANT_SESSION_HOURS` | `12` | Session lifetime |
+| `SEXTANT_OFFLINE_AFTER_SECONDS` | `90` | Online/offline threshold |
+| `SEXTANT_OFFLINE_COMMAND_POLICY` | `queue` | `reject` refuses commands for offline agents |
+| `SEXTANT_MAX_QUEUED_COMMANDS_PER_AGENT` | `50` | Queue cap per agent |
+| `SEXTANT_QUEUED_COMMAND_TTL_HOURS` | `24` | Expire work queued for offline agents |
+| `SEXTANT_DISPATCHED_GRACE_SECONDS` | `120` | Extra time before a dispatched command is failed |
+| `SEXTANT_SESSION_CLEANUP_DAYS` | `7` | Retention for expired/revoked session rows |
+| `SEXTANT_COMMAND_RETENTION_DAYS` | `90` | Retention for terminal command rows |
+| `SEXTANT_AUDIT_RETENTION_DAYS` | `365` | Retention for audit rows |
+| `SEXTANT_TELEMETRY_HISTORY` | `1` | Store bounded per-heartbeat telemetry history |
+| `SEXTANT_TELEMETRY_RETENTION_DAYS` | `7` | Telemetry history retention (1–365 days) |
+| `SEXTANT_STORE_ENABLED` | `1` | Enable the package store |
+| `SEXTANT_STORE_MAX_BLOB_MB` | `512` | Per-artifact upload limit |
+| `SEXTANT_STORE_MAX_TOTAL_GB` | `20` | Total store quota |
+| `SEXTANT_UPDATE_FEED` | empty | `github:owner/repo` or HTTPS JSON for the server update check |
+| `SEXTANT_UPDATE_CHECK_HOURS` | `6` | Update-check cache interval |
+| `SEXTANT_LDAP_*` | unset | AD/Samba LDAP settings; see the env example |
 
-See [deploy/runner-control.env.example](deploy/runner-control.env.example) for a deployment template and `runner_control/config.py` for every accepted variable. See [docs/AD_LDAP.md](docs/AD_LDAP.md) for directory setup.
+See [deploy/sextant.env.example](deploy/sextant.env.example) for a deployment template and `sextant_control/config.py` for every accepted variable. See [docs/AD_LDAP.md](docs/AD_LDAP.md) for directory setup.
 
 ## Documentation
 
@@ -190,7 +254,7 @@ See [deploy/runner-control.env.example](deploy/runner-control.env.example) for a
 
 ## Legitimate use
 
-Use Runner Control only on machines you own or administer with authorization. The audit trail, explicit enrollment, agent-side policy flags, and per-agent tokens are there so access is deliberate and reviewable. This project does not implement stealth, persistence beyond the documented service/scheduled task, credential theft, or evasion.
+Use Sextant only on machines you own or administer with authorization. The audit trail, explicit enrollment, agent-side policy flags, and per-agent tokens are there so access is deliberate and reviewable. This project does not implement stealth, persistence beyond the documented service/scheduled task, credential theft, or evasion.
 
 ## License
 

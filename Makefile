@@ -13,9 +13,9 @@ test:
 	$(VENV)/bin/pytest -q
 
 check:
-	$(VENV)/bin/python -m compileall -q runner_control runner_agent
-	$(VENV)/bin/pyflakes runner_control runner_agent tests
-	node --check runner_control/static/app.js
+	$(VENV)/bin/python -m compileall -q sextant_control sextant_agent
+	$(VENV)/bin/pyflakes sextant_control sextant_agent tests
+	node --check sextant_control/static/app.js
 
 lock:
 	$(VENV)/bin/pip install -q pip-tools
@@ -30,4 +30,4 @@ ui-test:
 	cd ui-tests && npm ci && npm test
 
 run:
-	$(VENV)/bin/runner-control serve --host 127.0.0.1 --port 8080
+	$(VENV)/bin/sextant serve --host 127.0.0.1 --port 8080

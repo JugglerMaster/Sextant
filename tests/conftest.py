@@ -5,11 +5,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from runner_control.config import Settings
-from runner_control.server import create_app
+from sextant_control.config import Settings
+from sextant_control.server import create_app
 from tests.helpers import ADMIN_PASSWORD, login
 
-STATIC_DIR = Path(__file__).resolve().parents[1] / "runner_control" / "static"
+STATIC_DIR = Path(__file__).resolve().parents[1] / "sextant_control" / "static"
 
 
 @pytest.fixture()

@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from runner_agent.client import _NoRedirectHandler
-from runner_agent.executor import run_capture
-from runner_control.config import Settings
-from runner_control.security import decode_session, sign_session
-from runner_control.server import create_app
-from runner_control.views import validate_command_args
+from sextant_agent.client import _NoRedirectHandler
+from sextant_agent.executor import run_capture
+from sextant_control.config import Settings
+from sextant_control.security import decode_session, sign_session
+from sextant_control.server import create_app
+from sextant_control.views import validate_command_args
 from tests.helpers import (
     enroll_agent,
     heartbeat,
@@ -22,7 +22,7 @@ from tests.helpers import (
     login,
 )
 
-STATIC_DIR = Path(__file__).resolve().parents[1] / "runner_control" / "static"
+STATIC_DIR = Path(__file__).resolve().parents[1] / "sextant_control" / "static"
 WEAK_ADMIN_HASH = "admin"
 
 
@@ -92,11 +92,11 @@ def test_session_cookie_uid_must_match_session_row(app, client, admin):
 
 def test_configured_secret_key_must_be_strong(tmp_path):
     with pytest.raises(ValueError):
-        Settings.from_env({"RC_DATA_DIR": str(tmp_path), "RC_SECRET_KEY": "short"})
+        Settings.from_env({"SEXTANT_DATA_DIR": str(tmp_path), "SEXTANT_SECRET_KEY": "short"})
 
 
 def test_session_hours_are_clamped(tmp_path):
-    settings = Settings.from_env({"RC_DATA_DIR": str(tmp_path), "RC_SESSION_HOURS": "999999"})
+    settings = Settings.from_env({"SEXTANT_DATA_DIR": str(tmp_path), "SEXTANT_SESSION_HOURS": "999999"})
     assert settings.session_hours == 8784
 
 
@@ -129,7 +129,7 @@ def test_enrollment_token_uses_configured_default(settings):
         )
         assert response.status_code == 200, response.text
         expires = response.json()["expires_at"]
-        from runner_control.db import parse_iso
+        from sextant_control.db import parse_iso
 
         delta = (parse_iso(expires) - parse_iso(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())))
         assert 6 * 60 <= delta.total_seconds() <= 8 * 60

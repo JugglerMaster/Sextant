@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-STATIC = Path(__file__).resolve().parents[1] / "runner_control" / "static"
+STATIC = Path(__file__).resolve().parents[1] / "sextant_control" / "static"
 
 
 def test_static_assets_do_not_require_inline_styles():

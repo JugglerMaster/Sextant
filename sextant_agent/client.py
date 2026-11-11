@@ -61,7 +61,7 @@ class AgentClient:
         data = None
         headers = {
             "Accept": "application/json",
-            "User-Agent": f"runner-agent/{__version__}",
+            "User-Agent": f"sextant-agent/{__version__}",
         }
         if payload is not None:
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -143,7 +143,7 @@ class AgentClient:
     def download(self, path: str, destination, max_bytes: int = 200 * 1024 * 1024) -> int:
         headers = {
             "Accept": "application/octet-stream",
-            "User-Agent": f"runner-agent/{__version__}",
+            "User-Agent": f"sextant-agent/{__version__}",
         }
         if self.config.agent_token:
             headers["Authorization"] = f"Bearer {self.config.agent_token}"

@@ -5,21 +5,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0b1118">
-  <title>Runner Control</title>
+  <title>Sextant</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
   <div class="auth-shell" id="login-view">
-    <section class="login-art" aria-label="Runner Control introduction">
+    <section class="login-art" aria-label="Sextant introduction">
       <div class="brand brand-large">
         <span class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 32 32" role="img"><path d="M6 7.5h20v17H6z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M11 12.5l4 3.5-4 3.5M17 19.5h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </span>
-        <span>Runner Control</span>
+        <span>Sextant</span>
       </div>
       <div class="login-copy">
         <p class="eyebrow">Private operations console</p>
         <h1>Your machines.<br>One control plane.</h1>
+        <p class="login-motto">Jesus is my guiding light</p>
         <p class="lede">Wake hosts, watch disks and GPUs, manage services, and open a remote shell — all from one audited, self-hosted dashboard.</p>
       </div>
       <ul class="feature-list">
@@ -59,7 +60,7 @@
           <button class="button button-primary button-wide" id="login-submit" type="submit">Sign in</button>
         </form>
         <div class="login-meta">
-          <span id="login-version">Runner Control</span>
+          <span id="login-version">Sextant</span>
           <span class="dot-sep" aria-hidden="true">•</span>
           <span>Session cookie + CSRF protection</span>
         </div>
@@ -73,7 +74,7 @@
         <span class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 32 32"><path d="M6 7.5h20v17H6z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M11 12.5l4 3.5-4 3.5M17 19.5h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </span>
-        <span>Runner Control</span>
+        <span>Sextant</span>
       </div>
       <nav class="nav" aria-label="Main navigation">
         <button class="nav-item is-active" data-page="overview" type="button">
@@ -230,7 +231,7 @@
         <div class="empty-state" id="empty-agents" hidden>
           <span class="empty-icon" aria-hidden="true">⌁</span>
           <h3>No machines yet</h3>
-          <p>Enroll your first Linux or Windows runner agent to start collecting telemetry.</p>
+          <p>Enroll your first Linux or Windows agent to start collecting telemetry.</p>
           <button class="button button-primary nav-admin" data-page="enroll" type="button">Create enrollment token</button>
         </div>
       </section>
@@ -422,7 +423,7 @@
           <article class="panel">
             <div class="panel-head"><div><p class="eyebrow">Directory</p><h2>Identity provider</h2></div></div>
             <dl class="detail-list" id="security-details"></dl>
-            <p class="form-hint">AD/Samba login uses LDAP bind. Group membership maps to admin, operator, or viewer roles. Configure it with <code>RC_LDAP_*</code> environment variables.</p>
+            <p class="form-hint">AD/Samba login uses LDAP bind. Group membership maps to admin, operator, or viewer roles. Configure it with <code>SEXTANT_LDAP_*</code> environment variables.</p>
           </article>
         </div>
       </section>

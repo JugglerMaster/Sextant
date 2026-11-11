@@ -134,7 +134,7 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="runner-agent", description="Runner Control cross-platform agent")
+    parser = argparse.ArgumentParser(prog="sextant-agent", description="Sextant cross-platform agent")
     parser.add_argument("--config", default=None, help="Path to agent config JSON")
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--log-file", default=None, help="Append logs to this file")
@@ -180,8 +180,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     update = sub.add_parser("update", parents=[common], help="Check for or apply an agent update from the store")
     update.add_argument("--apply", action="store_true", help="Download, verify, stage, and switch to the new version")
-    update.add_argument("--restart", action="store_true", help="Restart runner-agent after switching (systemd)")
-    update.add_argument("--install-dir", default="", help="Agent install directory (default /opt/runner-agent)")
+    update.add_argument("--restart", action="store_true", help="Restart sextant-agent after switching (systemd)")
+    update.add_argument("--install-dir", default="", help="Agent install directory (default /opt/sextant-agent)")
     update.set_defaults(func=cmd_update)
 
     show = sub.add_parser("show", parents=[common], help="Show the saved config with the token redacted")

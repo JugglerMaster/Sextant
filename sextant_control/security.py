@@ -48,9 +48,9 @@ _COMMON_PASSWORDS = frozenset(
         "qwerty",
         "qwerty123",
         "qwertyuiop",
-        "runnercontrol",
-        "runnercontrol1",
-        "runnercontrol123",
+        "sextant",
+        "sextant1",
+        "sextant123",
         "welcome",
         "welcome1",
         "welcome123",
@@ -122,7 +122,7 @@ def _password_is_common(password: str) -> bool:
     if lowered in _COMMON_PASSWORDS or compact in _COMMON_PASSWORDS:
         return True
     # Treat short numeric/symbol decorations as cosmetic: password!2026,
-    # runnercontrol123, changeme-now, ...
+    # sextant123, changeme-now, ...
     trimmed = compact.rstrip("0123456789")
     return bool(trimmed) and len(compact) - len(trimmed) <= 6 and trimmed in _COMMON_PASSWORDS
 

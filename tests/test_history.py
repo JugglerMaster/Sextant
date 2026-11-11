@@ -6,8 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from runner_control.db import Database, parse_iso
-from runner_control.server import create_app
+from sextant_control.db import Database, parse_iso
+from sextant_control.server import create_app
 from tests.helpers import enroll_agent, headers, heartbeat, login, sample_metrics
 
 

@@ -90,7 +90,7 @@ Effort: small–medium. No new datastore required if deduplication state is in S
 
 **Why:** The dashboard only shows the latest sample. Disk and GPU trends are more useful than a snapshot.
 
-Done: bounded `telemetry_samples` table, retention (`RC_TELEMETRY_RETENTION_DAYS`, default 7 days), `GET /api/agents/{id}/history` with server-side downsampling and gap-aware buckets, 24-hour sparklines, and 24h/7d detail charts with a real timestamp axis. Persistent `agent_events` feed the timeline and What changed summary.
+Done: bounded `telemetry_samples` table, retention (`SEXTANT_TELEMETRY_RETENTION_DAYS`, default 7 days), `GET /api/agents/{id}/history` with server-side downsampling and gap-aware buckets, 24-hour sparklines, and 24h/7d detail charts with a real timestamp axis. Persistent `agent_events` feed the timeline and What changed summary.
 
 Remaining scope:
 

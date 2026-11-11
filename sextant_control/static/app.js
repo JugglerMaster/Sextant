@@ -50,11 +50,11 @@ const HISTORY_STATUS_FILTERS = ["all", "queued", "dispatched", "succeeded", "fai
 const HISTORY_SEARCH_DELAY = 300;
 const FLEET_STATUS_VALUES = ["all", "online", "offline", "alerts"];
 const ADMIN_PAGES = ["enroll", "audit", "users", "profiles", "remote-install"];
-const THEME_KEY = "rc.theme";
+const THEME_KEY = "sextant.theme";
 const PAGE_META = {
   overview: ["Fleet", "Live machines and health at a glance."],
   wake: ["Wake targets", "Send Wake-on-LAN packets to machines without agents."],
-  enroll: ["Enrollment", "Issue one-time tokens and onboard runner agents."],
+  enroll: ["Enrollment", "Issue one-time tokens and onboard agents."],
   audit: ["Audit log", "Who did what, from where, and when."],
   users: ["Users", "Local accounts and role-based access."],
   profiles: ["Profiles", "Global agent behavior, cadence, modules, and tag assignments."],
@@ -683,7 +683,7 @@ async function checkForUpdates() {
       banner.hidden = true;
       return;
     }
-    setText("update-banner-text", `Runner Control ${data.latest_version} is available (you are on ${data.current_version}).`);
+    setText("update-banner-text", `Sextant ${data.latest_version} is available (you are on ${data.current_version}).`);
     const link = $("update-banner-link");
     if (data.url) {
       link.href = data.url;
@@ -2917,7 +2917,7 @@ function renderHistory(body) {
     {
       class: "button button-secondary button-small",
       href: historyExportUrl(agent.id, hist),
-      download: "runner-control-commands.csv",
+      download: "sextant-commands.csv",
       "data-history-export": "true",
     },
     "Export CSV",
@@ -3945,7 +3945,7 @@ function renderSecurity() {
 
 function saveFleetFilters() {
   try {
-    localStorage.setItem("rc.fleetFilters", JSON.stringify(state.fleetFilters));
+    localStorage.setItem("sextant.fleetFilters", JSON.stringify(state.fleetFilters));
   } catch (_error) {
     // Storage may be unavailable in private contexts.
   }
@@ -3953,7 +3953,7 @@ function saveFleetFilters() {
 
 function loadFleetFilters() {
   try {
-    const raw = localStorage.getItem("rc.fleetFilters");
+    const raw = localStorage.getItem("sextant.fleetFilters");
     if (!raw) return;
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
@@ -3982,7 +3982,7 @@ function normalizeSavedView(view) {
 
 function readLocalSavedViews() {
   try {
-    const raw = localStorage.getItem("rc.savedViews");
+    const raw = localStorage.getItem("sextant.savedViews");
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -4000,7 +4000,7 @@ function loadSavedViews() {
 
 function persistSavedViews() {
   try {
-    localStorage.setItem("rc.savedViews", JSON.stringify(state.savedViews));
+    localStorage.setItem("sextant.savedViews", JSON.stringify(state.savedViews));
   } catch (_error) {
     // Storage may be unavailable in private contexts.
   }
@@ -4008,7 +4008,7 @@ function persistSavedViews() {
 
 function clearLocalSavedViews() {
   try {
-    localStorage.removeItem("rc.savedViews");
+    localStorage.removeItem("sextant.savedViews");
   } catch (_error) {
     // Storage may be unavailable in private contexts.
   }
@@ -4163,7 +4163,7 @@ async function init() {
   try {
     const config = await api("/api/auth/config");
     if (config.ldap_enabled) $("login-mode-wrap").hidden = false;
-    setText("login-version", `Runner Control v${config.version || ""}`);
+    setText("login-version", `Sextant v${config.version || ""}`);
   } catch (_error) {
     // Login remains usable with local authentication defaults.
   }

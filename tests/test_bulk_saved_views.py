@@ -122,7 +122,7 @@ def test_bulk_permissions_and_supported_actions(app, client, admin, monkeypatch)
     assert power.status_code == 200, power.text
     assert power.json()["results"][0]["status"] == "queued"
 
-    monkeypatch.setattr("runner_control.server.send_magic_packet", lambda *args, **kwargs: 3)
+    monkeypatch.setattr("sextant_control.server.send_magic_packet", lambda *args, **kwargs: 3)
     wake = _bulk(client, admin, "wake", [first["agent_id"]])
     assert wake.status_code == 200, wake.text
     assert wake.json()["results"][0]["status"] == "sent"

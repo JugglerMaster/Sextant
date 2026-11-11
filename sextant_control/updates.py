@@ -10,7 +10,7 @@ from typing import Any
 
 from . import __version__
 
-USER_AGENT = f"runner-control/{__version__}"
+USER_AGENT = f"sextant/{__version__}"
 
 
 def _now() -> str:
@@ -35,7 +35,7 @@ def _http_json(url: str, timeout: int = 10, token: str = "") -> Any:
 
 
 def _github_release(repo: str) -> dict[str, Any]:
-    token = os.environ.get("RC_GITHUB_TOKEN", "").strip()
+    token = os.environ.get("SEXTANT_GITHUB_TOKEN", "").strip()
     data = _http_json(f"https://api.github.com/repos/{repo}/releases?per_page=20", token=token)
     if not isinstance(data, list):
         raise ValueError("unexpected GitHub response")
@@ -99,12 +99,12 @@ def check_update(feed: str, current_version: str = __version__) -> dict[str, Any
         if feed.startswith("github:"):
             repo = feed.split(":", 1)[1].strip()
             if not repo:
-                raise ValueError("RC_UPDATE_FEED is missing the owner/repo")
+                raise ValueError("SEXTANT_UPDATE_FEED is missing the owner/repo")
             release = _github_release(repo)
         elif feed.startswith("https://") or feed.startswith("http://"):
             release = _static_release(feed)
         else:
-            raise ValueError("RC_UPDATE_FEED must be github:owner/repo or an https URL")
+            raise ValueError("SEXTANT_UPDATE_FEED must be github:owner/repo or an https URL")
         result.update(
             {
                 "latest_version": release.get("version", ""),
