@@ -110,7 +110,8 @@ The path agent ID and token must belong together. Enrollment uses a one-time enr
 | `GET` | `/api/dashboard` | any | Stats + all agents with latest telemetry |
 | `GET` | `/api/events` | any | SSE stream: immediate dashboard snapshot, then change-driven updates |
 | `GET` | `/api/agents/{id}` | any | One agent + latest 50 commands |
-| `GET` | `/api/agents/{id}/history?hours=24&points=200` | any | Downsampled telemetry history (1–720 hours, 10–1000 points) |
+| `GET` | `/api/agents/{id}/history?hours=24&points=200` | any | Gap-aware telemetry history (1–720 hours, 10–1000 buckets) |
+| `GET` | `/api/agents/{id}/events?hours=24&limit=100` | any | Persistent state-change events, newest first (1–720 hours, 1–500 events) |
 | `PATCH` | `/api/agents/{id}` | admin | Edit tags, notes, watched services, action policy |
 | `POST` | `/api/agents/{id}/commands` | operator | Queue a command |
 | `GET` | `/api/agents/{id}/commands?limit=50&offset=0` | any | Paginated command history (limit 1–200) |
@@ -331,13 +332,22 @@ All fields are optional, but at least one must be present. Policy applies on the
 GET /api/agents/agt_123/history?hours=24&points=200
 ```
 
-Any authenticated role can read. `hours` must be 1–720 and `points` must be 10–1000. The server filters to the lookback window and averages samples into at most `points` time buckets, so the response stays bounded even for long-running agents. Unknown agents return 404. Points are sorted ascending by time:
+Any authenticated role can read. `hours` must be 1–720 and `points` must be 10–1000. The server filters to the lookback window and averages samples into exactly `points` time buckets, so the response stays bounded even for long-running agents. Every bucket is returned; buckets with no heartbeat contain explicit `null` metric values and a real bucket timestamp. This lets charts break the line across an offline interval instead of drawing through it. Unknown agents return 404. Points are sorted ascending by time:
 
 ```json
 {
   "agent_id": "agt_123",
   "hours": 24,
   "points": [
+    {
+      "at": "2026-11-06T07:59:36Z",
+      "cpu_pct": null,
+      "mem_pct": null,
+      "disk_max_pct": null,
+      "gpu_max_util": null,
+      "gpu_max_temp": null,
+      "service_down": null
+    },
     {
       "at": "2026-11-06T08:00:00Z",
       "cpu_pct": 22.5,
@@ -352,6 +362,34 @@ Any authenticated role can read. `hours` must be 1–720 and `points` must be 10
 ```
 
 One sample is stored per heartbeat, derived from the latest validated payload. History is kept for `RC_TELEMETRY_RETENTION_DAYS` (default 7, 1–365) and disabled entirely with `RC_TELEMETRY_HISTORY=0`. Disabling history does not affect the latest telemetry shown on the dashboard.
+
+### Read agent state-change events
+
+```http
+GET /api/agents/agt_123/events?hours=24&limit=100
+```
+
+Any authenticated role can read. `hours` must be 1–720 and `limit` must be 1–500. Events are returned newest first. Unknown agents return 404; invalid ranges return 400. Each event has a small fixed schema:
+
+```json
+{
+  "agent_id": "agt_123",
+  "hours": 24,
+  "events": [
+    {
+      "id": 42,
+      "agent_id": "agt_123",
+      "at": "2026-11-06T08:00:00Z",
+      "kind": "service",
+      "severity": "critical",
+      "title": "Service Spooler stopped",
+      "detail": {"service": "Spooler", "from": "running", "to": "stopped"}
+    }
+  ]
+}
+```
+
+Kinds are `online`, `service`, `package`, `version`, `profile`, and `alert`. Alert detail identifies the lifecycle action (`raised`, `cleared`, `acknowledged`, or `snoozed`). Events are recorded best-effort: a failed event write never breaks a heartbeat or command path. Detail is deliberately bounded (for package transitions, at most the first ten names plus counts and a `truncated` flag), and an oversized detail payload is replaced with `{"truncated": true}`. Events are pruned with `RC_COMMAND_RETENTION_DAYS` (default 90).
 
 ## Package management
 

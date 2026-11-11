@@ -43,6 +43,8 @@ Run the whole suite:
 | `tests/test_remote_install.py` | SSH host-key options, install script steps, token redaction, API job lifecycle, RBAC, missing key, one-at-a-time guard |
 | `tests/test_exports.py` | Agents, package inventory, and filtered command-history CSV exports, including quoting and content type |
 | `tests/test_command_history.py` | Paginated command history: total counts, status/text/time filters, limit/offset/timestamp validation, and viewer/anonymous read access |
+| `tests/test_history.py` | Heartbeat-derived telemetry samples, gap-aware bucket series with explicit nulls and timestamps, point caps, viewer access, retention, disabled history, legacy schema migration |
+| `tests/test_agent_events.py` | Transition-based event recording without heartbeat duplicates, service/package/version/profile/alert lifecycle events, event API hours/limit/RBAC, and event retention |
 | `tests/test_events.py` | SSE dashboard initial payload/content type, 401/403 auth, command event terminal payload and stream close |
 | `tests/test_hardening.py` | Failed-login audit, session registry and revocation, user disable/reset, command cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication |
 | `tests/test_security.py` | Password hashing/policy, session signing/tampering/expiry, token hashing, magic packets, LDAP escaping and role mapping, fake LDAP bind flow |
@@ -82,7 +84,7 @@ npm ci
 npm test
 ```
 
-`npm test` runs `ui-tests/ui-smoke.js`. It loads the real `runner_control/static/index.html` and `app.js` in jsdom, replaces `window.fetch` with mocked API responses and `EventSource` with a controllable mock, signs in, and checks the fleet view, update banner, SSE live updates and polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer tabs, package inventory and rule editor, service filters, GPU process list, trends charts and timeline, alert actions, paginated command history (search, status filter, page sizes, Previous/Next, X-Y of Z count, and filter-aware CSV export), remote terminal, profiles page, remote install page, and the policy/user/session dialogs. It is a DOM smoke test, not a browser end-to-end test.
+`npm test` runs `ui-tests/ui-smoke.js`. It loads the real `runner_control/static/index.html` and `app.js` in jsdom, replaces `window.fetch` with mocked API responses and `EventSource` with a controllable mock, signs in, and checks the fleet view, update banner, SSE live updates and polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer tabs, package inventory and rule editor, service filters, GPU process list, gap-aware trends charts (timestamp-positioned points and broken lines over null buckets), persistent state-change timeline entries with real event timestamps, the What changed summary, alert actions, paginated command history (search, status filter, page sizes, Previous/Next, X-Y of Z count, and filter-aware CSV export), remote terminal, profiles page, remote install page, and the policy/user/session dialogs. It is a DOM smoke test, not a browser end-to-end test.
 
 `ui-tests/node_modules` is not committed. `npm ci` needs network access to fetch jsdom; if the directory is absent and the environment is offline, skip the UI test rather than vendoring dependencies.
 

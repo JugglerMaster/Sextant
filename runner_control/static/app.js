@@ -1459,23 +1459,45 @@ function renderOverview(body) {
 }
 
 function sparkline(values, color) {
-  const points = values.map((value) => Number(value || 0));
-  const max = Math.max(1, ...points);
-  const min = Math.min(0, ...points);
+  const numeric = values.map((value) =>
+    value === null || value === undefined || value === "" ? null : Number(value),
+  );
+  const usable = numeric.filter((value) => Number.isFinite(value));
+  const max = Math.max(1, ...usable);
+  const min = Math.min(0, ...usable);
   const width = 180;
   const height = 38;
   const span = Math.max(1, max - min);
-  const coords = points
-    .map((value, index) => {
-      const x = points.length === 1 ? 0 : (index / (points.length - 1)) * width;
-      const y = height - ((value - min) / span) * (height - 4) - 2;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
+  const xFor = (index) => (numeric.length === 1 ? 0 : (index / (numeric.length - 1)) * width);
+  const yFor = (value) => height - ((value - min) / span) * (height - 4) - 2;
+  const segments = [];
+  let segment = [];
+  numeric.forEach((value, index) => {
+    if (!Number.isFinite(value)) {
+      if (segment.length) {
+        segments.push(segment);
+        segment = [];
+      }
+      return;
+    }
+    segment.push(`${xFor(index).toFixed(1)},${yFor(value).toFixed(1)}`);
+  });
+  if (segment.length) segments.push(segment);
   return h(
     "svg",
     { class: "sparkline", viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": "telemetry trend" },
-    h("polyline", { points: coords, fill: "none", stroke: color, "stroke-width": "2", "stroke-linejoin": "round", "stroke-linecap": "round" }),
+    ...segments.map((points) =>
+      h("polyline", { points: points.join(" "), fill: "none", stroke: color, "stroke-width": "2", "stroke-linejoin": "round", "stroke-linecap": "round" }),
+    ),
+  );
+}
+
+function telemetryHasSamples(points) {
+  return (points || []).some((point) =>
+    ["cpu_pct", "mem_pct", "disk_max_pct", "gpu_max_util", "gpu_max_temp"].some((key) => {
+      const value = point?.[key];
+      return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+    }),
   );
 }
 
@@ -1488,7 +1510,7 @@ async function renderTrend(body, agent) {
     if (state.detailId !== detailId || state.detailTab !== "overview") return;
     clear(host);
     const points = data.points || [];
-    if (!points.length) {
+    if (!telemetryHasSamples(points)) {
       host.append(h("div", { class: "empty-inline" }, "No telemetry history yet."));
       return;
     }
@@ -1574,8 +1596,18 @@ function detailChart(values, spec, points, rangeKey) {
     max += spread * 0.12;
   }
   const span = Math.max(0.0001, max - min);
-  const xFor = (index) =>
-    numeric.length <= 1 ? pad.left + plotWidth / 2 : pad.left + (index / (numeric.length - 1)) * plotWidth;
+  const times = (points || []).map((point) => parseDate(point?.at)?.getTime() ?? null);
+  const validTimes = times.filter((value) => Number.isFinite(value));
+  const minTime = validTimes.length ? Math.min(...validTimes) : null;
+  const maxTime = validTimes.length ? Math.max(...validTimes) : null;
+  const timeSpan = minTime !== null && maxTime !== null ? maxTime - minTime : 0;
+  const xFor = (index) => {
+    const time = times[index];
+    if (Number.isFinite(time) && timeSpan > 0) {
+      return pad.left + ((time - minTime) / timeSpan) * plotWidth;
+    }
+    return numeric.length <= 1 ? pad.left + plotWidth / 2 : pad.left + (index / (numeric.length - 1)) * plotWidth;
+  };
   const yFor = (value) => pad.top + plotHeight - ((Math.min(max, Math.max(min, value)) - min) / span) * plotHeight;
   const segments = [];
   let segment = [];
@@ -1602,10 +1634,12 @@ function detailChart(values, spec, points, rangeKey) {
   const xTicks = [...new Set([0, Math.floor((numeric.length - 1) / 2), numeric.length - 1])].filter((index) => index >= 0);
   const xLabels = xTicks.map((index) => {
     const ratio = numeric.length <= 1 ? 0.5 : index / (numeric.length - 1);
+    const time = times[index];
+    const x = Number.isFinite(time) && timeSpan > 0 ? xFor(index) : pad.left + ratio * plotWidth;
     const anchor = ratio <= 0 ? "start" : ratio >= 1 ? "end" : "middle";
     return h(
       "text",
-      { class: "chart-axis-label", x: pad.left + ratio * plotWidth, y: height - 10, "text-anchor": anchor },
+      { class: "chart-axis-label", x, y: height - 10, "text-anchor": anchor },
       chartTimeLabel(points[index]?.at, rangeKey),
     );
   });
@@ -1619,6 +1653,13 @@ function detailChart(values, spec, points, rangeKey) {
       "stroke-linecap": "round",
     }),
   );
+  const dots = numeric
+    .map((value, index) =>
+      Number.isFinite(value)
+        ? h("circle", { class: "chart-point", cx: xFor(index), cy: yFor(value), r: 1.6, fill: spec.color })
+        : null,
+    )
+    .filter(Boolean);
   return h(
     "svg",
     { class: "detail-chart", viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": `${spec.title} history` },
@@ -1626,6 +1667,7 @@ function detailChart(values, spec, points, rangeKey) {
     ...axisLabels,
     ...xLabels,
     ...lines,
+    ...dots,
   );
 }
 
@@ -1669,7 +1711,7 @@ async function loadTrendCharts(host, agent, rangeKey) {
     if (!trendContextActive(agent.id, rangeKey)) return;
     clear(host);
     const points = data.points || [];
-    if (!points.length) {
+    if (!telemetryHasSamples(points)) {
       host.append(
         h(
           "div",
@@ -1690,20 +1732,21 @@ async function loadTrendCharts(host, agent, rangeKey) {
 }
 
 function timelineStatusKind(kind, status) {
-  if (kind === "alert") {
-    if (status === "critical") return "critical";
-    if (status === "warning") return "warning";
-    return "neutral";
-  }
-  if (status === "succeeded") return "online";
+  if (status === "critical") return "critical";
+  if (status === "warning") return "warning";
+  if (["success", "online", "succeeded"].includes(status)) return "online";
   if (status === "failed") return "critical";
   if (status === "cancelled") return "warning";
+  if (kind === "alert") return "neutral";
   return "neutral";
 }
 
-function renderTimeline(body, agent) {
-  const commands = state.agentCommands[agent.id] || [];
-  const alerts = agent.alerts || [];
+function timelineEntryClass(kind) {
+  const base = `timeline-entry timeline-${kind}`;
+  return kind === "command" || kind === "alert" ? base : `${base} timeline-event`;
+}
+
+function buildTimelineEntries(commands, events) {
   const entries = [];
   for (const command of commands) {
     const at = command.created_at || command.updated_at || null;
@@ -1715,27 +1758,33 @@ function renderTimeline(body, agent) {
       description: commandDescription(command),
     });
   }
-  for (const alert of alerts) {
-    const at = alert.created_at || alert.updated_at || alert.detected_at || agent.last_seen || null;
-    const status = alertIsActive(alert) ? alert.level || "warning" : alert.acknowledged ? "acknowledged" : "snoozed";
+  for (const event of events) {
+    const at = event.at || null;
     entries.push({
       at,
       sort: parseDate(at)?.getTime() || 0,
-      kind: "alert",
-      status,
-      description: alert.message || alert.key,
+      kind: event.kind || "event",
+      status: event.severity || "info",
+      description: event.title || event.kind || "State change",
+      detail: event.detail,
     });
   }
   entries.sort((left, right) => right.sort - left.sort);
-  const host = h("div", { class: "timeline" });
+  return entries;
+}
+
+function renderTimelineEntries(host, countEl, commands, events, error = "") {
+  clear(host);
+  const entries = buildTimelineEntries(commands, events);
+  if (error) host.append(h("div", { class: "empty-inline" }, error));
   if (!entries.length) {
-    host.append(h("div", { class: "empty-inline" }, "No commands or alerts recorded for this machine yet."));
+    host.append(h("div", { class: "empty-inline" }, "No commands or state changes recorded for this machine yet."));
   } else {
     host.append(
       ...entries.map((entry) =>
         h(
           "div",
-          { class: `timeline-entry timeline-${entry.kind}` },
+          { class: timelineEntryClass(entry.kind) },
           h("span", { class: "timeline-time" }, entry.at ? localTime(entry.at) : "—"),
           h("span", { class: `timeline-kind ${entry.kind}` }, entry.kind),
           statusPill(entry.status, timelineStatusKind(entry.kind, entry.status)),
@@ -1744,28 +1793,84 @@ function renderTimeline(body, agent) {
       ),
     );
   }
+  if (countEl) countEl.textContent = `${entries.length} event${entries.length === 1 ? "" : "s"}`;
+}
+
+function renderWhatChanged(host, events, range, error = "") {
+  clear(host);
+  if (error) {
+    host.append(h("div", { class: "empty-inline" }, error));
+    return;
+  }
+  if (!events.length) {
+    host.append(
+      h("div", { class: "empty-inline what-changed-empty" }, `No state changes recorded in the last ${range.label}.`),
+    );
+    return;
+  }
+  const summary = `${events.length} state change${events.length === 1 ? "" : "s"} in the last ${range.label}`;
+  const items = events.slice(0, 6).map((event) =>
+    h(
+      "div",
+      { class: "what-changed-item" },
+      h("span", { class: "what-changed-time" }, localTime(event.at)),
+      h("span", { class: `timeline-kind ${event.kind || "event"}` }, event.kind || "event"),
+      h("span", { class: "what-changed-title", title: event.title || "" }, event.title || "State change"),
+    ),
+  );
+  host.append(h("p", { class: "form-hint what-changed-summary" }, summary), h("div", { class: "what-changed-list" }, ...items));
+}
+
+async function loadTrendActivity(agent, rangeKey, whatHost, timelineHost, countEl) {
+  const range = TREND_RANGES[rangeKey];
+  let events = [];
+  let error = "";
+  try {
+    const data = await api(`/api/agents/${encodeURIComponent(agent.id)}/events?hours=${range.hours}&limit=100`);
+    if (!trendContextActive(agent.id, rangeKey)) return;
+    events = data.events || [];
+  } catch (requestError) {
+    if (!trendContextActive(agent.id, rangeKey)) return;
+    error = requestError.message;
+  }
+  const commands = state.agentCommands[agent.id] || [];
+  renderWhatChanged(whatHost, events, range, error);
+  renderTimelineEntries(timelineHost, countEl, commands, events, error);
+}
+
+function renderTimelineSection(body, agent, rangeKey) {
+  const range = TREND_RANGES[rangeKey];
+  const count = h("span", { class: "form-hint timeline-count" }, "Loading events…");
+  const host = h("div", { class: "timeline" }, h("div", { class: "empty-inline" }, "Loading timeline…"));
   body.append(
     section(
       "Timeline",
-      "Commands and alerts",
+      "Commands, alerts, and state changes",
       h(
         "div",
         { class: "section-toolbar" },
-        h(
-          "p",
-          {},
-          `Latest ${commands.length} command${commands.length === 1 ? "" : "s"} and ${alerts.length} alert${alerts.length === 1 ? "" : "s"}.`,
-        ),
-        h(
-          "span",
-          { class: "form-hint timeline-count" },
-          `${entries.length} event${entries.length === 1 ? "" : "s"}`,
-        ),
+        h("p", {}, `Commands and recorded state changes in the last ${range.label}.`),
+        count,
         button("Refresh timeline", "button-secondary button-small", () => loadAgentDetail(agent.id)),
       ),
       host,
     ),
   );
+  return { host, count };
+}
+
+function renderWhatChangedSection(body, rangeKey) {
+  const range = TREND_RANGES[rangeKey];
+  const host = h("div", { class: "what-changed" }, h("div", { class: "empty-inline" }, "Loading state changes…"));
+  body.append(
+    section(
+      "What changed",
+      `State changes in the last ${range.label}`,
+      h("p", { class: "form-hint" }, "Recent service, package, version, profile, connectivity, and alert transitions."),
+      host,
+    ),
+  );
+  return host;
 }
 
 function renderTrends(body) {
@@ -1810,7 +1915,9 @@ function renderTrends(body) {
     ),
   );
   loadTrendCharts(host, agent, rangeKey);
-  renderTimeline(body, agent);
+  const whatHost = renderWhatChangedSection(body, rangeKey);
+  const timeline = renderTimelineSection(body, agent, rangeKey);
+  loadTrendActivity(agent, rangeKey, whatHost, timeline.host, timeline.count);
 }
 
 function renderDisks(body) {

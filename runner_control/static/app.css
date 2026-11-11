@@ -740,7 +740,14 @@ svg { display: block; }
 .detail-chart { width: 100%; height: auto; }
 .chart-grid { stroke: var(--line); stroke-width: 1; }
 .chart-axis-label { fill: var(--text-dim); font-family: var(--mono); font-size: 9px; }
+.chart-point { stroke: var(--row-bg); stroke-width: 1; }
 .chart-foot { display: flex; justify-content: space-between; gap: 10px; padding-top: 5px; border-top: 1px solid var(--line); color: var(--text-dim); font-family: var(--mono); font-size: 9.5px; }
+.what-changed { display: grid; gap: 8px; }
+.what-changed-summary { margin: 0; }
+.what-changed-list { display: grid; gap: 4px; }
+.what-changed-item { display: grid; grid-template-columns: minmax(96px, auto) 64px minmax(0, 1fr); align-items: center; gap: 8px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--row-bg); }
+.what-changed-time { color: var(--text-dim); font-family: var(--mono); font-size: 9.5px; }
+.what-changed-title { overflow: hidden; color: var(--text-soft); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
 .timeline { display: grid; gap: 5px; }
 .timeline-entry { display: grid; grid-template-columns: minmax(110px, auto) 64px 92px minmax(0, 1fr); align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--row-bg); }
 .timeline-time { color: var(--text-dim); font-family: var(--mono); font-size: 9.5px; }

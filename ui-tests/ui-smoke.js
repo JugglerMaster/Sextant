@@ -182,7 +182,21 @@ const responses = {
       hours: 24,
       points: [
         { at: "2026-11-06T07:00:00Z", cpu_pct: 10, mem_pct: 40, disk_max_pct: 85, gpu_max_util: 20, gpu_max_temp: 60 },
+        { at: "2026-11-06T07:30:00Z", cpu_pct: null, mem_pct: null, disk_max_pct: null, gpu_max_util: null, gpu_max_temp: null },
         { at: "2026-11-06T08:00:00Z", cpu_pct: 18, mem_pct: 44, disk_max_pct: 85, gpu_max_util: 97, gpu_max_temp: 78 },
+      ],
+    },
+  },
+  "/api/agents/agt_demo/events": {
+    status: 200,
+    body: {
+      agent_id: "agt_demo",
+      hours: 24,
+      events: [
+        { id: 4, agent_id: "agt_demo", at: "2026-11-06T08:00:00Z", kind: "online", severity: "success", title: "Agent back online", detail: {} },
+        { id: 3, agent_id: "agt_demo", at: "2026-11-06T07:57:00Z", kind: "alert", severity: "warning", title: "Alert raised: Disk C: is 85% full", detail: { action: "raised" } },
+        { id: 2, agent_id: "agt_demo", at: "2026-11-06T07:55:00Z", kind: "service", severity: "critical", title: "Service Spooler stopped", detail: { service: "Spooler", from: "running", to: "stopped" } },
+        { id: 1, agent_id: "agt_demo", at: "2026-11-06T07:50:00Z", kind: "package", severity: "info", title: "Package version changed: apt:nginx 1.25.0", detail: { action: "version_changed" } },
       ],
     },
   },
@@ -760,14 +774,40 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (trendCharts.length !== 5) throw new Error(`expected five trend charts, got ${trendCharts.length}`);
   if (!trendsBody.querySelector(".detail-chart")) throw new Error("detail chart SVG missing");
   if (!trendsBody.textContent.includes("GPU temperature")) throw new Error("trend chart labels missing");
+  const cpuChart = trendsBody.querySelector('.chart-card[data-series="cpu_pct"]');
+  if (!cpuChart) throw new Error("CPU trend chart missing");
+  if (cpuChart.querySelectorAll(".detail-chart polyline").length < 2) {
+    throw new Error("gap bucket did not break the trend line");
+  }
+  if (cpuChart.querySelectorAll(".chart-point").length !== 2) {
+    throw new Error("null buckets should not render chart points");
+  }
+  const whatChanged = trendsBody.querySelector(".what-changed");
+  if (!whatChanged) throw new Error("What changed section missing");
+  if (!whatChanged.textContent.includes("Agent back online") || !whatChanged.textContent.includes("Package version changed")) {
+    throw new Error(`What changed summary missing recent events: ${whatChanged.textContent}`);
+  }
+  if (whatChanged.textContent.includes("No state changes recorded")) {
+    throw new Error("What changed should not show its empty state with events");
+  }
   if (!trendsBody.querySelector(".timeline")) throw new Error("timeline did not render");
-  if (trendsBody.querySelectorAll(".timeline-entry").length !== 4) {
-    throw new Error(`expected 4 timeline entries, got ${trendsBody.querySelectorAll(".timeline-entry").length}`);
+  const timelineEntries = trendsBody.querySelectorAll(".timeline-entry");
+  if (timelineEntries.length !== 6) {
+    throw new Error(`expected 6 timeline entries, got ${timelineEntries.length}`);
   }
   if (!trendsBody.querySelector(".timeline-command") || !trendsBody.querySelector(".timeline-alert")) {
-    throw new Error("timeline should merge commands and alerts");
+    throw new Error("timeline should merge commands and alert lifecycle events");
   }
-  if (!trendsBody.textContent.includes("4 events")) throw new Error("timeline count missing");
+  if (!trendsBody.querySelector(".timeline-service") || !trendsBody.querySelector(".timeline-package")) {
+    throw new Error("timeline should include persistent state-change event types");
+  }
+  if (trendsBody.querySelectorAll(".timeline-event").length < 3) {
+    throw new Error("timeline should mark persistent state-change entries");
+  }
+  if ([...timelineEntries].some((entry) => entry.querySelector(".timeline-time").textContent.includes("—"))) {
+    throw new Error("timeline entries must use real event timestamps");
+  }
+  if (!trendsBody.textContent.includes("6 events")) throw new Error("timeline count missing");
   const sevenDay = findButton(trendsBody, "7d");
   if (!sevenDay) throw new Error("7d trend range toggle missing");
   sevenDay.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -775,6 +815,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const activeRange = [...trendsBody.querySelectorAll(".range-option")].find((option) => option.classList.contains("is-active"));
   if (!activeRange || activeRange.textContent.trim() !== "7d") throw new Error("7d trend range did not activate");
   if (trendsBody.querySelectorAll(".chart-card").length !== 5) throw new Error("trend charts missing after 7d toggle");
+  if (!trendsBody.querySelector(".what-changed") || !trendsBody.querySelector(".timeline")) {
+    throw new Error("trend activity sections missing after 7d toggle");
+  }
 
   const editButton = findButton(window.document.getElementById("drawer-actions"), "Edit policy");
   if (!editButton) throw new Error("agent policy edit action missing");

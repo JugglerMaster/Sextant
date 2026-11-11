@@ -151,6 +151,16 @@ CREATE TABLE IF NOT EXISTS telemetry_samples (
     service_down INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS agent_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'info',
+    title TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS store_packages (
     id TEXT PRIMARY KEY,
     slug TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -279,6 +289,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, revoked_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_telemetry_agent_at ON telemetry_samples(agent_id, at);
 CREATE INDEX IF NOT EXISTS idx_telemetry_at ON telemetry_samples(at);
+CREATE INDEX IF NOT EXISTS idx_agent_events_agent_at ON agent_events(agent_id, at);
+CREATE INDEX IF NOT EXISTS idx_agent_events_at ON agent_events(at);
 CREATE INDEX IF NOT EXISTS idx_commands_status_dispatched ON commands(status, dispatched_at);
 CREATE INDEX IF NOT EXISTS idx_commands_status_created ON commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_command_output_command ON command_output(command_id, id);
@@ -717,23 +729,28 @@ class Database:
             ),
         )
 
-    def telemetry_history(self, agent_id: str, hours: int, points: int) -> list[sqlite3.Row]:
-        """Return a time-bucketed series bounded by ``points`` rows.
+    def telemetry_history(self, agent_id: str, hours: int, points: int) -> list[dict[str, Any]]:
+        """Return a fixed-size, gap-aware time-bucketed series.
 
-        Buckets are computed in SQL so an agent with years of samples never
+        Every bucket in the requested window is returned, even when it has no
+        samples. Missing samples are explicit ``None`` values so the UI can
+        break a line across an offline interval instead of connecting across it.
+        Aggregation stays in SQL, so a years-long sample table never
         materialises an unbounded result set in Python.
         """
         span = max(1, int(hours)) * 3600
-        start = utcnow() - timedelta(seconds=span)
+        points = max(10, min(1000, int(points)))
+        end = utcnow()
+        start = end - timedelta(seconds=span)
         start_epoch = int(start.timestamp())
         cutoff = start.isoformat(timespec="seconds").replace("+00:00", "Z")
-        points = max(10, min(1000, int(points)))
+        cutoff_end = end.isoformat(timespec="seconds").replace("+00:00", "Z")
+        bucket_seconds = span / points
         with self.connection() as conn:
             try:
                 rows = conn.execute(
                     """SELECT
-                           CAST(((CAST(strftime('%s', at) AS INTEGER) - ?) * ?) / ? AS INTEGER) AS bucket,
-                           MIN(at) AS at,
+                           MIN(?, MAX(0, CAST(((CAST(strftime('%s', at) AS INTEGER) - ?) * ?) / ? AS INTEGER))) AS bucket,
                            AVG(cpu_pct) AS cpu_pct,
                            AVG(mem_pct) AS mem_pct,
                            AVG(disk_max_pct) AS disk_max_pct,
@@ -741,16 +758,39 @@ class Database:
                            AVG(gpu_max_temp) AS gpu_max_temp,
                            AVG(service_down) AS service_down
                        FROM telemetry_samples
-                       WHERE agent_id = ? AND at >= ?
+                       WHERE agent_id = ? AND at >= ? AND at <= ?
                        GROUP BY bucket
-                       ORDER BY bucket ASC
-                       LIMIT ?""",
-                    (start_epoch, points, span, agent_id, cutoff, points),
+                       ORDER BY bucket ASC""",
+                    (
+                        points - 1,
+                        start_epoch,
+                        points,
+                        span,
+                        agent_id,
+                        cutoff,
+                        cutoff_end,
+                    ),
                 ).fetchall()
             except sqlite3.OperationalError:
                 # An older database may not have the table yet.
                 return []
-            return list(rows)
+        by_bucket = {int(row["bucket"]): row for row in rows}
+        series: list[dict[str, Any]] = []
+        for index in range(points):
+            row = by_bucket.get(index)
+            at = start + timedelta(seconds=index * bucket_seconds)
+            series.append(
+                {
+                    "at": at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                    "cpu_pct": row["cpu_pct"] if row is not None else None,
+                    "mem_pct": row["mem_pct"] if row is not None else None,
+                    "disk_max_pct": row["disk_max_pct"] if row is not None else None,
+                    "gpu_max_util": row["gpu_max_util"] if row is not None else None,
+                    "gpu_max_temp": row["gpu_max_temp"] if row is not None else None,
+                    "service_down": row["service_down"] if row is not None else None,
+                }
+            )
+        return series
 
     def prune_telemetry(self, retention_days: int = 7) -> int:
         days = max(1, min(365, int(retention_days)))
@@ -758,6 +798,75 @@ class Database:
         with self.connection() as conn:
             try:
                 cur = conn.execute("DELETE FROM telemetry_samples WHERE at < ?", (cutoff,))
+            except sqlite3.OperationalError:
+                return 0
+            return int(cur.rowcount)
+
+    # ---- Persistent agent state-change events ---------------------------
+
+    def record_agent_event(
+        self,
+        agent_id: str,
+        kind: str,
+        severity: str,
+        title: str,
+        detail: Any = None,
+        *,
+        at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> int | None:
+        """Store one bounded state-change event, best-effort.
+
+        Event recording must never break a heartbeat or command path, so write
+        failures are swallowed. Callers still keep their concise title and
+        bounded detail structure.
+        """
+        encoded = dumps(detail or {})
+        if len(encoded) > 4000:
+            encoded = dumps({"truncated": True})
+        params = (
+            agent_id,
+            at or utcnow_iso(),
+            str(kind)[:32],
+            str(severity or "info")[:16],
+            str(title)[:240],
+            encoded,
+        )
+        sql = """INSERT INTO agent_events (agent_id, at, kind, severity, title, detail)
+                 VALUES (?, ?, ?, ?, ?, ?)"""
+        try:
+            if conn is not None:
+                cur = conn.execute(sql, params)
+                return int(cur.lastrowid) if cur.lastrowid is not None else None
+            with self.connection() as own:
+                cur = own.execute(sql, params)
+                return int(cur.lastrowid) if cur.lastrowid is not None else None
+        except sqlite3.Error:
+            return None
+
+    def list_agent_events(self, agent_id: str, hours: int, limit: int) -> list[sqlite3.Row]:
+        hours = max(1, min(720, int(hours)))
+        limit = max(1, min(500, int(limit)))
+        cutoff = (utcnow() - timedelta(hours=hours)).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self.connection() as conn:
+            try:
+                return list(
+                    conn.execute(
+                        """SELECT * FROM agent_events
+                           WHERE agent_id = ? AND at >= ?
+                           ORDER BY at DESC, id DESC LIMIT ?""",
+                        (agent_id, cutoff, limit),
+                    ).fetchall()
+                )
+            except sqlite3.OperationalError:
+                return []
+
+    def prune_agent_events(self, retention_days: int = 90) -> int:
+        days = max(1, min(3650, int(retention_days)))
+        cutoff = (utcnow() - timedelta(days=days)).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self.connection() as conn:
+            try:
+                cur = conn.execute("DELETE FROM agent_events WHERE at < ?", (cutoff,))
             except sqlite3.OperationalError:
                 return 0
             return int(cur.rowcount)
@@ -914,6 +1023,11 @@ class Database:
                    WHERE status IN ('succeeded', 'failed', 'cancelled') AND created_at < ?""",
                 (cutoff,),
             )
+            # Agent state-change events share the command retention policy.
+            try:
+                conn.execute("DELETE FROM agent_events WHERE at < ?", (cutoff,))
+            except sqlite3.OperationalError:
+                pass
             return int(cur.rowcount)
 
     def prune_audit(self, retention_days: int = 365) -> int:
@@ -1407,7 +1521,19 @@ class Database:
 
     def set_agent_profile(self, agent_id: str, profile_id: str) -> bool:
         with self.transaction() as conn:
+            row = conn.execute("SELECT profile_id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            if row is None:
+                return False
             cur = conn.execute("UPDATE agents SET profile_id = ? WHERE id = ?", (profile_id, agent_id))
+            if row["profile_id"] != profile_id:
+                self.record_agent_event(
+                    agent_id,
+                    "profile",
+                    "info",
+                    "Agent profile changed",
+                    {"from": row["profile_id"], "to": profile_id},
+                    conn=conn,
+                )
             return cur.rowcount == 1
 
     def list_profile_tags(self) -> list[sqlite3.Row]:
@@ -1433,12 +1559,21 @@ class Database:
                 (tag, profile_id, utcnow_iso()),
             )
             changed = 0
-            for row in conn.execute("SELECT id, tags FROM agents").fetchall():
+            for row in conn.execute("SELECT id, tags, profile_id FROM agents").fetchall():
                 tags = loads(row["tags"], [])
                 if not isinstance(tags, list):
                     continue
                 if any(str(item).casefold() == tag.casefold() for item in tags):
                     conn.execute("UPDATE agents SET profile_id = ? WHERE id = ?", (profile_id, row["id"]))
+                    if row["profile_id"] != profile_id:
+                        self.record_agent_event(
+                            row["id"],
+                            "profile",
+                            "info",
+                            "Agent profile changed",
+                            {"from": row["profile_id"], "to": profile_id, "tag": tag},
+                            conn=conn,
+                        )
                     changed += 1
             return changed
 

@@ -65,6 +65,7 @@ Key properties:
 | `sessions` | Random session ID, user, IP, user agent, created/last-seen/expiry, revocation |
 | `agents` | Identity, stable machine ID, MAC/IP, token hash, tags/notes, watched services, policy, last-known telemetry |
 | `telemetry_samples` | Bounded per-heartbeat history: CPU, memory, disk max %, GPU max util/temp, watched-service-down count |
+| `agent_events` | Best-effort state-change log per agent: connectivity, service, package, version, profile, and alert lifecycle |
 | `store_packages`, `store_releases` | Package metadata and versioned artifacts (SHA-256, size, channel, yank state) |
 | `store_events` | Publish, download, yank audit events |
 | `package_inventory` | Latest installed packages and detected managers per agent |
@@ -77,7 +78,9 @@ Key properties:
 | `audit_log` | Actor, action, target, detail JSON, source IP, time |
 | `wake_targets` | Agent-less named MAC addresses, broadcast address, port, last wake |
 
-Telemetry is stored denormalized in the agent row (`disks`, `gpus`, `services`, `startup`, `extra`) because the dashboard only needs the latest sample. A separate `telemetry_samples` table keeps one bounded row per heartbeat for trend queries; it is pruned to `RC_TELEMETRY_RETENTION_DAYS` (default 7) and can be disabled with `RC_TELEMETRY_HISTORY=0`. Command history is retained per agent (the drawer History tab paginates and filters it server-side, with CSV export; the overview keeps a bounded latest-50 preview) and terminal commands are pruned after `RC_COMMAND_RETENTION_DAYS` (default 90). Audit rows are pruned after `RC_AUDIT_RETENTION_DAYS` (default 365).
+Telemetry is stored denormalized in the agent row (`disks`, `gpus`, `services`, `startup`, `extra`) because the dashboard only needs the latest sample. A separate `telemetry_samples` table keeps one bounded row per heartbeat for trend queries; it is pruned to `RC_TELEMETRY_RETENTION_DAYS` (default 7) and can be disabled with `RC_TELEMETRY_HISTORY=0`. Trend queries fill every requested bucket, so missing heartbeats are explicit `null` points with real timestamps rather than omitted rows. Command history is retained per agent (the drawer History tab paginates and filters it server-side, with CSV export; the overview keeps a bounded latest-50 preview) and terminal commands are pruned after `RC_COMMAND_RETENTION_DAYS` (default 90). Audit rows are pruned after `RC_AUDIT_RETENTION_DAYS` (default 365).
+
+`agent_events` is an append-only, best-effort state-change log recording transitions rather than every heartbeat: an agent returning online after being offline, watched-service status changes, package additions/removals/version changes, agent version changes, profile assignments, and alert raise/clear/acknowledge/snooze lifecycle entries. Writes are fail-open so they cannot break a heartbeat or command path, and detail JSON is bounded. Events share the command retention policy (`RC_COMMAND_RETENTION_DAYS`, default 90).
 
 ## Authentication and authorization
 
@@ -223,7 +226,7 @@ The app server binds loopback by default in the provided unit. nginx terminates 
 - No pixel-level remote desktop.
 - No persistent interactive PTY; the remote shell is a queued command console.
 - No multi-server HA, job queue, or external metrics store.
-- Inline SVG charts cover 24-hour sparklines and 24h/7d detail charts; downsampled history remains available from `GET /api/agents/{id}/history`.
+- Inline SVG charts cover 24-hour sparklines and 24h/7d detail charts; gap-aware history remains available from `GET /api/agents/{id}/history`, and persistent state-change events come from `GET /api/agents/{id}/events`.
 - No command approval workflow yet (queue guardrails and expiry only).
 - No nested AD group resolution.
 - No MFA in the app itself (deferred; see the roadmap).

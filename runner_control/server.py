@@ -67,6 +67,8 @@ from .security import (
 )
 from .store import ArtifactStore, StoreError
 from .views import (
+    _agent_alerts,
+    agent_event_to_dict,
     agent_to_dict,
     bounded_json,
     command_to_dict,
@@ -372,12 +374,166 @@ def _find_agent_alert(row: sqlite3.Row, settings: Settings, alert_key: str) -> d
     return None
 
 
+def _alert_map(row: Any) -> dict[str, dict[str, Any]]:
+    disks = loads(row["disks"], [])
+    gpus = loads(row["gpus"], [])
+    services = loads(row["services"], [])
+    if not isinstance(disks, list):
+        disks = []
+    if not isinstance(gpus, list):
+        gpus = []
+    if not isinstance(services, list):
+        services = []
+    alerts = _agent_alerts(disks, gpus, services, float(row["mem_pct"] or 0))
+    return {str(alert["key"]): alert for alert in alerts}
+
+
+def _service_map(services: Any) -> dict[str, tuple[str, str, bool]]:
+    result: dict[str, tuple[str, str, bool]] = {}
+    if not isinstance(services, list):
+        return result
+    for service in services:
+        if not isinstance(service, dict):
+            continue
+        name = str(service.get("name") or "").strip()
+        if not name:
+            continue
+        result[name.casefold()] = (
+            name,
+            str(service.get("status") or "unknown"),
+            bool(service.get("watched")),
+        )
+    return result
+
+
+def _package_snapshot(rows: list[sqlite3.Row]) -> dict[tuple[str, str], str]:
+    snapshot: dict[tuple[str, str], str] = {}
+    for row in rows:
+        package = str(row["package"] or "")
+        if not package or package == "__manager__":
+            continue
+        snapshot[(str(row["manager"] or ""), package)] = str(row["version"] or "")
+    return snapshot
+
+
+def _package_label(key: tuple[str, str], version: str) -> str:
+    manager, package = key
+    label = f"{manager}:{package}" if manager else package
+    return f"{label} {version}".strip()
+
+
+def _package_change_events(
+    before: dict[tuple[str, str], str], after: dict[tuple[str, str], str]
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    added = sorted(key for key in after if key not in before)
+    removed = sorted(key for key in before if key not in after)
+    changed = sorted(
+        key for key in before.keys() & after.keys() if before[key] != after[key]
+    )
+    if added:
+        labels = [_package_label(key, after[key]) for key in added[:10]]
+        title = (
+            f"Package added: {labels[0]}"
+            if len(added) == 1
+            else f"{len(added)} packages added"
+        )
+        events.append(
+            {
+                "kind": "package",
+                "severity": "info",
+                "title": title,
+                "detail": {"action": "added", "count": len(added), "packages": labels, "truncated": len(added) > 10},
+            }
+        )
+    if removed:
+        labels = [_package_label(key, before[key]) for key in removed[:10]]
+        title = (
+            f"Package removed: {labels[0]}"
+            if len(removed) == 1
+            else f"{len(removed)} packages removed"
+        )
+        events.append(
+            {
+                "kind": "package",
+                "severity": "info",
+                "title": title,
+                "detail": {"action": "removed", "count": len(removed), "packages": labels, "truncated": len(removed) > 10},
+            }
+        )
+    if changed:
+        labels = [_package_label(key, after[key]) for key in changed[:10]]
+        title = (
+            f"Package version changed: {labels[0]}"
+            if len(changed) == 1
+            else f"{len(changed)} package versions changed"
+        )
+        detail = [
+            {
+                "manager": key[0],
+                "package": key[1],
+                "from": before[key],
+                "to": after[key],
+            }
+            for key in changed[:10]
+        ]
+        events.append(
+            {
+                "kind": "package",
+                "severity": "info",
+                "title": title,
+                "detail": {"action": "version_changed", "count": len(changed), "changes": detail, "truncated": len(changed) > 10},
+            }
+        )
+    return events
+
+
+def _service_change_events(
+    old_services: Any,
+    new_services: Any,
+    watched_names: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    before = _service_map(old_services)
+    after = _service_map(new_services)
+    watched_names = watched_names or set()
+    events: list[dict[str, Any]] = []
+    for key, (name, status, watched) in after.items():
+        if not watched and key not in watched_names:
+            continue
+        if key not in before:
+            continue
+        previous = before[key][1]
+        if previous.casefold() == status.casefold():
+            continue
+        healthy = status.casefold() in {"running", "active"}
+        events.append(
+            {
+                "kind": "service",
+                "severity": "success" if healthy else "critical",
+                "title": f"Service {name} {status}",
+                "detail": {"service": name, "from": previous, "to": status},
+            }
+        )
+        if len(events) >= 20:
+            break
+    return events
+
+
+def _record_agent_events(database: Database, events: list[dict[str, Any]]) -> None:
+    for event in events:
+        try:
+            database.record_agent_event(**event)
+        except Exception:  # best-effort: never break the heartbeat/command path
+            logger.debug("agent event recording failed", exc_info=True)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     db = Database(settings.database_path)
     db.initialize()
     if settings.command_retention_days:
         db.prune_commands(settings.command_retention_days)
+        db.prune_agent_events(settings.command_retention_days)
     if settings.audit_retention_days:
         db.prune_audit(settings.audit_retention_days)
     _ensure_bootstrap_admin(settings, db)
@@ -1208,6 +1364,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ip=client_ip(request, config.trust_proxy),
                 conn=conn,
             )
+            database.record_agent_event(
+                agent_id,
+                "alert",
+                alert["level"],
+                f"Alert acknowledged: {alert['message']}",
+                {
+                    "action": "acknowledged",
+                    "alert_key": alert_key,
+                    "level": alert["level"],
+                    "message": alert["message"],
+                    "actor": user["username"],
+                },
+                conn=conn,
+            )
             updated = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
             states = database.get_alert_states(agent_id, conn=conn)
             decorated = agent_to_dict(updated, config, alert_states=states)["alerts"]
@@ -1246,6 +1416,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ip=client_ip(request, config.trust_proxy),
                 conn=conn,
             )
+            database.record_agent_event(
+                agent_id,
+                "alert",
+                alert["level"],
+                f"Alert snoozed: {alert['message']}",
+                {
+                    "action": "snoozed",
+                    "alert_key": alert_key,
+                    "level": alert["level"],
+                    "message": alert["message"],
+                    "minutes": payload.minutes,
+                    "snoozed_until": snoozed_until,
+                    "actor": user["username"],
+                },
+                conn=conn,
+            )
             updated = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
             states = database.get_alert_states(agent_id, conn=conn)
             decorated = agent_to_dict(updated, config, alert_states=states)["alerts"]
@@ -1277,6 +1463,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ip=client_ip(request, config.trust_proxy),
                 conn=conn,
             )
+            database.record_agent_event(
+                agent_id,
+                "alert",
+                "info",
+                f"Alert cleared: {alert['message']}",
+                {
+                    "action": "cleared",
+                    "alert_key": alert_key,
+                    "level": alert["level"],
+                    "message": alert["message"],
+                    "actor": user["username"],
+                },
+                conn=conn,
+            )
         notify_dashboard()
         return Response(status_code=204)
 
@@ -1302,6 +1502,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "agent_id": agent_id,
             "hours": hours,
             "points": [telemetry_sample_to_dict(row) for row in rows],
+        }
+
+    @app.get("/api/agents/{agent_id}/events")
+    def agent_events(
+        agent_id: str,
+        hours: int = Query(default=24, description="Lookback window in hours (1-720)"),
+        limit: int = Query(default=100, description="Maximum events to return (1-500)"),
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        del user
+        if not 1 <= hours <= 720:
+            raise HTTPException(status_code=400, detail="hours must be between 1 and 720.")
+        if not 1 <= limit <= 500:
+            raise HTTPException(status_code=400, detail="limit must be between 1 and 500.")
+        with database.connection() as conn:
+            exists = conn.execute("SELECT 1 FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        if exists is None:
+            raise HTTPException(status_code=404, detail="Agent not found.")
+        rows = database.list_agent_events(agent_id, hours, limit)
+        return {
+            "agent_id": agent_id,
+            "hours": hours,
+            "events": [agent_event_to_dict(row) for row in rows],
         }
 
     @app.patch("/api/agents/{agent_id}")
@@ -1332,6 +1556,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Agent not found.")
+            previous_profile_id = row["profile_id"]
             tags = loads(row["tags"], [])
             watch_services = loads(row["watch_services"], [])
             policy = loads(row["policy"], {})
@@ -1408,6 +1633,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 conn=conn,
             )
             updated = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        if previous_profile_id != profile_id:
+            _record_agent_events(
+                database,
+                [
+                    {
+                        "agent_id": agent_id,
+                        "kind": "profile",
+                        "severity": "info",
+                        "title": "Agent profile changed",
+                        "detail": {
+                            "from": previous_profile_id,
+                            "to": profile_id,
+                            "actor": user["username"],
+                        },
+                    }
+                ],
+            )
         notify_dashboard()
         return agent_to_dict(updated, config, alert_states=database.get_alert_states(agent_id))
 
@@ -2228,6 +2470,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if service["watched"] and str(service["status"]).lower() not in {"running", "active"}
         )
         stamp = now.isoformat(timespec="seconds").replace("+00:00", "Z")
+        event_at = stamp
+        previous_services = loads(agent["services"], [])
+        watched_names = {
+            str(name).strip().casefold()
+            for name in loads(agent["watch_services"], [])
+            if str(name).strip()
+        }
+        previous_packages = _package_snapshot(database.list_package_inventory(agent_id))
+        previous_alerts = _alert_map(agent)
+        previous_version = str(agent["agent_version"] or "")
+        old_last_seen = parse_iso(agent["last_seen"] if "last_seen" in agent else None)
+        was_online = bool(
+            old_last_seen
+            and (now - old_last_seen).total_seconds() <= config.offline_after_seconds
+        )
 
         with database.transaction() as conn:
             conn.execute(
@@ -2343,11 +2600,80 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "created_at": row["created_at"],
                         }
                     )
+            current_agent = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        current_packages = _package_snapshot(database.list_package_inventory(agent_id))
+        current_alerts = _alert_map(current_agent)
+        current_version = str((payload.agent_version or agent["agent_version"] or "0"))[:64]
+        state_events: list[dict[str, Any]] = []
+        if old_last_seen is not None and not was_online:
+            state_events.append(
+                {
+                    "agent_id": agent_id,
+                    "at": event_at,
+                    "kind": "online",
+                    "severity": "success",
+                    "title": "Agent back online",
+                    "detail": {"last_seen": agent["last_seen"]},
+                }
+            )
+        if previous_version and current_version and previous_version != current_version:
+            state_events.append(
+                {
+                    "agent_id": agent_id,
+                    "at": event_at,
+                    "kind": "version",
+                    "severity": "info",
+                    "title": f"Agent version changed to {current_version}",
+                    "detail": {"from": previous_version, "to": current_version},
+                }
+            )
+        for event in _service_change_events(previous_services, services, watched_names):
+            state_events.append({"agent_id": agent_id, "at": event_at, **event})
+        for event in _package_change_events(previous_packages, current_packages):
+            state_events.append({"agent_id": agent_id, "at": event_at, **event})
+        for key, alert in current_alerts.items():
+            if key in previous_alerts:
+                continue
+            state_events.append(
+                {
+                    "agent_id": agent_id,
+                    "at": event_at,
+                    "kind": "alert",
+                    "severity": alert.get("level", "warning"),
+                    "title": f"Alert raised: {alert.get('message') or key}",
+                    "detail": {
+                        "action": "raised",
+                        "alert_key": key,
+                        "level": alert.get("level"),
+                        "message": alert.get("message"),
+                    },
+                }
+            )
+        for key, alert in previous_alerts.items():
+            if key in current_alerts:
+                continue
+            state_events.append(
+                {
+                    "agent_id": agent_id,
+                    "at": event_at,
+                    "kind": "alert",
+                    "severity": "info",
+                    "title": f"Alert cleared: {alert.get('message') or key}",
+                    "detail": {
+                        "action": "cleared",
+                        "alert_key": key,
+                        "level": alert.get("level"),
+                        "message": alert.get("message"),
+                    },
+                }
+            )
+        _record_agent_events(database, state_events)
         notify_dashboard()
         if secrets.randbelow(100) == 0:
             if config.telemetry_history:
                 database.prune_telemetry(config.telemetry_retention_days)
             database.prune_commands(config.command_retention_days)
+            database.prune_agent_events(config.command_retention_days)
             database.prune_audit(config.audit_retention_days)
         policy = loads(agent["policy"], {})
         if not isinstance(policy, dict):
@@ -2365,7 +2691,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "allow_packages": bool(policy.get("allow_packages", True)) and profile_actions["allow_packages"],
             "watch_services": watch_services,
         }
-        current_version = payload.agent_version or agent["agent_version"] or "0"
         agent_update_info: dict[str, Any] = {"available": False, "current_version": current_version}
         release = _latest_agent_release(database)
         if release is not None:
@@ -2970,6 +3295,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if row is None:
             raise HTTPException(status_code=404, detail="Profile not found.")
+        with database.connection() as conn:
+            affected = conn.execute(
+                "SELECT id FROM agents WHERE profile_id = ?", (row["id"],)
+            ).fetchall()
+        _record_agent_events(
+            database,
+            [
+                {
+                    "agent_id": agent_row["id"],
+                    "kind": "profile",
+                    "severity": "info",
+                    "title": f"Profile updated: {row['name']}",
+                    "detail": {
+                        "profile_id": row["id"],
+                        "slug": row["slug"],
+                        "revision": int(row["revision"]),
+                        "actor": user["username"],
+                    },
+                }
+                for agent_row in affected
+            ],
+        )
         database.audit(
             actor=user["username"],
             action="profile.updated",
@@ -3036,6 +3383,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             name=default["name"],
             description=default["description"],
             settings=default["settings"],
+        )
+        with database.connection() as conn:
+            affected = conn.execute(
+                "SELECT id FROM agents WHERE profile_id = ?", (existing["id"],)
+            ).fetchall()
+        _record_agent_events(
+            database,
+            [
+                {
+                    "agent_id": agent_row["id"],
+                    "kind": "profile",
+                    "severity": "info",
+                    "title": f"Profile reset: {default['name']}",
+                    "detail": {
+                        "profile_id": existing["id"],
+                        "slug": existing["slug"],
+                        "revision": int(row["revision"]) if row else 0,
+                        "actor": user["username"],
+                    },
+                }
+                for agent_row in affected
+            ],
         )
         database.audit(
             actor=user["username"],

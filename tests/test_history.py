@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from runner_control.db import Database
+from runner_control.db import Database, parse_iso
 from runner_control.server import create_app
 from tests.helpers import enroll_agent, headers, heartbeat, login, sample_metrics
 
@@ -79,7 +79,9 @@ def test_history_endpoint_returns_ascending_series(client, admin, app):
     data = response.json()
     assert data["agent_id"] == agent["agent_id"]
     assert data["hours"] == 24
-    assert [point["cpu_pct"] for point in data["points"]] == [10.0, 20.0, 30.0]
+    assert len(data["points"]) == 200
+    samples = [point for point in data["points"] if point["cpu_pct"] is not None]
+    assert [point["cpu_pct"] for point in samples] == [10.0, 20.0, 30.0]
     assert [point["at"] for point in data["points"]] == sorted(point["at"] for point in data["points"])
     assert set(data["points"][0]) == {
         "at",
@@ -90,6 +92,45 @@ def test_history_endpoint_returns_ascending_series(client, admin, app):
         "gpu_max_temp",
         "service_down",
     }
+
+
+def test_history_returns_null_buckets_for_offline_interval(client, admin, app):
+    agent = enroll_agent(admin)
+    now = datetime.now(timezone.utc)
+    _insert_sample(
+        app.state.db,
+        agent["agent_id"],
+        _iso(now - timedelta(hours=5)),
+        cpu_pct=10.0,
+        mem_pct=20.0,
+    )
+    _insert_sample(
+        app.state.db,
+        agent["agent_id"],
+        _iso(now - timedelta(hours=1)),
+        cpu_pct=30.0,
+        mem_pct=40.0,
+    )
+
+    data = client.get(
+        f"/api/agents/{agent['agent_id']}/history?hours=6&points=60"
+    ).json()
+    points = data["points"]
+    assert len(points) == 60
+    timestamps = [parse_iso(point["at"]) for point in points]
+    assert all(value is not None for value in timestamps)
+    assert timestamps == sorted(timestamps)
+    assert any(point["cpu_pct"] is None for point in points)
+    gap = next(
+        point
+        for point in points
+        if point["cpu_pct"] is None
+        and parse_iso(point["at"]) > now - timedelta(hours=4)
+        and parse_iso(point["at"]) < now - timedelta(hours=2)
+    )
+    assert gap["mem_pct"] is None
+    assert gap["service_down"] is None
+    assert [point["cpu_pct"] for point in points if point["cpu_pct"] is not None] == [10.0, 30.0]
 
 
 def test_history_requires_auth_and_allows_viewer(client, admin, app):
@@ -116,7 +157,9 @@ def test_history_requires_auth_and_allows_viewer(client, admin, app):
         login(viewer_client, "historyviewer", "viewer password 123")
         response = viewer_client.get(path)
         assert response.status_code == 200, response.text
-        assert len(response.json()["points"]) == 1
+        points = response.json()["points"]
+        assert len(points) == 200
+        assert any(point["cpu_pct"] == 1.0 for point in points)
 
 
 def test_history_rejects_unknown_agent_and_out_of_range(client, admin):

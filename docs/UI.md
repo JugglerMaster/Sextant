@@ -7,7 +7,7 @@ The dashboard is a vanilla HTML/CSS/JS single page backed by the FastAPI API. It
 ## Current shape
 
 - **Fleet** — stats, search, status/profile/tag filters, agent cards with CPU/memory/disk/GPU/uptime, **heartbeat**, and **inventory updated**, click/Enter to open a drawer.
-- **Device drawer** — Overview (with 24h sparklines), Disks, GPU, Services, Startup, Packages, Remote, History.
+- **Device drawer** — Overview (with 24h sparklines), Disks, GPU, Services, Startup, Packages, Remote, History, Trends.
 - **Packages** — inventory with interactive table, **desired-state rule editor** (admin), drift summary, Sync now.
 - **Profiles** — create/edit/reset/delete profiles, modules, action gates, cadences, tag assignments.
 - **Remote install** — Linux SSH install jobs with test/install/log.
@@ -68,7 +68,7 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 - Alert center with acknowledge, snooze, and clear actions for every current health alert.
 - Bulk selection with refresh-telemetry, wake, reboot, shutdown, service, and profile actions.
 - CSV export for the fleet, per-agent package inventory, and filtered command history.
-- Trends tab with 24h/7d detail charts and a merged command/alert timeline.
+- Trends tab with gap-aware 24h/7d detail charts, a persistent state-change timeline, and a What changed summary.
 - Light/dark theme toggle and a Ctrl/Cmd+K command palette.
 - Live dashboard updates over change-driven SSE with polling fallback.
 
@@ -103,8 +103,8 @@ Priority: full pagination for Services and Users next.
 
 - The History tab queries `GET /api/agents/{id}/commands` directly, so retained commands beyond the overview's latest-50 preview are reachable. Search is debounced and runs server-side; the status filter and page size (25/50/100) reset to the first page, Previous/Next preserve the current filters, refresh keeps the current page when possible, and Export CSV includes the active search/status filters. Command expansion, cancel, and retry remain available on each row.
 - 24-hour CPU/memory/disk/GPU sparklines are implemented.
-- The Trends tab adds 24h/7d detail charts for CPU, memory, disk, GPU utilization, and GPU temperature, plus a merged command/alert timeline.
-- Remaining: explicit gaps for offline periods and a “what changed” view.
+- The Trends tab adds 24h/7d detail charts for CPU, memory, disk, GPU utilization, and GPU temperature. Points are positioned by their real bucket timestamps, null buckets break the line, and offline intervals remain visible as gaps instead of being bridged.
+- The Trends timeline merges retained commands with persistent `agent_events` and alert lifecycle entries, using real event timestamps. A compact **What changed** section summarizes the most recent service, package, version, profile, connectivity, and alert transitions in the selected window, with an explicit empty state when nothing changed.
 
 ### 5. Accessibility
 
@@ -130,7 +130,7 @@ Priority: full pagination for Services and Users next.
 | Freshness on cards/drawer | Implemented with cadence + stale badges |
 | Fleet status/profile/tag filters | Implemented and persisted; named saved views in local storage |
 | Table sort/pagination | Implemented for Packages, Startup, Audit, and History; Services bounded show-more; Users search/count |
-| Charts/sparklines | 24h sparklines plus 24h/7d detail charts and a command/alert timeline |
+| Charts/sparklines | 24h sparklines plus gap-aware 24h/7d detail charts, persistent event timeline, and What changed summary |
 | Accessibility pass | Implemented: focus trap/return, aria-sort, live regions, theme toggle, command palette; formal contrast audit pending |
 | Alert center | Implemented with acknowledge/snooze/clear |
 | Bulk actions | Implemented: refresh, wake, reboot, shutdown, service, profile |

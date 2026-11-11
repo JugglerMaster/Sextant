@@ -222,6 +222,7 @@ def telemetry_sample_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         value = row[key]
         return None if value is None else round(float(value), 1)
 
+    service_down = row["service_down"]
     return {
         "at": row["at"],
         "cpu_pct": optional_float("cpu_pct"),
@@ -229,7 +230,19 @@ def telemetry_sample_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "disk_max_pct": optional_float("disk_max_pct"),
         "gpu_max_util": optional_float("gpu_max_util"),
         "gpu_max_temp": optional_float("gpu_max_temp"),
-        "service_down": int(row["service_down"] or 0),
+        "service_down": None if service_down is None else int(service_down),
+    }
+
+
+def agent_event_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "agent_id": row["agent_id"],
+        "at": row["at"],
+        "kind": row["kind"],
+        "severity": row["severity"],
+        "title": row["title"],
+        "detail": loads(row["detail"], {}),
     }
 
 
