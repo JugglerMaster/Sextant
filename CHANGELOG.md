@@ -4,7 +4,7 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
-## [Unreleased]
+## [0.4.0] - 2026-11-11
 
 ### Added
 
@@ -12,7 +12,14 @@ semantic versioning.
   watched-service incidents, with per-incident deduplication, acknowledgement
   and snooze suppression, recovery messages, a persisted outbox with retry and
   backoff, admin status/log/test/retry API endpoints, and `sextant notify-test`,
-  `notify-log`, and `notify-retry` CLI commands.
+  `notify-log`, and `sextant notify-retry` CLI commands.
+- Docker Hosts and Compose Files views for Linux agents: bounded engine and
+  container/image/volume/network inventory, cached host detail, allowlisted
+  container actions, logs, one-shot exec, cleanup, an interactive `docker exec`
+  console, server-side Compose revisions and multi-host deploy/update/down/
+  rollback, drift indicators, health events, and a validated container clone.
+- Agent cards show the reported agent version; the API and CSV export already
+  include it.
 
 ## [0.3.1] - 2026-11-11
 
@@ -72,6 +79,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.4.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.4.0
 [0.3.1]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.3.1
 [0.3.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.3.0
 [0.2.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.2.0
