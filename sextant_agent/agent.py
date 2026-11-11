@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import logging
 import queue
 import random
@@ -11,6 +12,7 @@ from typing import Any
 from .client import AgentClient, AgentHTTPError
 from .collectors import MetricsCollector
 from .config import AgentConfig
+from .console import ConsoleError, ConsoleManager
 from .docker import DOCKER_MUTATION_ACTIONS, DockerCollector
 from .executor import execute_command
 
@@ -101,8 +103,10 @@ class AgentRunner:
         self.client = AgentClient(config)
         self.collector = MetricsCollector(config)
         self.docker = DockerCollector(config)
-        self.remote_policy: dict[str, Any] = {}
         self.stop_event = threading.Event()
+        self.console = ConsoleManager(config, self.client, self.stop_event)
+        atexit.register(self.console.close_all)
+        self.remote_policy: dict[str, Any] = {}
         self._installed_signals = False
         self._update_notice: str | None = None
         self._local_max_output_bytes = config.max_output_bytes
@@ -234,7 +238,52 @@ class AgentRunner:
         args = command.get("args") if isinstance(command.get("args"), dict) else {}
         action = str(args.get("action", "")).lower()
         started = time.time()
-        if action == "inventory.refresh":
+        if action == "console.open":
+            if not self.docker.exec_enabled():
+                result = {
+                    "status": "failed",
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "error": "Interactive console is disabled by local or server policy.",
+                }
+            else:
+                session_id = str(args.get("session_id", "") or "")
+                container_id, error = self.docker.resolve_container(
+                    str(args.get("container_id", "") or "")
+                )
+                if container_id is None:
+                    result = {
+                        "status": "failed",
+                        "exit_code": None,
+                        "stdout": "",
+                        "stderr": "",
+                        "error": error,
+                    }
+                else:
+                    try:
+                        self.console.open(
+                            session_id,
+                            container_id,
+                            args,
+                            self.docker._docker_env(),
+                        )
+                        result = {
+                            "status": "succeeded",
+                            "exit_code": 0,
+                            "stdout": "Container console opened.",
+                            "stderr": "",
+                            "error": "",
+                        }
+                    except ConsoleError as exc:
+                        result = {
+                            "status": "failed",
+                            "exit_code": None,
+                            "stdout": "",
+                            "stderr": "",
+                            "error": str(exc),
+                        }
+        elif action == "inventory.refresh":
             if not self.docker.enabled():
                 result = {
                     "status": "failed",

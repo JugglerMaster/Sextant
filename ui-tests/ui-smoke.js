@@ -610,6 +610,25 @@ window.fetch = async (path, options = {}) => {
     response = { status: 200, body: { server_time: "2026-11-06T08:00:30Z", stale_seconds: 900, hosts: [] } };
   } else if (method === "GET" && key === "/api/docker/stacks" && window.__composeEmpty) {
     response = { status: 200, body: { stacks: [] } };
+  } else if (method === "POST" && /^\/api\/docker\/hosts\/agt_demo\/containers\/[^/]+\/console$/.test(key)) {
+    response = {
+      status: 200,
+      body: {
+        session_id: "con_test",
+        status: "opening",
+        idle_seconds: 900,
+        poll_seconds: 25,
+        rows: 32,
+        cols: 100,
+        shell: body?.shell || "sh",
+        user: body?.user || "",
+        container_id: key.split("/")[5],
+      },
+    };
+  } else if (method === "POST" && (key === "/api/docker/console/con_test/input" || key === "/api/docker/console/con_test/resize")) {
+    response = { status: 204, body: null };
+  } else if (method === "DELETE" && key === "/api/docker/console/con_test") {
+    response = { status: 204, body: null };
   } else if (method === "POST" && key === "/api/docker/hosts/agt_demo/refresh") {
     dockerHost.inventory_at = "2026-11-06T08:01:00Z";
     dockerHost.collected_at = "2026-11-06T08:01:00Z";
@@ -1415,6 +1434,37 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   findButton(window.document.getElementById("docker-dialog"), "Close").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(600);
 
+  findButton(window.document.getElementById("docker-host-body"), "Console").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  if (!window.document.getElementById("docker-console-dialog").open) throw new Error("Docker console dialog did not open");
+  if (!window.document.getElementById("docker-console-setup").hidden) {
+    findButton(window.document.getElementById("docker-console-setup"), "Start console").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  }
+  await sleep(60);
+  if (window.document.getElementById("docker-console-live").hidden) throw new Error("Docker console did not start");
+  const consoleSource = [...window.__eventSources].reverse().find((source) => source.url.includes("/api/docker/console/con_test/events"));
+  if (!consoleSource) throw new Error("Docker console SSE stream missing");
+  consoleSource.emit("status", { status: "open", idle_seconds: 900 });
+  consoleSource.emit("output", { data: Buffer.from("hello from console\n").toString("base64") });
+  await sleep(20);
+  if (!window.document.getElementById("docker-console-output").textContent.includes("hello from console")) {
+    throw new Error("Docker console output did not render");
+  }
+  const consoleInput = window.document.getElementById("docker-console-input");
+  consoleInput.value = "ls";
+  findButton(window.document.getElementById("docker-console-live"), "Send").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/docker/console/con_test/input")) {
+    throw new Error("Docker console input was not sent");
+  }
+  window.document.getElementById("docker-console-close").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await closeConfirm("Close the container console?");
+  await sleep(30);
+  if (window.document.getElementById("docker-console-dialog").open) throw new Error("Docker console dialog did not close");
+  if (!window.__requests.some((request) => request.method === "DELETE" && request.path === "/api/docker/console/con_test")) {
+    throw new Error("Docker console close was not sent");
+  }
+
   findButton(window.document.getElementById("docker-host-body"), "Remove").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await closeConfirm("Remove web-1?");
   await sleep(1800);
@@ -1430,7 +1480,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   window.document.querySelector('[data-docker-tab="containers"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(20);
   const offlineStop = findButton(window.document.getElementById("docker-host-body"), "Stop");
-  if (!offlineStop || !offlineStop.disabled) throw new Error("Docker actions should disable while offline");
+  const offlineConsole = findButton(window.document.getElementById("docker-host-body"), "Console");
+  if (!offlineStop || !offlineStop.disabled || !offlineConsole || !offlineConsole.disabled) {
+    throw new Error("Docker actions and console should disable while offline");
+  }
   if (!window.document.getElementById("docker-host-notice").textContent.includes("offline")) {
     throw new Error("Docker offline notice missing");
   }
@@ -1605,7 +1658,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty plus inspect/logs/exec/remove/cleanup/offline states, Compose Files list/editor/revisions/deploy/deployment history, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty plus inspect/logs/exec/console/remove/cleanup/offline states, Compose Files list/editor/revisions/deploy/deployment history, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

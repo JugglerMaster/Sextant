@@ -106,6 +106,11 @@ class Settings:
     docker_max_total_bytes: int = 1_048_576
     docker_max_bundle_bytes: int = 4_194_304
     docker_deployment_retention_days: int = 90
+    docker_console_poll_seconds: int = 25
+    docker_console_idle_seconds: int = 900
+    docker_console_max_sessions: int = 2
+    docker_console_max_input_bytes: int = 65536
+    docker_console_max_output_bytes: int = 1_048_576
     ssh_key_path: str = ""
     ssh_install_enabled: bool = True
     extra: dict = field(default_factory=dict)
@@ -237,6 +242,21 @@ class Settings:
             ),
             docker_deployment_retention_days=max(
                 1, _int(env.get("SEXTANT_DOCKER_DEPLOYMENT_RETENTION_DAYS"), 90, 1)
+            ),
+            docker_console_poll_seconds=min(
+                60, _int(env.get("SEXTANT_DOCKER_CONSOLE_POLL_SECONDS"), 25, 5)
+            ),
+            docker_console_idle_seconds=min(
+                3600, _int(env.get("SEXTANT_DOCKER_CONSOLE_IDLE_SECONDS"), 900, 60)
+            ),
+            docker_console_max_sessions=max(
+                1, min(8, _int(env.get("SEXTANT_DOCKER_CONSOLE_MAX_SESSIONS"), 2, 1))
+            ),
+            docker_console_max_input_bytes=max(
+                1024, _int(env.get("SEXTANT_DOCKER_CONSOLE_MAX_INPUT_BYTES"), 65536, 1024)
+            ),
+            docker_console_max_output_bytes=max(
+                4096, _int(env.get("SEXTANT_DOCKER_CONSOLE_MAX_OUTPUT_BYTES"), 1_048_576, 4096)
             ),
             ssh_key_path=env.get("SEXTANT_SSH_KEY_PATH", "").strip() or str(data_dir / "ssh" / "install_key"),
             ssh_install_enabled=_bool(env.get("SEXTANT_SSH_INSTALL_ENABLED"), True),

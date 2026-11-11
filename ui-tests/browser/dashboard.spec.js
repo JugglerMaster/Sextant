@@ -42,6 +42,30 @@ for (const theme of THEMES) {
     await scan(page, `compose files ${theme}`);
   });
 
+  test(`Docker console opens, renders output, and closes in the ${theme} theme`, async ({ page }) => {
+    await login(page, { theme });
+    await page.locator('[data-page="docker-hosts"]').click();
+    await page.locator("#docker-host-list").getByRole("button", { name: "Open" }).click();
+    await page.locator('#docker-host-tabs [data-docker-tab="containers"]').click();
+    await page.getByRole("button", { name: "Console" }).first().click();
+    await expect(page.locator("#docker-console-dialog")).toBeVisible();
+    await expect(page.locator("#docker-console-banner")).toContainText("runs inside the container");
+    await page.locator("#docker-console-start").click();
+    await expect(page.locator("#docker-console-live")).toBeVisible();
+    await page.evaluate(() => {
+      const source = [...window.__eventSources].reverse().find((item) => item.url.includes("/api/docker/console/con_browser/events"));
+      source.dispatch("status", { type: "status", data: JSON.stringify({ status: "open", idle_seconds: 900 }) });
+      source.dispatch("output", { type: "output", data: JSON.stringify({ data: btoa("hello from console\n") }) });
+    });
+    await expect(page.locator("#docker-console-output")).toContainText("hello from console");
+    await screenshot(page, `docker-console-${theme}`);
+    await scan(page, `docker console ${theme}`);
+    await page.locator("#docker-console-close").click();
+    await expect(page.locator("#confirm-dialog")).toBeVisible();
+    await page.locator("#confirm-accept").click();
+    await expect(page.locator("#docker-console-dialog")).toBeHidden();
+  });
+
   test(`device drawer tabs render in the ${theme} theme`, async ({ page }) => {
     await login(page, { theme });
     await openDrawer(page);
@@ -99,6 +123,25 @@ for (const theme of THEMES) {
     await scan(page, `dashboard ${theme} mobile`);
   });
 }
+
+test("Docker console modal renders at the mobile viewport", async ({ page }) => {
+  await login(page, { width: 390, height: 844 });
+  await page.evaluate(() => document.querySelector('[data-page="docker-hosts"]').click());
+  await page.locator("#docker-host-list").getByRole("button", { name: "Open" }).click();
+  await page.locator('#docker-host-tabs [data-docker-tab="containers"]').click();
+  await page.getByRole("button", { name: "Console" }).first().click();
+  await expect(page.locator("#docker-console-dialog")).toBeVisible();
+  await page.locator("#docker-console-start").click();
+  await expect(page.locator("#docker-console-live")).toBeVisible();
+  await page.evaluate(() => {
+    const source = [...window.__eventSources].reverse().find((item) => item.url.includes("/api/docker/console/con_browser/events"));
+    source.dispatch("status", { type: "status", data: JSON.stringify({ status: "open", idle_seconds: 900 }) });
+    source.dispatch("output", { type: "output", data: JSON.stringify({ data: btoa("mobile console\n") }) });
+  });
+  await expect(page.locator("#docker-console-output")).toContainText("mobile console");
+  await screenshot(page, "docker-console-dark-mobile");
+  await scan(page, "docker console dark mobile");
+});
 
 test("Docker Hosts exposes cached inspect and cleanup confirmations", async ({ page }) => {
   await login(page);

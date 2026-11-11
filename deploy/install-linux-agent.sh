@@ -107,6 +107,12 @@ fi
 if [[ -n "${DOCKER_COMPOSE_DIR:-}" ]]; then
   ENROLL_ARGS+=(--docker-compose-dir "$DOCKER_COMPOSE_DIR")
 fi
+if [[ -n "${DOCKER_CONSOLE_MAX_SESSIONS:-}" ]]; then
+  ENROLL_ARGS+=(--docker-console-max-sessions "$DOCKER_CONSOLE_MAX_SESSIONS")
+fi
+if [[ -n "${DOCKER_CONSOLE_IDLE_SECONDS:-}" ]]; then
+  ENROLL_ARGS+=(--docker-console-idle-seconds "$DOCKER_CONSOLE_IDLE_SECONDS")
+fi
 if [[ "${NO_SELF_UPDATE:-0}" == "1" ]]; then
   ENROLL_ARGS+=(--no-self-update)
 fi

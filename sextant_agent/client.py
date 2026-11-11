@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import ssl
 import urllib.error
@@ -138,6 +139,39 @@ class AgentClient:
             payload,
             token=self.config.agent_token,
             timeout=max(30, self.config.timeout),
+        )
+
+    def console_poll(self, session_id: str, timeout: int = 30) -> dict[str, Any]:
+        agent_id = urllib.parse.quote(self.config.agent_id, safe="")
+        session = urllib.parse.quote(session_id, safe="")
+        return self._request(
+            "POST",
+            f"/api/agent/{agent_id}/docker/console/{session}/poll",
+            {},
+            token=self.config.agent_token,
+            timeout=max(30, timeout + 5),
+        )
+
+    def send_console_output(self, session_id: str, data: bytes) -> dict[str, Any]:
+        agent_id = urllib.parse.quote(self.config.agent_id, safe="")
+        session = urllib.parse.quote(session_id, safe="")
+        return self._request(
+            "POST",
+            f"/api/agent/{agent_id}/docker/console/{session}/output",
+            {"data": base64.b64encode(data).decode("ascii")},
+            token=self.config.agent_token,
+            timeout=max(20, self.config.timeout),
+        )
+
+    def send_console_closed(self, session_id: str, exit_code: int | None, error: str = "") -> dict[str, Any]:
+        agent_id = urllib.parse.quote(self.config.agent_id, safe="")
+        session = urllib.parse.quote(session_id, safe="")
+        return self._request(
+            "POST",
+            f"/api/agent/{agent_id}/docker/console/{session}/closed",
+            {"exit_code": exit_code, "error": error[:4000]},
+            token=self.config.agent_token,
+            timeout=max(20, self.config.timeout),
         )
 
     def get_update(self, current_version: str) -> dict[str, Any]:

@@ -62,7 +62,7 @@ DOCKER_ACTIONS = (
     | NETWORK_ACTIONS
     | CLEANUP_ACTIONS
     | COMPOSE_ACTIONS
-    | {"inventory.refresh"}
+    | {"console.open", "inventory.refresh"}
 )
 DOCKER_MUTATION_ACTIONS = (
     CONTAINER_LIFECYCLE_ACTIONS
@@ -236,6 +236,40 @@ def normalize_docker_command_args(args: dict[str, Any]) -> dict[str, Any]:
         if not NETWORK_ID_RE.match(network_id):
             raise ValueError("invalid Docker network ID")
         return {"action": action, "network_id": network_id}
+    if action == "console.open":
+        _check_keys(
+            args,
+            {"action", "session_id", "container_id", "shell", "user", "workdir", "rows", "cols"},
+        )
+        session_id = _text(args, "session_id", 64)
+        if not re.match(r"^con_[A-Za-z0-9]+$", session_id):
+            raise ValueError("invalid console session ID")
+        shell = _text(args, "shell", 16).lower()
+        if shell not in EXEC_SHELLS:
+            raise ValueError("shell must be sh, bash, or ash")
+        user = _text(args, "user", 32)
+        if user and not USER_RE.match(user):
+            raise ValueError("invalid console user")
+        workdir = _text(args, "workdir", 256)
+        if workdir and not WORKDIR_RE.match(workdir):
+            raise ValueError("console workdir must be an absolute path")
+        try:
+            rows = int(args.get("rows", 32))
+            cols = int(args.get("cols", 100))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("console size must be numeric") from exc
+        if not 10 <= rows <= 200 or not 20 <= cols <= 300:
+            raise ValueError("console size is out of range")
+        return {
+            "action": action,
+            "session_id": session_id,
+            "container_id": _required_container_id(args),
+            "shell": shell,
+            "user": user,
+            "workdir": workdir,
+            "rows": rows,
+            "cols": cols,
+        }
     if action in COMPOSE_ACTIONS:
         _check_keys(
             args,

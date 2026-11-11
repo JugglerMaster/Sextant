@@ -441,6 +441,23 @@ CREATE TABLE IF NOT EXISTS docker_stack_revisions (
     UNIQUE(stack_id, revision_hash)
 );
 
+CREATE TABLE IF NOT EXISTS docker_console_sessions (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    container_id TEXT NOT NULL,
+    shell TEXT NOT NULL,
+    user TEXT NOT NULL DEFAULT '',
+    tty INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'opening',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT,
+    closed_at TEXT,
+    exit_code INTEGER,
+    error TEXT NOT NULL DEFAULT '',
+    client_ip TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS docker_deployments (
     id TEXT PRIMARY KEY,
     stack_id TEXT NOT NULL REFERENCES docker_stacks(id) ON DELETE CASCADE,
@@ -499,6 +516,8 @@ CREATE INDEX IF NOT EXISTS idx_docker_deployments_agent ON docker_deployments(ag
 CREATE INDEX IF NOT EXISTS idx_docker_deployments_stack ON docker_deployments(stack_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_docker_deployments_active ON docker_deployments(agent_id, project_name, active);
 CREATE INDEX IF NOT EXISTS idx_docker_deployments_command ON docker_deployments(command_id);
+CREATE INDEX IF NOT EXISTS idx_docker_console_agent ON docker_console_sessions(agent_id, status);
+CREATE INDEX IF NOT EXISTS idx_docker_console_last_seen ON docker_console_sessions(last_seen_at);
 """
 
 DEFAULT_PROFILES = [
@@ -669,7 +688,7 @@ class Database:
             if old_version < 7:
                 self._ensure_docker_profile_defaults(conn)
             conn.executescript(INDEXES)
-            conn.execute("PRAGMA user_version=9")
+            conn.execute("PRAGMA user_version=10")
             conn.execute("UPDATE agents SET profile_id = 'prof_workstation' WHERE profile_id = ''")
         try:
             self.path.chmod(0o600)
@@ -3126,6 +3145,113 @@ class Database:
                 (stack_id,),
             ).fetchall()
             return {str(row["revision_hash"]) for row in rows if row["revision_hash"]}
+
+    # ---- Docker console metadata ---------------------------------------
+
+    def create_console_session(
+        self,
+        session_id: str,
+        *,
+        agent_id: str,
+        container_id: str,
+        shell: str,
+        user: str,
+        tty: bool,
+        created_by: str,
+        client_ip: str = "",
+    ) -> sqlite3.Row:
+        now = utcnow_iso()
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT INTO docker_console_sessions
+                   (id, agent_id, container_id, shell, user, tty, status, created_by,
+                    created_at, last_seen_at, client_ip)
+                   VALUES (?, ?, ?, ?, ?, ?, 'opening', ?, ?, ?, ?)""",
+                (
+                    session_id,
+                    agent_id,
+                    container_id,
+                    shell,
+                    user,
+                    int(tty),
+                    created_by,
+                    now,
+                    now,
+                    client_ip[:128],
+                ),
+            )
+            return conn.execute(
+                "SELECT * FROM docker_console_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+
+    def get_console_session(self, session_id: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM docker_console_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+
+    def mark_console_seen(self, session_id: str, status: str | None = None) -> None:
+        now = utcnow_iso()
+        with self.connection() as conn:
+            if status:
+                conn.execute(
+                    "UPDATE docker_console_sessions SET last_seen_at = ?, status = ? WHERE id = ?",
+                    (now, status, session_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE docker_console_sessions SET last_seen_at = ? WHERE id = ?",
+                    (now, session_id),
+                )
+
+    def close_console_session(
+        self,
+        session_id: str,
+        *,
+        status: str,
+        exit_code: int | None = None,
+        error: str = "",
+    ) -> None:
+        now = utcnow_iso()
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE docker_console_sessions
+                   SET status = ?, closed_at = ?, last_seen_at = ?, exit_code = ?, error = ?
+                   WHERE id = ?""",
+                (status, now, now, exit_code, error[:4000], session_id),
+            )
+
+    def close_open_console_sessions(self, *, status: str, error: str = "") -> int:
+        now = utcnow_iso()
+        with self.connection() as conn:
+            cur = conn.execute(
+                """UPDATE docker_console_sessions
+                   SET status = ?, closed_at = ?, last_seen_at = ?, error = ?
+                   WHERE status IN ('opening', 'open', 'closing')""",
+                (status, now, now, error[:4000]),
+            )
+            return int(cur.rowcount)
+
+    def close_console_sessions_for_user(self, username: str, *, status: str = "closed") -> int:
+        now = utcnow_iso()
+        with self.connection() as conn:
+            cur = conn.execute(
+                """UPDATE docker_console_sessions
+                   SET status = ?, closed_at = ?, last_seen_at = ?, error = ?
+                   WHERE created_by = ? AND status IN ('opening', 'open', 'closing')""",
+                (status, now, now, "Operator session invalidated.", username),
+            )
+            return int(cur.rowcount)
+
+    def list_open_console_sessions(self) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """SELECT * FROM docker_console_sessions
+                       WHERE status IN ('opening', 'open', 'closing')
+                       ORDER BY created_at"""
+                ).fetchall()
+            )
 
     def audit(
         self,

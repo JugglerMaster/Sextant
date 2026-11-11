@@ -945,6 +945,21 @@ class DockerCollector:
             if locked:
                 self._mutation_lock.release()
 
+    def resolve_container(self, target: str) -> tuple[str | None, str]:
+        if platform.system() != "Linux" or not self.enabled():
+            return None, "Docker is unavailable."
+        command = self._docker_binary()
+        if not command:
+            return None, "Docker CLI is not installed."
+        container_id, result = self._target_container(
+            command,
+            self._docker_env(),
+            {"container_id": target},
+        )
+        if container_id is None:
+            return None, str(result.get("stderr") or "Container not found.")
+        return container_id, ""
+
     def _target_container(self, command: str, env: dict[str, str], args: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
         target = str(args.get("container_id", "") or "").strip()
         if not _CONTAINER_ID_RE.match(target):

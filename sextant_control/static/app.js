@@ -43,6 +43,14 @@ const state = {
   composeFile: "compose.yaml",
   composeSettings: null,
   composeLoading: false,
+  dockerConsole: null,
+  dockerConsoleSource: null,
+  dockerConsoleBuffer: "",
+  dockerConsoleIdleTimer: null,
+  dockerConsoleIdleSeconds: 900,
+  dockerConsoleLastActivity: 0,
+  dockerConsoleResizeTimer: null,
+  dockerConsoleTrigger: null,
   fleetFilters: { status: "all", profile: "", tag: "" },
   fleetRenderLimit: 60,
   agentCards: new Map(),
@@ -548,6 +556,8 @@ async function copyText(text) {
 function showLogin(message = "") {
   stopLiveUpdates();
   stopDockerRefreshPoll();
+  closeDockerConsoleSource();
+  state.dockerConsole = null;
   state.user = null;
   state.dockerHostId = null;
   state.dockerHostDetail = null;
@@ -4431,6 +4441,7 @@ function renderDockerContainers(body, detail) {
           button("Inspect", "button-ghost button-small", () => openDockerContainerDetail(container), false),
           button("Logs", "button-ghost button-small", () => openDockerLogs(container), !canMutate),
           button("Exec", "button-secondary button-small", () => openDockerExec(container), !canExec),
+          button("Console", "button-primary button-small", () => openDockerConsole(container), !canExec || !running),
           running
             ? button("Stop", "button-ghost button-small", () => dockerLifecycle(container, "container.stop"), !canMutate)
             : button("Start", "button-secondary button-small", () => dockerLifecycle(container, "container.start"), !canMutate),
@@ -4589,6 +4600,349 @@ function openDockerExec(container) {
       $("docker-dialog-body").querySelector("form")?.requestSubmit();
     }, !dockerCan("exec")));
   });
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  const binary = atob(String(value || ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function decodeConsoleBytes(bytes) {
+  if (typeof TextDecoder === "function") return new TextDecoder().decode(bytes);
+  let text = "";
+  for (const byte of bytes) text += String.fromCharCode(byte);
+  return text;
+}
+
+function encodeConsoleText(text) {
+  if (typeof TextEncoder === "function") return new TextEncoder().encode(text);
+  return Uint8Array.from([...String(text)].map((char) => char.charCodeAt(0) & 0xff));
+}
+
+function dockerConsoleWrite(text) {
+  let output = state.dockerConsoleBuffer;
+  const cleaned = String(text || "")
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b[@-_]/g, "");
+  for (const char of cleaned) {
+    if (char === "\r") {
+      const lastNewline = output.lastIndexOf("\n");
+      output = lastNewline >= 0 ? output.slice(0, lastNewline + 1) : "";
+    } else if (char === "\b") {
+      if (!output.endsWith("\n")) output = output.slice(0, -1);
+    } else if (char === "\n" || char === "\t") {
+      output += char;
+    } else if (char >= " ") {
+      output += char;
+    }
+  }
+  state.dockerConsoleBuffer = output.slice(-200_000);
+  const pre = $("docker-console-output");
+  if (pre) {
+    pre.textContent = state.dockerConsoleBuffer;
+    pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+function updateDockerConsoleIdle() {
+  const status = $("docker-console-status");
+  if (!status || !state.dockerConsole?.session) return;
+  const elapsed = (Date.now() - state.dockerConsoleLastActivity) / 1000;
+  const remaining = Math.max(0, Math.round(state.dockerConsoleIdleSeconds - elapsed));
+  const base = state.dockerConsole.status || "open";
+  status.textContent = `${base} · idle timeout in ${Math.floor(remaining / 60)}m ${String(remaining % 60).padStart(2, "0")}s`;
+}
+
+function resetDockerConsoleIdle() {
+  state.dockerConsoleLastActivity = Date.now();
+  updateDockerConsoleIdle();
+}
+
+function dockerConsoleSize() {
+  const pre = $("docker-console-output");
+  const rows = Math.max(10, Math.min(200, Math.floor((pre?.clientHeight || 400) / 18)));
+  const cols = Math.max(20, Math.min(300, Math.floor((pre?.clientWidth || 800) / 7)));
+  return { rows, cols };
+}
+
+function sendDockerConsoleResize() {
+  const session = state.dockerConsole?.session;
+  if (!session || !dockerCan("exec")) return;
+  const { rows, cols } = dockerConsoleSize();
+  api(`/api/docker/console/${encodeURIComponent(session.session_id)}/resize`, {
+    method: "POST",
+    body: { rows, cols },
+  }).catch(() => {});
+}
+
+function scheduleDockerConsoleResize() {
+  if (!state.dockerConsole?.session) return;
+  if (state.dockerConsoleResizeTimer) clearTimeout(state.dockerConsoleResizeTimer);
+  state.dockerConsoleResizeTimer = setTimeout(sendDockerConsoleResize, 180);
+}
+
+function sendDockerConsoleInput(text) {
+  const session = state.dockerConsole?.session;
+  if (!session || !text) return;
+  resetDockerConsoleIdle();
+  const data = bytesToBase64(encodeConsoleText(text));
+  api(`/api/docker/console/${encodeURIComponent(session.session_id)}/input`, {
+    method: "POST",
+    body: { data },
+  }).catch((error) => {
+    if (!/rate/i.test(error.message)) {
+      const status = $("docker-console-status");
+      if (status) status.textContent = error.message;
+    }
+  });
+}
+
+function openDockerConsole(container) {
+  if (!dockerCan("exec")) return toast("Docker exec is disabled for this host.", "warn");
+  if (String(container.state || "").toLowerCase() !== "running") {
+    return toast("Start the container before opening a console.", "warn");
+  }
+  const host = dockerHost();
+  state.dockerConsoleTrigger = document.activeElement;
+  state.dockerConsole = { session: null, container, host, status: "opening" };
+  state.dockerConsoleBuffer = "";
+  setText("docker-console-title", container.name || short(container.id, 12));
+  setText("docker-console-eyebrow", `Console · ${host?.name || ""}`);
+  setText("docker-console-banner", `${host?.name || "Docker host"} · ${container.name || short(container.id, 12)} · ${container.image || ""}. The shell runs inside the container with its privileges.`);
+  setText("docker-console-error", "");
+  setText("docker-console-status", "");
+  $("docker-console-setup").hidden = false;
+  $("docker-console-live").hidden = true;
+  $("docker-console-output").textContent = "";
+  $("docker-console-user").value = "";
+  $("docker-console-workdir").value = "/";
+  $("docker-console-shell").value = "sh";
+  $("docker-console-dialog").showModal();
+  $("docker-console-shell").focus();
+}
+
+function updateDockerConsoleWarning() {
+  const user = $("docker-console-user")?.value.trim().toLowerCase();
+  const banner = $("docker-console-banner");
+  if (!banner) return;
+  const host = state.dockerConsole?.host;
+  const container = state.dockerConsole?.container;
+  const rootWarning = user === "root" || user === "0" ? " Requested user is root/UID 0 inside the container." : "";
+  banner.textContent = `${host?.name || "Docker host"} · ${container?.name || "container"} · ${container?.image || ""}. The shell runs inside the container with its privileges.${rootWarning}`;
+}
+
+async function startDockerConsole() {
+  const consoleState = state.dockerConsole;
+  if (!consoleState?.container || consoleState.session) return;
+  const shell = $("docker-console-shell").value;
+  const user = $("docker-console-user").value.trim();
+  const workdir = $("docker-console-workdir").value.trim();
+  if (workdir && !workdir.startsWith("/")) {
+    return setText("docker-console-error", "Working directory must be an absolute path.");
+  }
+  const { rows, cols } = dockerConsoleSize();
+  $("docker-console-start").disabled = true;
+  try {
+    const data = await api(`/api/docker/hosts/${encodeURIComponent(state.dockerHostId)}/containers/${encodeURIComponent(consoleState.container.id)}/console`, {
+      method: "POST",
+      body: { shell, user, workdir, rows, cols },
+    });
+    consoleState.session = data;
+    consoleState.status = data.status || "opening";
+    state.dockerConsoleIdleSeconds = data.idle_seconds || 900;
+    resetDockerConsoleIdle();
+    $("docker-console-setup").hidden = true;
+    $("docker-console-live").hidden = false;
+    setText("docker-console-status", "opening · waiting for agent");
+    connectDockerConsole(data.session_id);
+    sendDockerConsoleResize();
+    $("docker-console-output").focus();
+  } catch (error) {
+    setText("docker-console-error", error.message);
+  } finally {
+    $("docker-console-start").disabled = false;
+  }
+}
+
+function connectDockerConsole(sessionId) {
+  closeDockerConsoleSource();
+  const source = new EventSource(`/api/docker/console/${encodeURIComponent(sessionId)}/events`);
+  state.dockerConsoleSource = source;
+  source.addEventListener("status", (event) => {
+    let data;
+    try {
+      data = JSON.parse(event.data);
+    } catch (_error) {
+      return;
+    }
+    if (!state.dockerConsole) return;
+    state.dockerConsole.status = data.status;
+    if (data.idle_seconds) state.dockerConsoleIdleSeconds = data.idle_seconds;
+    const status = $("docker-console-status");
+    if (status) {
+      status.textContent = data.status === "open"
+        ? "open"
+        : data.status === "opening"
+          ? "opening · waiting for agent"
+          : `${data.status}${data.error ? ` · ${data.error}` : ""}${data.exit_code != null ? ` · exit ${data.exit_code}` : ""}`;
+    }
+    updateDockerConsoleIdle();
+    if (["closed", "failed", "cancelled", "exited"].includes(data.status)) {
+      closeDockerConsoleSource();
+    }
+  });
+  source.addEventListener("output", (event) => {
+    let data;
+    try {
+      data = JSON.parse(event.data);
+    } catch (_error) {
+      return;
+    }
+    dockerConsoleWrite(decodeConsoleBytes(base64ToBytes(data.data)));
+    resetDockerConsoleIdle();
+  });
+  source.addEventListener("auth", () => {
+    const status = $("docker-console-status");
+    if (status) status.textContent = "Console disconnected: operator session expired.";
+    closeDockerConsoleSource();
+  });
+  source.addEventListener("error", () => {
+    const status = $("docker-console-status");
+    if (status && state.dockerConsole?.session) status.textContent = "Console connection interrupted. Waiting to reconnect…";
+  });
+  state.dockerConsoleIdleTimer = setInterval(updateDockerConsoleIdle, 1000);
+}
+
+function closeDockerConsoleSource() {
+  if (state.dockerConsoleSource) {
+    state.dockerConsoleSource.close();
+    state.dockerConsoleSource = null;
+  }
+  if (state.dockerConsoleIdleTimer) {
+    clearInterval(state.dockerConsoleIdleTimer);
+    state.dockerConsoleIdleTimer = null;
+  }
+}
+
+async function requestDockerConsoleClose() {
+  const consoleState = state.dockerConsole;
+  if (!consoleState?.session) {
+    closeDockerConsoleImmediately();
+    return;
+  }
+  const confirmed = await confirmAction(
+    "Close the container console?",
+    "The interactive shell process inside the container will be terminated.",
+    "Close console",
+  );
+  if (!confirmed) return;
+  try {
+    await api(`/api/docker/console/${encodeURIComponent(consoleState.session.session_id)}`, { method: "DELETE" });
+  } catch (_error) {
+    // The session may already be closed or expired.
+  }
+  closeDockerConsoleImmediately();
+}
+
+function closeDockerConsoleImmediately() {
+  closeDockerConsoleSource();
+  state.dockerConsole = null;
+  state.dockerConsoleBuffer = "";
+  const dialog = $("docker-console-dialog");
+  if (dialog?.open) dialog.close();
+  const trigger = state.dockerConsoleTrigger;
+  state.dockerConsoleTrigger = null;
+  if (trigger && typeof trigger.focus === "function") trigger.focus();
+}
+
+function wireDockerConsoleEvents() {
+  $("docker-console-start")?.addEventListener("click", startDockerConsole);
+  $("docker-console-close")?.addEventListener("click", requestDockerConsoleClose);
+  $("docker-console-copy")?.addEventListener("click", () => {
+    copyText(state.dockerConsoleBuffer).then((ok) => toast(ok ? "Console output copied." : "Copy failed.", ok ? "ok" : "error"));
+  });
+  $("docker-console-user")?.addEventListener("input", updateDockerConsoleWarning);
+  $("docker-console-input")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      sendDockerConsoleInput(`${event.currentTarget.value}\r`);
+      event.currentTarget.value = "";
+    }
+  });
+  $("docker-console-send")?.addEventListener("click", () => {
+    const input = $("docker-console-input");
+    sendDockerConsoleInput(`${input.value}\r`);
+    input.value = "";
+    input.focus();
+  });
+  $("docker-console-output")?.addEventListener("keydown", (event) => {
+    if (!state.dockerConsole?.session) return;
+    const keyMap = {
+      Enter: "\r",
+      Backspace: "\x7f",
+      Tab: "\t",
+      Escape: "\x1b",
+      ArrowUp: "\x1b[A",
+      ArrowDown: "\x1b[B",
+      ArrowRight: "\x1b[C",
+      ArrowLeft: "\x1b[D",
+      Home: "\x1b[H",
+      End: "\x1b[F",
+      Delete: "\x1b[3~",
+    };
+    if (event.ctrlKey && (event.key === "c" || event.key === "C")) {
+      event.preventDefault();
+      sendDockerConsoleInput("\x03");
+      return;
+    }
+    if (event.ctrlKey && (event.key === "d" || event.key === "D")) {
+      event.preventDefault();
+      sendDockerConsoleInput("\x04");
+      return;
+    }
+    if (event.ctrlKey && (event.key === "l" || event.key === "L")) {
+      event.preventDefault();
+      sendDockerConsoleInput("\x0c");
+      dockerConsoleWrite("\x1b[2J\x1b[H");
+      return;
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (keyMap[event.key]) {
+      event.preventDefault();
+      sendDockerConsoleInput(keyMap[event.key]);
+    } else if (event.key.length === 1) {
+      event.preventDefault();
+      sendDockerConsoleInput(event.key);
+    }
+  });
+  $("docker-console-output")?.addEventListener("paste", (event) => {
+    const text = event.clipboardData?.getData("text");
+    if (!text) return;
+    event.preventDefault();
+    sendDockerConsoleInput(text);
+  });
+  $("docker-console-dialog")?.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    requestDockerConsoleClose();
+  });
+  $("docker-console-dialog")?.addEventListener("close", () => {
+    closeDockerConsoleSource();
+    state.dockerConsole = null;
+    state.dockerConsoleBuffer = "";
+    const trigger = state.dockerConsoleTrigger;
+    state.dockerConsoleTrigger = null;
+    if (trigger && typeof trigger.focus === "function") trigger.focus();
+  });
+  window.addEventListener("resize", scheduleDockerConsoleResize);
 }
 
 function openDockerRename(container) {
@@ -5774,6 +6128,7 @@ function wireEvents() {
   $("docker-refresh-list")?.addEventListener("click", () => loadDockerHosts());
   $("docker-refresh-host")?.addEventListener("click", refreshDockerHost);
   $("docker-close-host")?.addEventListener("click", closeDockerHost);
+  wireDockerConsoleEvents();
   $("docker-dialog")?.addEventListener("close", () => {
     const trigger = state.dockerDialogTrigger;
     state.dockerDialogTrigger = null;

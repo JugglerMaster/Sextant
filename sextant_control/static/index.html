@@ -599,6 +599,35 @@
     </form>
   </dialog>
 
+  <dialog id="docker-console-dialog" class="dialog dialog-wide console-dialog" aria-labelledby="docker-console-title">
+    <div class="panel-head">
+      <div><p class="eyebrow" id="docker-console-eyebrow">Container console</p><h2 id="docker-console-title">Interactive shell</h2></div>
+      <div class="list-row-actions">
+        <button class="button button-ghost button-small" id="docker-console-copy" type="button">Copy</button>
+        <button class="button button-danger button-small" id="docker-console-close" type="button">Close</button>
+      </div>
+    </div>
+    <p class="form-hint" id="docker-console-banner"></p>
+    <div id="docker-console-setup" class="form-stack">
+      <div class="form-grid">
+        <label class="field"><span>Shell</span><select id="docker-console-shell"><option value="sh">sh</option><option value="bash">bash</option><option value="ash">ash</option></select></label>
+        <label class="field"><span>User (optional)</span><input id="docker-console-user" maxlength="32" placeholder="container user; root is privileged"></label>
+      </div>
+      <label class="field"><span>Working directory (optional)</span><input id="docker-console-workdir" maxlength="256" placeholder="/"></label>
+      <p class="form-hint">This opens a real shell inside the container with the container's privileges. Sextant does not persist keystrokes or terminal output.</p>
+      <p class="form-error" id="docker-console-error" role="alert"></p>
+      <button class="button button-primary" id="docker-console-start" type="button">Start console</button>
+    </div>
+    <div id="docker-console-live" hidden>
+      <pre id="docker-console-output" class="console-output" tabindex="0" role="log" aria-live="polite"></pre>
+      <div class="console-input-row">
+        <input id="docker-console-input" maxlength="4096" placeholder="Type input and press Enter" autocomplete="off" spellcheck="false">
+        <button class="button button-secondary button-small" id="docker-console-send" type="button">Send</button>
+      </div>
+      <p class="form-hint" id="docker-console-status" aria-live="polite"></p>
+    </div>
+  </dialog>
+
   <dialog id="docker-dialog" class="dialog dialog-wide" aria-labelledby="docker-dialog-title">
     <p class="eyebrow" id="docker-dialog-eyebrow">Docker</p>
     <h2 id="docker-dialog-title">Docker action</h2>

@@ -586,6 +586,28 @@ function createApi(session) {
     if (key === "/api/docker/hosts/agt_build/cleanup") {
       return { status: 200, body: dockerCleanup };
     }
+    if (method === "POST" && /^\/api\/docker\/hosts\/agt_build\/containers\/[^/]+\/console$/.test(key)) {
+      return {
+        status: 200,
+        body: {
+          session_id: "con_browser",
+          status: "opening",
+          idle_seconds: 900,
+          poll_seconds: 25,
+          rows: 32,
+          cols: 100,
+          shell: body?.shell || "sh",
+          user: body?.user || "",
+          container_id: key.split("/")[5],
+        },
+      };
+    }
+    if (method === "POST" && (key === "/api/docker/console/con_browser/input" || key === "/api/docker/console/con_browser/resize")) {
+      return { status: 204, body: null };
+    }
+    if (method === "DELETE" && key === "/api/docker/console/con_browser") {
+      return { status: 204, body: null };
+    }
     if (key === "/api/docker/stacks") {
       return { status: 200, body: { stacks: [composeStack] } };
     }

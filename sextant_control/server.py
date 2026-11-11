@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 import hashlib
 import hmac
@@ -28,6 +29,7 @@ from . import remote_install
 from . import updates
 from .config import Settings
 from .db import Database, DEFAULT_PROFILES, dumps, loads, parse_iso, utcnow, utcnow_iso
+from .docker_console import ConsoleBroker, ConsoleError
 from .docker_rules import DOCKER_MUTATION_ACTIONS
 from .docker_store import ComposeLibrary, DockerStoreError
 from .ldap_auth import authenticate_ldap
@@ -46,6 +48,11 @@ from .models import (
     CommandResultIn,
     DockerActionIn,
     DockerCleanupIn,
+    DockerConsoleClosedIn,
+    DockerConsoleInputIn,
+    DockerConsoleOpenIn,
+    DockerConsoleOutputIn,
+    DockerConsoleResizeIn,
     DockerDeployIn,
     DockerExecIn,
     DockerInventoryIn,
@@ -664,6 +671,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     compose_store.ensure()
     compose_store.cleanup_temp()
     app.state.compose_store = compose_store
+    db.close_open_console_sessions(status="failed", error="Server restarted.")
+    app.state.console_broker = ConsoleBroker(
+        max_per_agent=settings.docker_console_max_sessions,
+        max_input_bytes=settings.docker_console_max_input_bytes,
+        max_output_bytes=settings.docker_console_max_output_bytes,
+    )
     db.prune_docker_deployments(settings.docker_deployment_retention_days)
     for stack_row in db.list_docker_stacks():
         revisions = db.list_docker_stack_revisions(stack_row["id"])
@@ -762,6 +775,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def get_compose_store(request: Request) -> ComposeLibrary:
         return request.app.state.compose_store
+
+    def get_console_broker(request: Request) -> ConsoleBroker:
+        return request.app.state.console_broker
 
     def get_notifications(request: Request) -> NotificationService:
         return request.app.state.notifications
@@ -942,7 +958,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if kind == "docker":
                 docker_action = str(normalized.get("action", "")).lower()
                 docker_gate = "allow_docker"
-                if docker_action == "container.exec_one_shot":
+                if docker_action in {"container.exec_one_shot", "console.open"}:
                     docker_gate = "allow_docker_exec"
                 elif docker_action == "cleanup":
                     docker_gate = "allow_docker_prune"
@@ -1271,8 +1287,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         user: dict[str, Any] = Depends(current_user),
         database: Database = Depends(get_db),
         config: Settings = Depends(get_settings),
+        broker: ConsoleBroker = Depends(get_console_broker),
     ) -> Response:
         database.revoke_session(user["sid"])
+        broker.close_for_user(user["username"], status="closed", error="Operator session ended.")
+        database.close_console_sessions_for_user(user["username"], status="closed")
         _clear_session_cookie(response, config)
         response.status_code = 204
         database.audit(
@@ -1519,11 +1538,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         user: dict[str, Any] = Depends(require_admin),
         database: Database = Depends(get_db),
         config: Settings = Depends(get_settings),
+        broker: ConsoleBroker = Depends(get_console_broker),
     ) -> JSONResponse:
         target = database.get_user_by_id(user_id)
         if target is None:
             raise HTTPException(status_code=404, detail="User not found.")
         revoked = database.revoke_user_sessions(user_id)
+        broker.close_for_user(target["username"], status="closed", error="Operator session revoked.")
+        database.close_console_sessions_for_user(target["username"], status="closed")
         with database.connection() as conn:
             conn.execute(
                 "UPDATE users SET session_version = session_version + 1 WHERE id = ?",
@@ -2360,6 +2382,352 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Cache-Control": "no-store",
         }
         return Response(content=data, media_type="application/gzip", headers=headers)
+
+    def _prune_console_sessions(
+        database: Database,
+        broker: ConsoleBroker,
+        config: Settings,
+    ) -> None:
+        for session_id, status, error in broker.prune(
+            idle_seconds=config.docker_console_idle_seconds,
+            poll_seconds=config.docker_console_poll_seconds,
+        ):
+            database.close_console_session(session_id, status=status, error=error)
+
+    def _console_for_user(
+        database: Database,
+        session_id: str,
+        user: dict[str, Any],
+    ) -> sqlite3.Row:
+        row = database.get_console_session(session_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Console session not found.")
+        if row["created_by"] != user["username"]:
+            raise HTTPException(status_code=403, detail="This console belongs to another operator.")
+        return row
+
+    @app.post("/api/docker/hosts/{agent_id}/containers/{container_id}/console")
+    def open_docker_console(
+        agent_id: str,
+        container_id: str,
+        payload: DockerConsoleOpenIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        broker: ConsoleBroker = Depends(get_console_broker),
+    ) -> dict[str, Any]:
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        host_row, _agent_row, _profile_row, capabilities = _docker_context(
+            database, agent_id, config
+        )
+        if not host_row["available"]:
+            raise HTTPException(status_code=409, detail="Docker is not currently reachable on this host.")
+        if not capabilities["exec"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Docker exec is disabled by the agent profile or server policy.",
+            )
+        container = database.find_docker_container(agent_id, container_id)
+        if container is None:
+            raise HTTPException(status_code=404, detail="Container not found in the latest inventory.")
+        _prune_console_sessions(database, broker, config)
+        session_id = "con_" + secrets.token_hex(12)
+        try:
+            broker.create(
+                session_id,
+                agent_id=agent_id,
+                created_by=user["username"],
+                rows=payload.rows,
+                cols=payload.cols,
+            )
+        except ConsoleError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        database.create_console_session(
+            session_id,
+            agent_id=agent_id,
+            container_id=str(container["container_id"]),
+            shell=payload.shell,
+            user=payload.user,
+            tty=True,
+            created_by=user["username"],
+            client_ip=client_ip(request, config.trust_proxy),
+        )
+        try:
+            command = queue_command(
+                agent_id,
+                "docker",
+                {
+                    "action": "console.open",
+                    "session_id": session_id,
+                    "container_id": container["container_id"],
+                    "shell": payload.shell,
+                    "user": payload.user,
+                    "workdir": payload.workdir,
+                    "rows": payload.rows,
+                    "cols": payload.cols,
+                },
+                user,
+                request,
+                database,
+                config,
+                audit_action="docker.console_opened",
+                extra_detail={
+                    "session_id": session_id,
+                    "container_id": container["container_id"],
+                    "container_name": container["name"],
+                    "shell": payload.shell,
+                    "user": payload.user,
+                },
+            )
+        except Exception as exc:
+            broker.finish(session_id, status="failed", exit_code=None, error=str(exc))
+            database.close_console_session(session_id, status="failed", error=str(exc))
+            raise
+        return {
+            "session_id": session_id,
+            "status": "opening",
+            "idle_seconds": config.docker_console_idle_seconds,
+            "poll_seconds": config.docker_console_poll_seconds,
+            "rows": payload.rows,
+            "cols": payload.cols,
+            "shell": payload.shell,
+            "user": payload.user,
+            "container_id": container["container_id"],
+            "command_id": command["id"],
+        }
+
+    @app.get("/api/docker/console/{session_id}/events")
+    async def docker_console_events(
+        request: Request,
+        session_id: str,
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        broker: ConsoleBroker = Depends(get_console_broker),
+    ) -> StreamingResponse:
+        row = _console_for_user(database, session_id, user)
+        del row
+
+        async def stream() -> Any:
+            loop = asyncio.get_running_loop()
+            last_seq = 0
+            last_status = ""
+            next_auth = loop.time() + 5
+            next_heartbeat = loop.time() + 15
+            while True:
+                if loop.time() >= next_auth:
+                    next_auth = loop.time() + 5
+                    try:
+                        authenticated_user(request, database, config)
+                    except HTTPException:
+                        broker.request_close(session_id, status="failed", error="Operator session expired.")
+                        database.close_console_session(
+                            session_id, status="failed", error="Operator session expired."
+                        )
+                        yield _sse_event("auth", {"authenticated": False})
+                        return
+                _prune_console_sessions(database, broker, config)
+                current = database.get_console_session(session_id)
+                if current is None:
+                    yield _sse_event("auth", {"authenticated": False})
+                    return
+                state = broker.status(session_id)
+                status = state["status"] if state else str(current["status"])
+                if status != last_status:
+                    last_status = status
+                    yield _sse_event(
+                        "status",
+                        {
+                            "session_id": session_id,
+                            "status": status,
+                            "exit_code": state["exit_code"] if state else current["exit_code"],
+                            "error": state["error"] if state else current["error"],
+                            "idle_seconds": config.docker_console_idle_seconds,
+                            "poll_seconds": config.docker_console_poll_seconds,
+                        },
+                    )
+                for seq, data in broker.outputs_since(session_id, last_seq):
+                    last_seq = seq
+                    yield _sse_event(
+                        "output",
+                        {"session_id": session_id, "seq": seq, "data": base64.b64encode(data).decode("ascii")},
+                    )
+                if status in {"closed", "failed", "cancelled", "exited"} or current["closed_at"]:
+                    return
+                if loop.time() >= next_heartbeat:
+                    next_heartbeat = loop.time() + 15
+                    yield _sse_comment()
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/api/docker/console/{session_id}/input")
+    def docker_console_input(
+        session_id: str,
+        payload: DockerConsoleInputIn,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        broker: ConsoleBroker = Depends(get_console_broker),
+    ) -> Response:
+        row = _console_for_user(database, session_id, user)
+        if str(row["status"]) not in {"opening", "open"}:
+            raise HTTPException(status_code=409, detail="Console is not open.")
+        try:
+            data = base64.b64decode(payload.data, validate=True)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid console input encoding.")
+        if len(data) > config.docker_console_max_input_bytes:
+            raise HTTPException(status_code=413, detail="Console input chunk is too large.")
+        result = broker.push_input(session_id, data)
+        if result == "rate":
+            raise HTTPException(status_code=429, detail="Console input rate exceeded.")
+        if result == "full":
+            raise HTTPException(status_code=413, detail="Console input buffer is full.")
+        if result == "closed":
+            raise HTTPException(status_code=409, detail="Console is not open.")
+        database.mark_console_seen(session_id)
+        return Response(status_code=204)
+
+    @app.post("/api/docker/console/{session_id}/resize")
+    def docker_console_resize(
+        session_id: str,
+        payload: DockerConsoleResizeIn,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        broker: ConsoleBroker = Depends(get_console_broker),
+    ) -> Response:
+        row = _console_for_user(database, session_id, user)
+        if str(row["status"]) not in {"opening", "open"}:
+            raise HTTPException(status_code=409, detail="Console is not open.")
+        if broker.push_resize(session_id, payload.rows, payload.cols) == "closed":
+            raise HTTPException(status_code=409, detail="Console is not open.")
+        database.mark_console_seen(session_id)
+        return Response(status_code=204)
+
+    @app.delete("/api/docker/console/{session_id}")
+    def docker_console_close(
+        session_id: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        broker: ConsoleBroker = Depends(get_console_broker),
+    ) -> Response:
+        row = _console_for_user(database, session_id, user)
+        broker.request_close(session_id, status="closing")
+        database.mark_console_seen(session_id, status="closing")
+        database.audit(
+            actor=user["username"],
+            action="docker.console_close_requested",
+            target=session_id,
+            detail={"session_id": session_id, "container_id": row["container_id"]},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return Response(status_code=204)
+
+    @app.post("/api/agent/{agent_id}/docker/console/{session_id}/poll")
+    def agent_docker_console_poll(
+        agent_id: str,
+        session_id: str,
+        agent: dict[str, Any] = Depends(agent_auth),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        broker: ConsoleBroker = Depends(get_console_broker),
+    ) -> Any:
+        del agent
+        row = database.get_console_session(session_id)
+        if row is None or row["agent_id"] != agent_id:
+            raise HTTPException(status_code=404, detail="Console session not found.")
+        if row["status"] not in {"opening", "open", "closing"}:
+            return {"type": "close"}
+        broker.mark_poll(session_id)
+        if row["status"] == "opening":
+            broker.mark_open(session_id)
+            database.mark_console_seen(session_id, status="open")
+        else:
+            database.mark_console_seen(session_id)
+        result = broker.poll(session_id, config.docker_console_poll_seconds)
+        if result is None:
+            return Response(status_code=204)
+        return result
+
+    @app.post("/api/agent/{agent_id}/docker/console/{session_id}/output")
+    def agent_docker_console_output(
+        agent_id: str,
+        session_id: str,
+        payload: DockerConsoleOutputIn,
+        agent: dict[str, Any] = Depends(agent_auth),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        broker: ConsoleBroker = Depends(get_console_broker),
+    ) -> Response:
+        del agent
+        row = database.get_console_session(session_id)
+        if row is None or row["agent_id"] != agent_id:
+            raise HTTPException(status_code=404, detail="Console session not found.")
+        if row["status"] not in {"opening", "open", "closing"}:
+            raise HTTPException(status_code=409, detail="Console is not open.")
+        try:
+            data = base64.b64decode(payload.data, validate=True)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid console output encoding.")
+        if len(data) > config.docker_console_max_output_bytes:
+            raise HTTPException(status_code=413, detail="Console output chunk is too large.")
+        if not broker.push_output(session_id, data):
+            raise HTTPException(status_code=409, detail="Console is not open.")
+        database.mark_console_seen(session_id)
+        return Response(status_code=204)
+
+    @app.post("/api/agent/{agent_id}/docker/console/{session_id}/closed")
+    def agent_docker_console_closed(
+        agent_id: str,
+        session_id: str,
+        payload: DockerConsoleClosedIn,
+        request: Request,
+        agent: dict[str, Any] = Depends(agent_auth),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        broker: ConsoleBroker = Depends(get_console_broker),
+    ) -> Response:
+        del agent
+        row = database.get_console_session(session_id)
+        if row is None or row["agent_id"] != agent_id:
+            raise HTTPException(status_code=404, detail="Console session not found.")
+        status = (
+            "closed"
+            if str(row["status"]) == "closing"
+            else "exited"
+            if payload.exit_code == 0
+            else "failed"
+        )
+        broker.finish(session_id, status=status, exit_code=payload.exit_code, error=payload.error)
+        database.close_console_session(
+            session_id,
+            status=status,
+            exit_code=payload.exit_code,
+            error=payload.error,
+        )
+        database.audit(
+            actor="agent",
+            action="docker.console_closed",
+            target=session_id,
+            detail={
+                "session_id": session_id,
+                "container_id": row["container_id"],
+                "status": status,
+                "exit_code": payload.exit_code,
+                "error": payload.error[:1000],
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return Response(status_code=204)
 
     @app.get("/api/events")
     async def dashboard_events(
@@ -3493,6 +3861,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         user: dict[str, Any] = Depends(require_admin),
         database: Database = Depends(get_db),
         config: Settings = Depends(get_settings),
+        broker: ConsoleBroker = Depends(get_console_broker),
     ) -> dict[str, Any]:
         if payload.role is None and payload.active is None:
             raise HTTPException(status_code=400, detail="Provide role and/or active.")
@@ -3540,6 +3909,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 conn=conn,
             )
             updated = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row["is_active"] and not new_active:
+            broker.close_for_user(row["username"], status="closed", error="Operator account disabled.")
+            database.close_console_sessions_for_user(row["username"], status="closed")
         return user_to_dict(updated)
 
     @app.get("/api/audit")
@@ -4202,6 +4574,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         agent: dict[str, Any] = Depends(agent_auth),
         database: Database = Depends(get_db),
         config: Settings = Depends(get_settings),
+        broker: ConsoleBroker = Depends(get_console_broker),
     ) -> dict[str, Any]:
         del agent
         limit = config.command_output_limit
@@ -4279,6 +4652,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     detail=result_detail,
                     conn=conn,
                 )
+                if docker_action == "console.open" and final_status != "succeeded":
+                    session_id = str(docker_args.get("session_id", ""))
+                    console_error = payload.error or stderr or "Console failed to open."
+                    broker.finish(
+                        session_id,
+                        status="failed",
+                        exit_code=payload.exit_code,
+                        error=console_error,
+                    )
+                    database.close_console_session(
+                        session_id,
+                        status="failed",
+                        exit_code=payload.exit_code,
+                        error=console_error,
+                    )
+                    database.audit(
+                        actor=row["created_by"],
+                        action="docker.console_failed",
+                        target=session_id,
+                        detail={
+                            "session_id": session_id,
+                            "container_id": docker_args.get("container_id", ""),
+                            "error": console_error[:1000],
+                        },
+                        conn=conn,
+                    )
                 if docker_action in DOCKER_MUTATION_ACTIONS:
                     database.record_agent_event(
                         agent_id,

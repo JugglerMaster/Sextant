@@ -23,6 +23,7 @@ There is no agent listener and no third-party relay.
 | Agent | `sextant_agent/` | Heartbeat, telemetry collectors, package inventory/actions, Docker detection/inventory, self-update, queued command execution, result posting. |
 | Docker inventory | `sextant_agent/docker.py`, server Docker routes | Local Docker CLI probe, bounded inventory, allowlisted actions, one-shot exec, cleanup, SQLite cache. |
 | Compose library | `sextant_control/docker_store.py` | Flat Compose files, deterministic immutable revisions, atomic writes, bundles, migration, revision retention. |
+| Console broker / PTY | `sextant_control/docker_console.py`, `sextant_agent/console.py` | Bounded in-memory stdin/stdout queues, session metadata, agent PTY `docker exec`, long-poll input, SSE output. |
 | Deployment assets | `deploy/` | systemd units, nginx config, Linux/Windows installers, env template. |
 
 ## Request and command flow
@@ -81,6 +82,7 @@ Key properties:
 | `docker_settings` | Effective Compose library path |
 | `docker_stacks`, `docker_stack_revisions` | Compose stack metadata and immutable revision manifests; file bytes live on disk |
 | `docker_deployments` | Per-host Compose deploy/update/down/restart/pull history, command link, active revision, bounded log |
+| `docker_console_sessions` | Console session metadata: agent/container/shell/user/status/timestamps/exit/error; no stdin or output |
 | `agent_profiles` | Server-managed behavior profiles (cadence, modules, action gates, update policy) |
 | `profile_tag_assignments` | Tag → profile assignments (applied to matching agents) |
 | `enrollment_tokens` | One-time token hashes with expiry and use metadata |
@@ -215,6 +217,17 @@ failed deploys leave the previous active deployment intact. Revision retention
 keeps the current revision, the last ten, and revisions referenced by retained
 deployments.
 
+D4 adds an interactive console as a separate outbound long-poll channel. The
+server creates session metadata, queues a `console.open` command, and brokers
+bounded in-memory stdin/output queues. The agent starts `docker exec -it` under
+a local PTY in a background thread; a reader thread uploads output while a poll
+thread fetches input/resize/close. Heartbeats continue. The browser consumes SSE
+output and sends bounded base64 stdin/resize/close requests. A single-worker
+process owns the live queues; a server restart closes open metadata rows. Idle
+timeout, per-agent caps, ownership, logout/revocation, agent disconnect, and
+missed polls all terminate the session. Only metadata and bounded errors/exit
+status are stored; keystrokes and terminal output are never persisted or audited.
+
 ### Alerts
 
 Alert conditions are computed at read time from the latest heartbeat telemetry:
@@ -268,7 +281,7 @@ The server must be on the same layer-2 broadcast domain as the target (or have a
 | `shell` | `shell`: bash/powershell/cmd, `command`, `timeout` 5–300s | Local shell, bounded streaming output, process-tree kill on timeout or output cap |
 | `service` | `action`: start/stop/restart/enable/disable/status, `name` | systemctl or PowerShell service cmdlets |
 | `power` | `action`: shutdown/reboot/cancel, `delay` 0–600s | `shutdown`/`shutdown.exe` |
-| `docker` | `inventory.refresh`, allowlisted container/image/volume/network actions, one-shot exec, cleanup scopes, Compose up/down/restart/pull | argv-only Docker CLI action; target re-resolved with `docker inspect`; exec/cleanup/compose gates and per-host mutation guard |
+| `docker` | `inventory.refresh`, allowlisted container/image/volume/network actions, one-shot exec, console open, cleanup scopes, Compose up/down/restart/pull | argv-only Docker CLI action; target re-resolved with `docker inspect`; exec/cleanup/compose gates and per-host mutation guard |
 | `refresh` | none | No-op result; prompts the UI to refresh after the next heartbeat |
 
 The server validates service names and power actions, but `shell` is intentionally arbitrary. Agent-local flags can disable shell, power, or service execution entirely.
@@ -302,6 +315,6 @@ The app server binds loopback by default in the provided unit. nginx terminates 
 - No nested AD group resolution.
 - No MFA in the app itself (deferred; see the roadmap).
 - NVIDIA-only utilization telemetry.
-- Docker management is D1–D3 and Linux-only: container actions, logs, one-shot exec, cleanup, inspect, and image-based Compose deployment are implemented; interactive console, build contexts, and recreate/clone are not. The server never mounts or connects to a Docker socket.
+- Docker management is D1–D4 and Linux-only: container actions, logs, one-shot exec, interactive PTY console, cleanup, inspect, and image-based Compose deployment are implemented; build contexts and recreate/clone are not. Console state is in-memory and single-process; a restart closes consoles. The server never mounts or connects to a Docker socket.
 - WoL is limited to the server's broadcast domain.
 - Windows agents require Python 3.11+.

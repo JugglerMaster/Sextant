@@ -52,6 +52,8 @@ Environment options for the installer:
 | `DOCKER_SOCKET` | Override the Docker socket/`DOCKER_HOST` (default `unix:///var/run/docker.sock`) |
 | `DOCKER_COMMAND` | Override the Docker CLI command/path (default `docker`) |
 | `DOCKER_COMPOSE_DIR` | Agent-owned Compose runtime directory (default `/var/lib/sextant-agent/docker/stacks`) |
+| `DOCKER_CONSOLE_MAX_SESSIONS` | Concurrent PTY consoles per agent (1–4, default 2) |
+| `DOCKER_CONSOLE_IDLE_SECONDS` | Kill idle consoles (60–3600, default 900) |
 | `NO_SELF_UPDATE` | Set to `1` to disable agent self-update |
 | `PROFILE` | Profile slug selected at enrollment (default `workstation`) |
 | `INSTALL_DIR` | Default `/opt/sextant-agent` |
@@ -198,6 +200,8 @@ sudo systemctl daemon-reload
   "docker_timeout": 60,
   "docker_inventory_interval": 300,
   "docker_compose_dir": "/var/lib/sextant-agent/docker/stacks",
+  "docker_console_max_sessions": 2,
+  "docker_console_idle_seconds": 900,
   "max_output_bytes": 200000
 }
 ```
@@ -232,6 +236,8 @@ sudo systemctl daemon-reload
 | `docker_timeout` | Docker CLI timeout in seconds (5–300) |
 | `docker_inventory_interval` | Local fallback inventory cadence (60–86400; profile overrides) |
 | `docker_compose_dir` | Agent-owned runtime directory for downloaded Compose revision bundles |
+| `docker_console_max_sessions` | Agent-side concurrent PTY console cap (1–4) |
+| `docker_console_idle_seconds` | Kill an idle console (60–3600) |
 | `max_output_bytes` | Local cap before upload (server also caps) |
 
 The local flags are a hard ceiling. Server-side policy can disable an action, but it cannot re-enable one denied locally. The effective permission is the intersection of local config and server policy.
@@ -250,7 +256,8 @@ The file contains a bearer token. Keep it mode 0600 (Linux) and ACL-restricted (
 - Fast metrics (CPU, memory, disks, GPU utilization/VRAM/temperature) refresh every heartbeat. Services, startup entries, GPU compute processes, CPU model, and kernel are cached and refreshed on the profile's `service_inventory_seconds` cadence (6h workstation, 1h server; legacy `inventory_interval` fallback), when the server watch list changes, or when an operator sends `refresh`. Packages use `package_inventory_seconds` (24h workstation, 6h server) and are hash-gated.
 - GPU utilization/VRAM/temperature and GPU compute-process names/PIDs require NVIDIA drivers with `nvidia-smi` in `PATH`.
 - **Docker (D2/D3, Linux only):** when `allow_docker` is true and the assigned profile enables the Docker module, the agent probes the local Docker CLI/socket and sends a compact heartbeat summary. It uploads a bounded full inventory (containers, images, volumes, networks) on the profile cadence, when the server requests it, or after a Docker action. Allowlisted lifecycle/update/rename/remove actions, logs, one-shot exec, and cleanup use argv only (no host shell). Exec requires `allow_docker_exec`; cleanup requires `allow_docker_prune`; Compose deployment requires `allow_docker_compose`. The agent re-resolves targets with `docker inspect`, enforces a per-host mutation guard, caps output/timeouts, masks container environment values from raw inspect, and refreshes inventory after successful mutations.
-- **Compose deployment (D3):** the agent downloads the deployment bundle with its bearer token, verifies the bundle SHA-256/size and the extracted revision hash, rejects traversal/symlinks/hardlinks/oversize entries and `build:` services, extracts flat files under `docker_compose_dir/<project>/<revision>/`, runs `docker compose config --quiet`, then `up -d --remove-orphans`, `down` (volumes only when explicitly requested), `restart`, or `pull`. A mutation guard prevents overlapping Compose operations. Windows agents report `unsupported_os` and never appear as Docker hosts.
+- **Compose deployment (D3):** the agent downloads the deployment bundle with its bearer token, verifies the bundle SHA-256/size and the extracted revision hash, rejects traversal/symlinks/hardlinks/oversize entries and `build:` services, extracts flat files under `docker_compose_dir/<project>/<revision>/`, runs `docker compose config --quiet`, then `up -d --remove-orphans`, `down` (volumes only when explicitly requested), `restart`, or `pull`. A mutation guard prevents overlapping Compose operations.
+- **Interactive console (D4):** a `console.open` command starts `docker exec -it ... <shell> -l` under a PTY in a background thread. The agent resolves the container again, enforces the `allow_docker_exec` gate, max sessions, idle timeout, bounded buffers, and terminates the process group/PTY on close, timeout, shutdown, or missed server polls. A poll thread forwards stdin/resize/close while a reader thread uploads bounded PTY output. Heartbeats and the normal command loop continue. No transcript is written. Windows agents report `unsupported_os` and never appear as Docker hosts.
 - Startup entries are listed read-only. Use the Services tab for start/stop/restart/enable/disable.
 - Watched services that are stopped produce a critical alert. Watched service inventory is refreshed on the inventory cadence (or immediately after a watch-list change or `refresh`).
 - Admins can edit watched services, tags, notes, and action permissions in the machine drawer. Changes are delivered on the next heartbeat.
@@ -264,7 +271,7 @@ The file contains a bearer token. Keep it mode 0600 (Linux) and ACL-restricted (
 | Service | action and conservative name pattern | `systemctl` or PowerShell service cmdlets |
 | Power | shutdown/reboot/cancel, delay 0–600s | `shutdown` or `shutdown.exe` |
 | Package | 1–25 actions; manager ∈ {apt, dnf, winget, choco}; action ∈ {install, remove, upgrade}; validated name/version | argv-based package manager call, no shell; requires local `allow_packages` and profile package settings |
-| Docker | `inventory.refresh`, container lifecycle/rename/remove/update/logs/inspect/exec, image/volume/network remove, cleanup scopes, Compose up/down/restart/pull | argv-only allowlisted Docker CLI call; target re-resolved with `docker inspect`; exec requires `allow_docker_exec`; cleanup requires `allow_docker_prune`; Compose requires `allow_docker_compose`; mutation guard and bounded output |
+| Docker | `inventory.refresh`, container lifecycle/rename/remove/update/logs/inspect/exec, console open, image/volume/network remove, cleanup scopes, Compose up/down/restart/pull | argv-only allowlisted Docker CLI call; target re-resolved with `docker inspect`; exec/console require `allow_docker_exec`; cleanup requires `allow_docker_prune`; Compose requires `allow_docker_compose`; mutation guard and bounded output |
 | Refresh | no args | Immediate success; next heartbeat refreshes metrics and Docker inventory when enabled |
 
 Linux power commands use `shutdown -h +N` / `shutdown -r +N` for a delay (minimum one minute due to the tool), and `now` for zero. Windows uses `shutdown.exe /s|/r /t N`.

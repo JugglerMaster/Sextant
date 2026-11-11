@@ -55,6 +55,8 @@ def cmd_enroll(args: argparse.Namespace) -> int:
         docker_timeout=int(getattr(args, "docker_timeout", 60)),
         docker_inventory_interval=int(getattr(args, "docker_inventory_interval", 300)),
         docker_compose_dir=getattr(args, "docker_compose_dir", "") or "/var/lib/sextant-agent/docker/stacks",
+        docker_console_max_sessions=int(getattr(args, "docker_console_max_sessions", 2)),
+        docker_console_idle_seconds=int(getattr(args, "docker_console_idle_seconds", 900)),
     )
     identity = enrollment_identity(temporary)
     client = AgentClient(temporary)
@@ -90,6 +92,8 @@ def cmd_enroll(args: argparse.Namespace) -> int:
         docker_timeout=int(getattr(args, "docker_timeout", 60)),
         docker_inventory_interval=int(getattr(args, "docker_inventory_interval", 300)),
         docker_compose_dir=getattr(args, "docker_compose_dir", "") or "/var/lib/sextant-agent/docker/stacks",
+        docker_console_max_sessions=int(getattr(args, "docker_console_max_sessions", 2)),
+        docker_console_idle_seconds=int(getattr(args, "docker_console_idle_seconds", 900)),
     )
     save_config(config, config_path)
     print(f"Enrolled as {config.agent_id} ({config.name}).")
@@ -190,6 +194,8 @@ def build_parser() -> argparse.ArgumentParser:
     enroll.add_argument("--docker-timeout", type=int, default=60)
     enroll.add_argument("--docker-inventory-interval", type=int, default=300)
     enroll.add_argument("--docker-compose-dir", default="", help="Agent-owned Compose runtime directory")
+    enroll.add_argument("--docker-console-max-sessions", type=int, default=2)
+    enroll.add_argument("--docker-console-idle-seconds", type=int, default=900)
     enroll.set_defaults(func=cmd_enroll)
 
     run = sub.add_parser("run", parents=[common], help="Run the heartbeat/command loop")

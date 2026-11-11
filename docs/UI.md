@@ -12,6 +12,7 @@ The dashboard is a vanilla HTML/CSS/JS single page backed by the FastAPI API. Th
 - **Device drawer** — Overview (with 24h sparklines), Disks, GPU, Services, Startup, Packages, Remote, History, Trends.
 - **Docker Hosts** (D2/D3) — host list of agents reporting Docker, selected-host Overview, Containers, Images, Volumes, Networks, and Stacks tabs from cached inventory, freshness badge, unavailable reasons, and **Refresh now**. Containers support inspect, logs, one-shot exec, start/stop/restart/pause/rename/update/remove with confirmations. Images/volumes/networks support guarded removal, and Overview has cached cleanup cards with per-scope confirmation and reclaimed-size results. The Stacks tab separates active Sextant-managed deployments from read-only external Compose projects. No interactive console yet.
 - **Compose Files** (D3) — stack list, admin flat-file editor with compose.yaml/.env/override files, immutable revision history, deploy picker (host/revision/project/pull), deployment history/logs with down/restart/pull, and admin storage settings showing whether the path is fixed by environment. Operators can deploy but cannot edit or read `.env`; viewers are metadata-only.
+- **Container console** (D4) — operator Console action on running containers, setup for shell/user/workdir, warning banner, ANSI-cleaned terminal output, keystroke forwarding and input row, paste/copy, resize, idle countdown, explicit close confirmation, focus return, and mobile layout. No transcript is retained.
 - **Packages** — inventory with interactive table, **desired-state rule editor** (admin), drift summary, Sync now.
 - **Profiles** — create/edit/reset/delete profiles, modules, action gates, cadences, tag assignments.
 - **Remote install** — Linux SSH install jobs with test/install/log.
@@ -78,6 +79,7 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 - Live dashboard updates over change-driven SSE with polling fallback.
 - D2 Docker Hosts actions with a shared accessible dialog, focused action/confirm flows, offline/gate-disabled states, cached cleanup cards, and an `aria-live` action/refresh status.
 - D3 Compose Files views with admin editing, revision/deploy dialogs, deployment history, .env redaction for operators, storage settings, and managed-vs-external host stack display.
+- D4 interactive console modal with PTY-backed terminal output, keystroke/input handling, resize, idle countdown, close confirmation, focus return, and no transcript.
 
 ---
 

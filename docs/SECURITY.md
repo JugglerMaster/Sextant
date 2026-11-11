@@ -206,6 +206,34 @@ There is no pixel-level remote desktop or input injection in this version. “Re
   migration, and cancellation are audited. File bytes, `.env` values, and
   bundle contents are not audited. Deployment logs are bounded.
 
+## Interactive console (D4)
+
+- **Strictly `docker exec`, never `docker attach`.** The agent resolves the
+  container ID again locally, uses only an allowlisted shell (`sh`, `bash`,
+  `ash`), and rebuilds argv from validated user/workdir fields. Arbitrary Docker
+  flags, `--privileged`, and host shell commands are rejected.
+- **Two-key execution gate.** The local agent `allow_docker_exec` flag and the
+  profile/per-agent `allow_docker_exec` gate must both allow console access.
+  Windows agents are unsupported.
+- **Operator-bound sessions.** A console belongs to the operator who opened it.
+  Other operators, viewers, revoked sessions, disabled users, logout, and
+  revoke-all cannot read or write it. Admin is not a bypass for ownership.
+- **In-memory only.** Live stdin/stdout, resize state, and session queues are
+  process-local and bounded. Only session metadata and bounded error/exit status
+  are stored in `docker_console_sessions`; keystrokes and terminal output are
+  never persisted or audited. A server restart marks open sessions failed.
+- **Termination controls.** Explicit close, idle timeout, agent shutdown,
+  missed agent polls, agent disconnect, operator logout/revocation, and server
+  restart all terminate the PTY/process group. Per-agent session caps and
+  input/output byte caps limit abuse.
+- **Container-root caveat.** The shell runs with the container's privileges. A
+  `root`/UID 0 selection is warned; a privileged container or host bind mount
+  still makes the shell powerful inside that container. The console is not a
+  host shell.
+- **Audit metadata only.** Open, close, and failure transitions are audited with
+  session/container/shell/user/exit/error metadata. Keystrokes and terminal
+  output are not written to audit or command history.
+
 ## Transport and deployment
 
 - Run behind HTTPS. The supplied deployment uses nginx with TLS 1.2/1.3 and HTTP→HTTPS redirect.

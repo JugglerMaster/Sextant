@@ -298,6 +298,7 @@ Kinds and validated arguments:
 {"kind":"refresh","args":{}}
 {"kind":"package","args":{"actions":[{"manager":"apt","action":"install","package":"nginx"}]}}
 {"kind":"docker","args":{"action":"inventory.refresh"}}
+{"kind":"docker","args":{"action":"console.open","session_id":"con_…","container_id":"a1b2…","shell":"sh","user":"","workdir":"/","rows":32,"cols":100}}
 ```
 
 - `shell`: `bash` | `powershell` | `cmd`; command 1–8000 chars; timeout 5–300 seconds.
@@ -678,6 +679,44 @@ headers. The agent verifies the bundle hash/size and extracted revision hash
 before running Compose. Failed deploys leave the previous active deployment
 intact. A queued deployment can be cancelled through the normal command cancel
 route.
+
+### Interactive console
+
+The console is `docker exec`, never `docker attach`. Live stdin/stdout are held
+in memory for the single server process; no transcript is stored.
+
+| Method | Path | Role | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/api/docker/hosts/{agent_id}/containers/{container_id}/console` | operator+ | Open a console; returns session ID/status |
+| `GET` | `/api/docker/console/{session_id}/events` | creating operator | SSE status/output stream |
+| `POST` | `/api/docker/console/{session_id}/input` | creating operator | Send a bounded base64 stdin chunk |
+| `POST` | `/api/docker/console/{session_id}/resize` | creating operator | Resize rows/columns |
+| `DELETE` | `/api/docker/console/{session_id}` | creating operator | Request close |
+
+Open body:
+
+```json
+{"shell":"bash","user":"root","workdir":"/srv","rows":32,"cols":100}
+```
+
+Shells are `sh`, `bash`, or `ash`; user/workdir are optional and validated.
+Opening requires operator role, CSRF, host capability, and the agent/profile
+`allow_docker_exec` gate. The server enforces a per-agent cap, idle timeout,
+bounded stdin/output, and closes sessions on explicit close, logout/revocation,
+server restart, agent disconnect, or missed polls.
+
+SSE events are `status` (`opening`, `open`, `closing`, `closed`, `exited`,
+`failed`) and `output` with base64 PTY bytes. Input body is `{"data":"<base64>"}`. Keystrokes
+and output are not audited or written to SQLite; only open/close/failure metadata
+and bounded error/exit status are recorded.
+
+Agent endpoints (bearer auth, session ownership checked):
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/agent/{id}/docker/console/{session_id}/poll` | Hold up to `SEXTANT_DOCKER_CONSOLE_POLL_SECONDS` for input/resize/close; `204` on idle |
+| `POST` | `/api/agent/{id}/docker/console/{session_id}/output` | Upload bounded base64 PTY output |
+| `POST` | `/api/agent/{id}/docker/console/{session_id}/closed` | Final exit/error status |
 
 ## Package management
 

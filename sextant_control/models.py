@@ -540,6 +540,53 @@ class DockerDeployIn(BaseModel):
         return value
 
 
+class DockerConsoleOpenIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    shell: Literal["sh", "bash", "ash"] = "sh"
+    user: str = Field(default="", max_length=32)
+    workdir: str = Field(default="", max_length=256)
+    rows: int = Field(default=32, ge=10, le=200)
+    cols: int = Field(default=100, ge=20, le=300)
+
+    @field_validator("user")
+    @classmethod
+    def _console_user(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.match(USER_PATTERN, value):
+            raise ValueError("user must match [A-Za-z0-9_.-]{1,32}")
+        return value
+
+    @field_validator("workdir")
+    @classmethod
+    def _console_workdir(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.match(WORKDIR_PATTERN, value):
+            raise ValueError("workdir must be an absolute path")
+        return value
+
+
+class DockerConsoleInputIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data: str = Field(min_length=1, max_length=262144)
+
+
+class DockerConsoleResizeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    rows: int = Field(ge=10, le=200)
+    cols: int = Field(ge=20, le=300)
+
+
+class DockerConsoleOutputIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data: str = Field(min_length=1, max_length=262144)
+
+
+class DockerConsoleClosedIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    exit_code: int | None = Field(default=None, ge=-1, le=1_000_000)
+    error: str = Field(default="", max_length=4000)
+
+
 class DockerSettingsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     compose_dir: str = Field(min_length=1, max_length=1024)
