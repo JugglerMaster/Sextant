@@ -108,12 +108,15 @@ Priority: full pagination for Services and Users next.
 - 24-hour CPU/memory/disk/GPU sparklines are implemented.
 - The Trends tab adds 24h/7d detail charts for CPU, memory, disk, GPU utilization, and GPU temperature. Points are positioned by their real bucket timestamps, null buckets break the line, and offline intervals remain visible as gaps instead of being bridged.
 - The Trends timeline merges retained commands with persistent `agent_events` and alert lifecycle entries, using real event timestamps. A compact **What changed** section summarizes the most recent service, package, version, profile, connectivity, and alert transitions in the selected window, with an explicit empty state when nothing changed.
+- Real-browser tests exposed an SVG namespace bug that jsdom did not catch: charts and sparklines were created as HTML unknown elements, so axes and lines did not render in a real browser. The DOM helper now creates SVG nodes in the SVG namespace, and detail charts have an explicit CSS aspect ratio.
 
 ### 5. Accessibility
 
 - Drawer focus trap, focus return, and sortable-header `aria-sort` are implemented.
 - `aria-live` status regions, a light/dark theme toggle, and a Ctrl/Cmd+K command palette are implemented.
-- Remaining: a full high-contrast theme and a formal contrast audit.
+- A Playwright + axe-core suite runs against real Chromium at desktop and a 390px mobile viewport in both themes. It covers login, the fleet dashboard, the drawer Overview/Trends tabs, command palette keyboard flow, and keyboard-only drawer opening with focus trap and focus return. Login, dashboard, drawer, and trends scans have no `serious` or `critical` axe violations in either theme.
+- Contrast fixes from the browser pass: the dark theme's dim text and terminal chrome were lightened, the light theme's accent was darkened so eyebrow and accent text clear 4.5:1, dialogs have accessible names, progress bars have labels, and the agent card no longer nests a checkbox inside a fake button role (its title is now a real button).
+- Remaining: a full high-contrast theme, Firefox/WebKit runs, zoom/reflow checks, and committed pixel baselines. Screenshots are currently review artifacts, not failing visual diffs.
 
 ### 6. Live behavior
 
@@ -133,8 +136,8 @@ Priority: full pagination for Services and Users next.
 | Freshness on cards/drawer | Implemented with cadence + stale badges |
 | Fleet status/profile/tag filters | Implemented and persisted; named saved views stored per user on the server (localStorage migration/fallback) |
 | Table sort/pagination | Implemented for Packages, Startup, Audit, and History; Services bounded show-more; Users search/count |
-| Charts/sparklines | 24h sparklines plus gap-aware 24h/7d detail charts, persistent event timeline, and What changed summary |
-| Accessibility pass | Implemented: focus trap/return, aria-sort, live regions, theme toggle, command palette; formal contrast audit pending |
+| Charts/sparklines | 24h sparklines plus gap-aware 24h/7d detail charts, persistent event timeline, and What changed summary; SVG rendering now verified in a real browser |
+| Accessibility pass | Implemented and browser-tested: focus trap/return, aria-sort, live regions, theme toggle, command palette, labelled dialogs/progress bars, and axe scans with no serious/critical violations in both themes |
 | Alert center | Implemented with acknowledge/snooze/clear |
 | Bulk actions | Implemented through one batch request: refresh, wake, reboot, shutdown, service, profile, with per-agent results |
 | Saved views/export | CSV export (fleet, packages, filtered command history) and per-user server-side named fleet views |

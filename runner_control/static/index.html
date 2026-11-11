@@ -133,7 +133,7 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M16 16l4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
             <input id="search-input" type="search" aria-label="Search machines by name, OS, IP, or tag" placeholder="Search name, OS, IP, tag" autocomplete="off">
           </label>
-          <button class="icon-button palette-trigger" id="command-palette-button" type="button" title="Command palette (Ctrl/Cmd+K)" aria-label="Open command palette" aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K">⌘K</button>
+          <button class="icon-button palette-trigger" id="command-palette-button" type="button" title="Command palette (Ctrl/Cmd+K)" aria-label="⌘K command palette" aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K"><span aria-hidden="true">⌘K</span></button>
           <button class="icon-button theme-toggle" id="theme-toggle" type="button" title="Switch to light theme" aria-label="Switch to light theme" aria-pressed="false"><span id="theme-toggle-icon" aria-hidden="true">☀</span></button>
           <button class="icon-button" id="refresh-button" type="button" title="Refresh now" aria-label="Refresh now">↻</button>
         </div>
@@ -456,7 +456,7 @@
     </aside>
   </div>
 
-  <dialog id="agent-edit-dialog" class="dialog dialog-wide">
+  <dialog id="agent-edit-dialog" class="dialog dialog-wide" aria-labelledby="agent-edit-title">
     <form id="agent-edit-form">
       <p class="eyebrow">Server policy</p>
       <h2 id="agent-edit-title">Edit machine</h2>
@@ -480,10 +480,10 @@
     </form>
   </dialog>
 
-  <dialog id="reset-password-dialog" class="dialog">
+  <dialog id="reset-password-dialog" class="dialog" aria-labelledby="reset-password-title">
     <form id="reset-password-form">
       <p class="eyebrow">Administrator action</p>
-      <h2>Reset password</h2>
+      <h2 id="reset-password-title">Reset password</h2>
       <p id="reset-password-user" class="form-hint"></p>
       <label class="field"><span>New password</span><input name="new_password" type="password" required minlength="12" maxlength="1024" autocomplete="new-password"></label>
       <p class="form-hint">This revokes every existing session for the user.</p>
@@ -495,7 +495,7 @@
     </form>
   </dialog>
 
-  <dialog id="sessions-dialog" class="dialog dialog-wide">
+  <dialog id="sessions-dialog" class="dialog dialog-wide" aria-labelledby="sessions-title">
     <form id="sessions-form">
       <p class="eyebrow">Active sessions</p>
       <h2 id="sessions-title">Sessions</h2>
@@ -509,7 +509,7 @@
     </form>
   </dialog>
 
-  <dialog id="confirm-dialog" class="dialog">
+  <dialog id="confirm-dialog" class="dialog" aria-labelledby="confirm-title">
     <form method="dialog">
       <p class="eyebrow">Confirm action</p>
       <h2 id="confirm-title">Are you sure?</h2>

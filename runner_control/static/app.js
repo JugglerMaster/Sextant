@@ -62,12 +62,17 @@ const PAGE_META = {
   security: ["Security", "Session, identity provider, and account settings."],
 };
 
+const SVG_TAGS = new Set(["svg", "g", "path", "circle", "line", "polyline", "text", "rect"]);
+const SVG_NS = "http://www.w3.org/2000/svg";
+
 function h(tag, attrs = {}, ...children) {
-  const el = document.createElement(tag);
+  const el = SVG_TAGS.has(tag) ? document.createElementNS(SVG_NS, tag) : document.createElement(tag);
   for (const [key, value] of Object.entries(attrs || {})) {
     if (value === undefined || value === null || value === false) continue;
-    if (key === "class") el.className = value;
-    else if (key === "dataset") Object.assign(el.dataset, value);
+    if (key === "class") {
+      if (el.namespaceURI === SVG_NS) el.setAttribute("class", String(value));
+      else el.className = value;
+    } else if (key === "dataset") Object.assign(el.dataset, value);
     else if (key.startsWith("on") && typeof value === "function") el.addEventListener(key.slice(2).toLowerCase(), value);
     else if (key === "text") el.textContent = value;
     else if (value === true) el.setAttribute(key, "");
@@ -242,10 +247,12 @@ function statusPill(text, kind = "neutral") {
   return h("span", { class: `status-pill ${kind}` }, text);
 }
 
-function progressBar(value, warn = 80, critical = 90) {
+function progressBar(value, warn = 80, critical = 90, label = "") {
   const n = Math.max(0, Math.min(100, Number(value || 0)));
   const level = n >= critical ? " is-critical" : n >= warn ? " is-warn" : "";
-  return h("progress", { class: `progress${level}`, max: "100", value: String(n) });
+  const attrs = { class: `progress${level}`, max: "100", value: String(n) };
+  if (label) attrs["aria-label"] = label;
+  return h("progress", attrs);
 }
 
 function metricRow(label, value, extra = "") {
@@ -253,7 +260,7 @@ function metricRow(label, value, extra = "") {
     "div",
     { class: "metric-row" },
     h("div", { class: "metric-label" }, h("span", {}, label), h("strong", {}, extra || `${Math.round(value)}%`)),
-    progressBar(value),
+    progressBar(value, 80, 90, label),
   );
 }
 
@@ -837,6 +844,7 @@ function captureFleetFocus(grid) {
   return {
     agentId: card.dataset.agentId,
     select: active.classList.contains("agent-select"),
+    open: active.classList.contains("agent-open"),
   };
 }
 
@@ -844,7 +852,11 @@ function restoreFleetFocus(info) {
   if (!info) return;
   const card = state.agentCards.get(info.agentId);
   if (!card) return;
-  const target = info.select ? card.querySelector(".agent-select") : card;
+  const target = info.select
+    ? card.querySelector(".agent-select")
+    : info.open
+      ? card.querySelector(".agent-open")
+      : card;
   if (target && document.activeElement !== target) target.focus();
 }
 
@@ -1283,16 +1295,9 @@ function agentCard(agent) {
     {
       class: `agent-card${agent.online ? "" : " is-offline"}${stale.heartbeatStale || stale.inventoryStale ? " is-stale" : ""}`,
       dataset: { agentId: agent.id },
-      tabindex: "0",
-      role: "button",
-      "aria-label": `Open ${agent.name}`,
-      onClick: () => openAgent(agent.id),
-      onKeyDown: (event) => {
-        if (event.target.closest("input, button, a, select, textarea")) return;
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          openAgent(agent.id);
-        }
+      onClick: (event) => {
+        if (event.target.closest("button, input, select, textarea, a")) return;
+        openAgent(agent.id);
       },
     },
     h(
@@ -1318,7 +1323,23 @@ function agentCard(agent) {
         h(
           "div",
           {},
-          h("h3", {}, agent.name),
+          h(
+            "h3",
+            {},
+            h(
+              "button",
+              {
+                class: "agent-open",
+                type: "button",
+                "aria-label": `Open ${agent.name} details`,
+                onClick: (event) => {
+                  event.stopPropagation();
+                  openAgent(agent.id);
+                },
+              },
+              agent.name,
+            ),
+          ),
           h("p", { class: "agent-os" }, `${osLabel(agent)}${agent.os_version ? ` · ${short(agent.os_version, 38)}` : ""}`),
         ),
       ),
@@ -1576,8 +1597,8 @@ function renderOverview(body) {
       "Live telemetry",
       "Resource use",
       metricRow("CPU", Number(agent.cpu_pct || 0)),
-      h("div", { class: "metric-row" }, h("div", { class: "metric-label" }, h("span", {}, "Memory"), h("strong", {}, `${fmtBytes(agent.mem_used)} / ${fmtBytes(agent.mem_total)}`)), progressBar(agent.mem_pct)),
-      h("div", { class: "metric-row" }, h("div", { class: "metric-label" }, h("span", {}, "Primary disk"), h("strong", {}, `${Math.round(Math.max(0, ...(agent.disks || []).map((d) => Number(d.percent || 0))))}%`)), progressBar(Math.max(0, ...(agent.disks || []).map((d) => Number(d.percent || 0))))),
+      h("div", { class: "metric-row" }, h("div", { class: "metric-label" }, h("span", {}, "Memory"), h("strong", {}, `${fmtBytes(agent.mem_used)} / ${fmtBytes(agent.mem_total)}`)), progressBar(agent.mem_pct, 80, 90, "Memory")),
+      h("div", { class: "metric-row" }, h("div", { class: "metric-label" }, h("span", {}, "Primary disk"), h("strong", {}, `${Math.round(Math.max(0, ...(agent.disks || []).map((d) => Number(d.percent || 0))))}%`)), progressBar(Math.max(0, ...(agent.disks || []).map((d) => Number(d.percent || 0))), 80, 90, "Primary disk")),
     ),
   );
   if (alerts.length) {
@@ -2079,7 +2100,7 @@ function renderDisks(body) {
         ),
         h("div", { class: "button-row" }, statusPill(`${Math.round(disk.percent || 0)}%`, disk.percent >= 90 ? "critical" : disk.percent >= 80 ? "warning" : "neutral")),
       ),
-      progressBar(disk.percent),
+      progressBar(disk.percent, 80, 90, `${disk.mount || "Disk"} usage`),
     ),
   );
   body.append(section("Storage", "Filesystems", h("div", { class: "service-list" }, ...rows)));
@@ -2104,7 +2125,7 @@ function renderGpu(body) {
       h("span", {}, gpu.name || "GPU"),
       h("strong", {}, `${Math.round(gpu.util_pct || 0)}% util · ${Math.round(gpu.temp_c || 0)}°C`),
       h("div", { class: "form-hint" }, `${fmtBytes(gpu.mem_used)} / ${fmtBytes(gpu.mem_total)} VRAM`),
-      progressBar(gpu.util_pct),
+      progressBar(gpu.util_pct, 80, 90, `${gpu.name || "GPU"} utilization`),
     ),
   );
   body.append(section("Accelerators", "GPU telemetry", h("div", { class: "info-grid" }, ...cards)));

@@ -8,7 +8,7 @@ Requirements:
 
 - Python 3.11+.
 - A development install with the `dev` extra: `.venv/bin/pip install -e '.[dev]'`, or the reproducible path: `.venv/bin/pip install --require-hashes -r requirements-dev.lock && .venv/bin/pip install --no-deps -e .`.
-- Node.js 18+ for the jsdom dashboard smoke test.
+- Node.js 18+ for the jsdom dashboard smoke test and Playwright browser tests.
 
 The production deployment venv intentionally omits pytest and other test dependencies. Run the tests from a development checkout.
 
@@ -88,13 +88,46 @@ npm test
 
 `ui-tests/node_modules` is not committed. `npm ci` needs network access to fetch jsdom; if the directory is absent and the environment is offline, skip the UI test rather than vendoring dependencies.
 
+## Browser accessibility and visual tests
+
+`npm run test:visual` runs Playwright against the real dashboard in Chromium. The harness serves the production `runner_control/static/index.html`, `app.css`, and `app.js` from a small static server, intercepts every `/api/**` request with deterministic fixtures, and replaces `EventSource` with an in-page mock. The date is frozen, the timezone is UTC, and the runner is pinned to one worker so screenshots are reproducible.
+
+Install the test dependencies and the matching Chromium build once:
+
+```bash
+cd ui-tests
+npm ci
+npx playwright install chromium
+# equivalent shortcut: npm run test:visual:install
+```
+
+Run the browser suite:
+
+```bash
+cd ui-tests
+npm run test:visual
+```
+
+The suite covers the login page, fleet dashboard with agents and alerts, the drawer Overview/Trends/Services/Packages/History/Remote tabs, light and dark themes at a desktop viewport and a 390px mobile viewport, Ctrl/Cmd+K command palette open/filter/activate/Escape, keyboard-only drawer opening with focus trap and focus return, and axe-core scans of login, dashboard, drawer, and trends in both themes. The axe gate fails on any `serious` or `critical` violation. No rule is excluded for convenience; if a rule is a documented false positive, name the rule and the reason next to the scan.
+
+Screenshots are written to `ui-tests/artifacts/` for manual review. Both `ui-tests/artifacts/` and `ui-tests/test-results/` are gitignored, as are `node_modules` and downloaded browser binaries. The screenshots are review artifacts, not pixel baselines: the suite does not fail on screenshot differences.
+
+If Playwright reports a missing browser, run `npx playwright install chromium` for the installed Playwright version. Pointing Playwright at an existing Chromium executable is also possible with `launchOptions.executablePath`, but the browser must match or closely match the pinned Playwright release.
+
+To run only the fast DOM smoke test (as before):
+
+```bash
+cd ui-tests
+npm test
+```
+
 ## Coverage gaps
 
 The following are explicitly not exercised by the automated suite today:
 
 - **Real Windows CI.** Parser and command-builder unit tests run on Linux. There is no Windows runner that executes the real PowerShell metrics/inventory scripts, service or power commands, scheduled task, config ACLs, or the Windows installer. See the roadmap item for a `windows-latest` runner.
 - **Real Active Directory / Samba AD.** LDAP tests use a fake `ldap3` module and a monkeypatched `authenticate_ldap`; there is no live domain controller, LDAPS certificate/CA validation, group provisioning, or lockout test. A Samba AD container integration test remains on the roadmap.
-- **Real browser / Playwright.** The jsdom smoke test does not cover a real browser engine, network stack, cookie behavior, CSP enforcement, responsive layout, or accessibility. Playwright tests remain on the roadmap.
+- **Cross-browser and visual regression.** Playwright covers Chromium at desktop and one narrow mobile viewport. It does not run Firefox or WebKit, compare screenshots against committed pixel baselines, or exercise browser zoom/reflow and a high-contrast theme. The dashboard browser tests intercept the API and mock SSE, so a live server, real SSE reconnects, and streamed terminal output remain outside the browser suite.
 - **Load and concurrency.** There is no load test for 100–500 agents, no sustained heartbeat/command throughput test, and no SQLite multi-writer stress test beyond normal request coverage.
 - **Migration matrix.** `tests/test_db.py` migrates one legacy schema fixture to the current schema. There is no multi-version migration matrix, rollback test, or automated backup/restore verification.
 - **Deployment integration.** systemd, nginx/TLS, UFW, certificate renewal, and the Linux/Windows installers are not exercised by tests. The deployment guide describes manual validation instead.
