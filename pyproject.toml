@@ -39,7 +39,7 @@ ldap = [
 dev = [
   "pytest>=8,<10",
   "httpx>=0.27,<0.28",
-  "pyflakes>=3,<5",
+  "pyflakes>=4.1.0,<5",
   "pip-audit>=2,<3",
   "ldap3>=2.9,<3",
 ]
