@@ -299,7 +299,6 @@ function applyTheme(theme, persist = true) {
   const value = theme === "light" ? "light" : "dark";
   state.theme = value;
   document.documentElement.dataset.theme = value;
-  document.documentElement.style.colorScheme = value;
   const schemeMeta = document.querySelector('meta[name="color-scheme"]');
   if (schemeMeta) schemeMeta.setAttribute("content", value);
   const themeColor = document.querySelector('meta[name="theme-color"]');

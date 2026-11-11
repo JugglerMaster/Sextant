@@ -60,6 +60,7 @@
   --offline-pill-text: #94a4b5;
   --info-tile-bg: rgba(20, 32, 44, 0.35);
   --muted-row-bg: rgba(20, 32, 44, 0.28);
+  color-scheme: dark;
 }
 
 html[data-theme="light"] {
@@ -601,6 +602,7 @@ svg { display: block; }
 .fact strong { display: block; overflow: hidden; margin-top: 1px; font-family: var(--mono); font-size: 10.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .agent-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 5px; border-top: 1px solid var(--line); }
 .agent-foot small { color: var(--text-dim); font-size: 9.5px; }
+.panel-head-spaced { margin-top: 18px; }
 .tag-row { display: flex; flex-wrap: wrap; gap: 4px; }
 .tag { padding: 2px 6px; border-radius: 5px; background: rgba(109, 168, 255, 0.09); color: var(--tag-text); font-size: 9.5px; font-weight: 650; }
 .tag-warn { background: rgba(242, 184, 75, 0.12); color: var(--amber); }
