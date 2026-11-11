@@ -471,6 +471,35 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!findButton(window.document.getElementById("drawer-body"), "Cancel")) throw new Error("queued command cancel action missing");
   if (!findButton(window.document.getElementById("drawer-body"), "Retry")) throw new Error("failed command retry action missing");
 
+  const drawerTabs = [...window.document.querySelectorAll("#drawer-tabs .tab")].map((tab) => tab.dataset.tab);
+  const historyIndex = drawerTabs.indexOf("history");
+  const trendsIndex = drawerTabs.indexOf("trends");
+  if (trendsIndex === -1) throw new Error("trends tab missing");
+  if (trendsIndex !== historyIndex + 1) throw new Error("trends tab should follow history");
+  const trendsTab = window.document.querySelector('[data-tab="trends"]');
+  trendsTab.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  const trendsBody = window.document.getElementById("drawer-body");
+  const trendCharts = trendsBody.querySelectorAll(".chart-card");
+  if (trendCharts.length !== 5) throw new Error(`expected five trend charts, got ${trendCharts.length}`);
+  if (!trendsBody.querySelector(".detail-chart")) throw new Error("detail chart SVG missing");
+  if (!trendsBody.textContent.includes("GPU temperature")) throw new Error("trend chart labels missing");
+  if (!trendsBody.querySelector(".timeline")) throw new Error("timeline did not render");
+  if (trendsBody.querySelectorAll(".timeline-entry").length !== 4) {
+    throw new Error(`expected 4 timeline entries, got ${trendsBody.querySelectorAll(".timeline-entry").length}`);
+  }
+  if (!trendsBody.querySelector(".timeline-command") || !trendsBody.querySelector(".timeline-alert")) {
+    throw new Error("timeline should merge commands and alerts");
+  }
+  if (!trendsBody.textContent.includes("4 events")) throw new Error("timeline count missing");
+  const sevenDay = findButton(trendsBody, "7d");
+  if (!sevenDay) throw new Error("7d trend range toggle missing");
+  sevenDay.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  const activeRange = [...trendsBody.querySelectorAll(".range-option")].find((option) => option.classList.contains("is-active"));
+  if (!activeRange || activeRange.textContent.trim() !== "7d") throw new Error("7d trend range did not activate");
+  if (trendsBody.querySelectorAll(".chart-card").length !== 5) throw new Error("trend charts missing after 7d toggle");
+
   const editButton = findButton(window.document.getElementById("drawer-actions"), "Edit policy");
   if (!editButton) throw new Error("agent policy edit action missing");
   editButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -519,7 +548,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   window.document.querySelector("[data-close-reset-password]").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, dashboard, saved views, drawer, services filters, GPU processes, remote terminal, history actions, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, dashboard, saved views, drawer, services filters, GPU processes, remote terminal, history actions, trends charts, timeline, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

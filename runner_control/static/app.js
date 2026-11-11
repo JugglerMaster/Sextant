@@ -8,6 +8,7 @@ const state = {
   detailId: null,
   detailAgent: null,
   detailTab: "overview",
+  trendRange: "24",
   agentCommands: {},
   serviceFilters: {},
   terminals: {},
@@ -941,6 +942,7 @@ function renderTab() {
     case "packages": return renderPackages(body);
     case "remote": return renderRemote(body);
     case "history": return renderHistory(body);
+    case "trends": return renderTrends(body);
     default: return renderOverview(body);
   }
 }
@@ -1085,6 +1087,299 @@ async function renderTrend(body, agent) {
     clear(host);
     host.append(h("div", { class: "empty-inline" }, error.message));
   }
+}
+
+const TREND_RANGES = {
+  "24": { hours: 24, label: "24h", points: 120 },
+  "168": { hours: 168, label: "7d", points: 180 },
+};
+
+const TREND_SERIES = [
+  { key: "cpu_pct", title: "CPU %", unit: "%", color: "var(--accent)", domain: [0, 100], note: "Average processor load" },
+  { key: "mem_pct", title: "Memory %", unit: "%", color: "var(--blue)", domain: [0, 100], note: "Used physical memory" },
+  { key: "disk_max_pct", title: "Disk max %", unit: "%", color: "var(--amber)", domain: [0, 100], note: "Fullest filesystem" },
+  { key: "gpu_max_util", title: "GPU utilization %", unit: "%", color: "var(--purple)", domain: [0, 100], note: "Busiest GPU" },
+  { key: "gpu_max_temp", title: "GPU temperature", unit: "°C", color: "var(--red)", domain: null, note: "Hottest GPU" },
+];
+
+function trendContextActive(agentId, rangeKey) {
+  return state.detailId === agentId && state.detailTab === "trends" && state.trendRange === rangeKey;
+}
+
+function chartAxisValue(value, unit = "") {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  return `${number.toFixed(Math.abs(number) >= 10 ? 0 : 1)}${unit}`;
+}
+
+function fmtChartValue(value, unit = "") {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "No data";
+  return `${Math.abs(number) >= 100 ? number.toFixed(0) : number.toFixed(1)}${unit}`;
+}
+
+function chartTimeLabel(value, rangeKey) {
+  const date = parseDate(value);
+  if (!date) return "—";
+  if (rangeKey === "168") {
+    return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+  return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+function detailChart(values, spec, points, rangeKey) {
+  const width = 640;
+  const height = 220;
+  const pad = { left: 52, right: 16, top: 16, bottom: 34 };
+  const plotWidth = width - pad.left - pad.right;
+  const plotHeight = height - pad.top - pad.bottom;
+  const numeric = values.map((value) => (value === null || value === undefined || value === "" ? null : Number(value)));
+  const usable = numeric.filter((value) => Number.isFinite(value));
+  let min = spec.domain ? spec.domain[0] : Math.min(...usable);
+  let max = spec.domain ? spec.domain[1] : Math.max(...usable);
+  if (!spec.domain) {
+    const spread = Math.max(1, max - min);
+    min -= spread * 0.12;
+    max += spread * 0.12;
+  }
+  const span = Math.max(0.0001, max - min);
+  const xFor = (index) =>
+    numeric.length <= 1 ? pad.left + plotWidth / 2 : pad.left + (index / (numeric.length - 1)) * plotWidth;
+  const yFor = (value) => pad.top + plotHeight - ((Math.min(max, Math.max(min, value)) - min) / span) * plotHeight;
+  const segments = [];
+  let segment = [];
+  numeric.forEach((value, index) => {
+    if (!Number.isFinite(value)) {
+      if (segment.length) {
+        segments.push(segment);
+        segment = [];
+      }
+      return;
+    }
+    segment.push([xFor(index), yFor(value)]);
+  });
+  if (segment.length) segments.push(segment);
+  const gridLines = [];
+  const axisLabels = [];
+  for (const tick of [max, (max + min) / 2, min]) {
+    const y = yFor(tick);
+    gridLines.push(h("line", { class: "chart-grid", x1: pad.left, y1: y, x2: pad.left + plotWidth, y2: y }));
+    axisLabels.push(
+      h("text", { class: "chart-axis-label", x: pad.left - 8, y: y + 3, "text-anchor": "end" }, chartAxisValue(tick, spec.unit)),
+    );
+  }
+  const xTicks = [...new Set([0, Math.floor((numeric.length - 1) / 2), numeric.length - 1])].filter((index) => index >= 0);
+  const xLabels = xTicks.map((index) => {
+    const ratio = numeric.length <= 1 ? 0.5 : index / (numeric.length - 1);
+    const anchor = ratio <= 0 ? "start" : ratio >= 1 ? "end" : "middle";
+    return h(
+      "text",
+      { class: "chart-axis-label", x: pad.left + ratio * plotWidth, y: height - 10, "text-anchor": anchor },
+      chartTimeLabel(points[index]?.at, rangeKey),
+    );
+  });
+  const lines = segments.map((linePoints) =>
+    h("polyline", {
+      points: linePoints.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "),
+      fill: "none",
+      stroke: spec.color,
+      "stroke-width": "2",
+      "stroke-linejoin": "round",
+      "stroke-linecap": "round",
+    }),
+  );
+  return h(
+    "svg",
+    { class: "detail-chart", viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": `${spec.title} history` },
+    ...gridLines,
+    ...axisLabels,
+    ...xLabels,
+    ...lines,
+  );
+}
+
+function trendChartCard(spec, values, points, rangeKey) {
+  const numeric = (values || []).map((value) =>
+    value === null || value === undefined || value === "" ? null : Number(value),
+  );
+  const usable = numeric.filter((value) => Number.isFinite(value));
+  const latest = usable.length ? usable[usable.length - 1] : null;
+  const card = h(
+    "div",
+    { class: "chart-card", dataset: { series: spec.key } },
+    h(
+      "div",
+      { class: "chart-head" },
+      h("div", {}, h("strong", {}, spec.title), h("span", { class: "form-hint" }, spec.note)),
+      h("span", { class: "chart-latest" }, fmtChartValue(latest, spec.unit)),
+    ),
+  );
+  if (!usable.length) {
+    card.append(h("div", { class: "empty-inline" }, "No samples for this series in the selected range."));
+    return card;
+  }
+  card.append(detailChart(numeric, spec, points, rangeKey));
+  card.append(
+    h(
+      "div",
+      { class: "chart-foot" },
+      h("span", {}, `min ${fmtChartValue(Math.min(...usable), spec.unit)}`),
+      h("span", {}, `latest ${fmtChartValue(latest, spec.unit)}`),
+      h("span", {}, `max ${fmtChartValue(Math.max(...usable), spec.unit)}`),
+    ),
+  );
+  return card;
+}
+
+async function loadTrendCharts(host, agent, rangeKey) {
+  const range = TREND_RANGES[rangeKey];
+  try {
+    const data = await api(`/api/agents/${agent.id}/history?hours=${range.hours}&points=${range.points}`);
+    if (!trendContextActive(agent.id, rangeKey)) return;
+    clear(host);
+    const points = data.points || [];
+    if (!points.length) {
+      host.append(
+        h(
+          "div",
+          { class: "empty-inline trend-empty" },
+          `No telemetry history in the last ${range.label}. Samples appear after this machine reports a heartbeat.`,
+        ),
+      );
+      return;
+    }
+    for (const spec of TREND_SERIES) {
+      host.append(trendChartCard(spec, points.map((point) => point[spec.key]), points, rangeKey));
+    }
+  } catch (error) {
+    if (!trendContextActive(agent.id, rangeKey)) return;
+    clear(host);
+    host.append(h("div", { class: "empty-inline" }, error.message));
+  }
+}
+
+function timelineStatusKind(kind, status) {
+  if (kind === "alert") {
+    if (status === "critical") return "critical";
+    if (status === "warning") return "warning";
+    return "neutral";
+  }
+  if (status === "succeeded") return "online";
+  if (status === "failed") return "critical";
+  if (status === "cancelled") return "warning";
+  return "neutral";
+}
+
+function renderTimeline(body, agent) {
+  const commands = state.agentCommands[agent.id] || [];
+  const alerts = agent.alerts || [];
+  const entries = [];
+  for (const command of commands) {
+    const at = command.created_at || command.updated_at || null;
+    entries.push({
+      at,
+      sort: parseDate(at)?.getTime() || 0,
+      kind: "command",
+      status: command.status || "unknown",
+      description: commandDescription(command),
+    });
+  }
+  for (const alert of alerts) {
+    const at = alert.created_at || alert.updated_at || alert.detected_at || agent.last_seen || null;
+    const status = alertIsActive(alert) ? alert.level || "warning" : alert.acknowledged ? "acknowledged" : "snoozed";
+    entries.push({
+      at,
+      sort: parseDate(at)?.getTime() || 0,
+      kind: "alert",
+      status,
+      description: alert.message || alert.key,
+    });
+  }
+  entries.sort((left, right) => right.sort - left.sort);
+  const host = h("div", { class: "timeline" });
+  if (!entries.length) {
+    host.append(h("div", { class: "empty-inline" }, "No commands or alerts recorded for this machine yet."));
+  } else {
+    host.append(
+      ...entries.map((entry) =>
+        h(
+          "div",
+          { class: `timeline-entry timeline-${entry.kind}` },
+          h("span", { class: "timeline-time" }, entry.at ? localTime(entry.at) : "—"),
+          h("span", { class: `timeline-kind ${entry.kind}` }, entry.kind),
+          statusPill(entry.status, timelineStatusKind(entry.kind, entry.status)),
+          h("span", { class: "timeline-desc", title: entry.description }, entry.description),
+        ),
+      ),
+    );
+  }
+  body.append(
+    section(
+      "Timeline",
+      "Commands and alerts",
+      h(
+        "div",
+        { class: "section-toolbar" },
+        h(
+          "p",
+          {},
+          `Latest ${commands.length} command${commands.length === 1 ? "" : "s"} and ${alerts.length} alert${alerts.length === 1 ? "" : "s"}.`,
+        ),
+        h(
+          "span",
+          { class: "form-hint timeline-count" },
+          `${entries.length} event${entries.length === 1 ? "" : "s"}`,
+        ),
+        button("Refresh timeline", "button-secondary button-small", () => loadAgentDetail(agent.id)),
+      ),
+      host,
+    ),
+  );
+}
+
+function renderTrends(body) {
+  const agent = state.detailAgent;
+  const rangeKey = TREND_RANGES[state.trendRange] ? state.trendRange : "24";
+  const toggle = h(
+    "div",
+    { class: "range-toggle", role: "group", "aria-label": "History range" },
+    ...Object.entries(TREND_RANGES).map(([key, range]) =>
+      h(
+        "button",
+        {
+          class: `range-option${key === rangeKey ? " is-active" : ""}`,
+          type: "button",
+          "aria-pressed": String(key === rangeKey),
+          onClick: () => {
+            if (state.trendRange === key) return;
+            state.trendRange = key;
+            renderTab();
+          },
+        },
+        range.label,
+      ),
+    ),
+  );
+  const host = h(
+    "div",
+    { class: "chart-list" },
+    h("div", { class: "empty-inline" }, `Loading ${TREND_RANGES[rangeKey].label} history…`),
+  );
+  body.append(
+    section(
+      "Trends",
+      "Telemetry detail",
+      h(
+        "div",
+        { class: "section-toolbar" },
+        h("p", {}, "Larger charts from recorded telemetry. Gaps indicate offline periods."),
+        toggle,
+      ),
+      host,
+    ),
+  );
+  loadTrendCharts(host, agent, rangeKey);
+  renderTimeline(body, agent);
 }
 
 function renderDisks(body) {
@@ -1769,7 +2064,7 @@ async function loadAgentDetail(agentId) {
     state.detailAgent = data.agent;
     state.agentCommands[agentId] = data.commands;
     updateDrawerChrome();
-    if (state.detailTab === "history") renderTab();
+    if (["history", "trends"].includes(state.detailTab)) renderTab();
   } catch (error) {
     if (state.detailId === agentId) {
       closeDrawer();
