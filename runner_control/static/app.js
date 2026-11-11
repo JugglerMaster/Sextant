@@ -28,12 +28,19 @@ const state = {
   selectedAgents: new Set(),
   drawerTrigger: null,
   userSearch: "",
+  theme: "dark",
+  fleetStatusSignature: "",
+  paletteItems: [],
+  paletteIndex: 0,
+  paletteTrigger: null,
 };
 
 const $ = (id) => document.getElementById(id);
 const SERVICE_PAGE_SIZE = 50;
 const SERVICE_STATUS_FILTERS = ["all", "running", "stopped", "failed", "watched"];
 const FLEET_STATUS_VALUES = ["all", "online", "offline", "alerts"];
+const ADMIN_PAGES = ["enroll", "audit", "users", "profiles", "remote-install"];
+const THEME_KEY = "rc.theme";
 const PAGE_META = {
   overview: ["Fleet", "Live machines and health at a glance."],
   wake: ["Wake targets", "Send Wake-on-LAN packets to machines without agents."],
@@ -250,6 +257,195 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function loadTheme() {
+  let theme = "dark";
+  try {
+    const stored = localStorage.getItem(THEME_KEY);
+    if (stored === "light" || stored === "dark") theme = stored;
+  } catch (_error) {
+    // Storage may be unavailable in private contexts.
+  }
+  applyTheme(theme, false);
+}
+
+function applyTheme(theme, persist = true) {
+  const value = theme === "light" ? "light" : "dark";
+  state.theme = value;
+  document.documentElement.dataset.theme = value;
+  document.documentElement.style.colorScheme = value;
+  const schemeMeta = document.querySelector('meta[name="color-scheme"]');
+  if (schemeMeta) schemeMeta.setAttribute("content", value);
+  const themeColor = document.querySelector('meta[name="theme-color"]');
+  if (themeColor) themeColor.setAttribute("content", value === "light" ? "#eef2f6" : "#0b1118");
+  const toggle = $("theme-toggle");
+  if (toggle) {
+    const light = value === "light";
+    toggle.setAttribute("aria-pressed", light ? "true" : "false");
+    toggle.setAttribute("aria-label", light ? "Switch to dark theme" : "Switch to light theme");
+    toggle.title = light ? "Switch to dark theme" : "Switch to light theme";
+  }
+  const icon = $("theme-toggle-icon");
+  if (icon) icon.textContent = value === "light" ? "☾" : "☀";
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_KEY, value);
+    } catch (_error) {
+      // Storage may be unavailable in private contexts.
+    }
+  }
+}
+
+function toggleTheme() {
+  applyTheme(state.theme === "light" ? "dark" : "light");
+}
+
+function fleetSummary(prefix = "Fleet updated") {
+  const stats = state.dashboard?.stats || { total: 0, online: 0, alerts: 0 };
+  return `${prefix}: ${stats.total} machine${stats.total === 1 ? "" : "s"}, ${stats.online} online, ${stats.alerts} alert${stats.alerts === 1 ? "" : "s"}.`;
+}
+
+function announceFleetStatus(message) {
+  const region = $("fleet-status");
+  if (!region) return;
+  region.textContent = "";
+  setTimeout(() => {
+    region.textContent = message;
+  }, 60);
+}
+
+function commandPaletteItems(query = "") {
+  const pages = Object.keys(PAGE_META)
+    .filter((page) => !ADMIN_PAGES.includes(page) || state.permissions.admin)
+    .map((page) => {
+      const [title, subtitle] = PAGE_META[page];
+      return {
+        type: "page",
+        page,
+        kindLabel: "Page",
+        label: title,
+        hint: subtitle,
+        search: `${page} ${title} ${subtitle}`.toLowerCase(),
+      };
+    });
+  const agents = (state.dashboard?.agents || []).map((agent) => ({
+    type: "agent",
+    id: agent.id,
+    kindLabel: "Machine",
+    label: agent.name,
+    hint: `${agent.online ? "online" : "offline"} · ${osLabel(agent)} · ${agent.ip || "no address"}${agent.tags?.length ? ` · ${agent.tags.join(", ")}` : ""}`,
+    search: [agent.name, agent.hostname, agent.os, agent.os_version, agent.ip, agent.mac, agent.id, ...(agent.tags || [])]
+      .join(" ")
+      .toLowerCase(),
+  }));
+  const all = [...pages, ...agents];
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return all;
+  return all.filter((item) => item.search.includes(normalized));
+}
+
+function renderCommandPalette(query) {
+  const list = $("command-palette-list");
+  const input = $("command-palette-input");
+  if (!list || !input) return;
+  clear(list);
+  state.paletteItems = commandPaletteItems(query);
+  state.paletteIndex = 0;
+  if (!state.paletteItems.length) {
+    list.append(h("div", { class: "command-palette-empty", role: "presentation" }, "No pages or machines match."));
+    input.removeAttribute("aria-activedescendant");
+    return;
+  }
+  state.paletteItems.forEach((item, index) => {
+    list.append(
+      h(
+        "div",
+        {
+          class: "command-palette-item",
+          id: `palette-option-${index}`,
+          role: "option",
+          "aria-selected": index === 0 ? "true" : "false",
+          onClick: () => runCommandPaletteItem(item),
+          onMouseEnter: () => setCommandPaletteActive(index, false),
+        },
+        h("span", { class: "command-palette-kind" }, item.kindLabel),
+        h("span", { class: "command-palette-main" }, h("strong", {}, item.label), h("small", {}, item.hint)),
+      ),
+    );
+  });
+  setCommandPaletteActive(0, false);
+}
+
+function setCommandPaletteActive(index, scroll = true) {
+  const list = $("command-palette-list");
+  const input = $("command-palette-input");
+  if (!list || !input || !state.paletteItems.length) return;
+  const next = Math.max(0, Math.min(state.paletteItems.length - 1, index));
+  state.paletteIndex = next;
+  list.querySelectorAll(".command-palette-item").forEach((row, rowIndex) => {
+    const active = rowIndex === next;
+    row.classList.toggle("is-active", active);
+    row.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  input.setAttribute("aria-activedescendant", `palette-option-${next}`);
+  if (scroll) {
+    const activeRow = list.querySelector(`#palette-option-${next}`);
+    if (activeRow && typeof activeRow.scrollIntoView === "function") activeRow.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function moveCommandPalette(delta) {
+  if (!state.paletteItems.length) return;
+  const count = state.paletteItems.length;
+  setCommandPaletteActive((state.paletteIndex + delta + count) % count);
+}
+
+function openCommandPalette() {
+  const overlay = $("command-palette");
+  const input = $("command-palette-input");
+  if (!overlay || !input) return;
+  state.paletteTrigger = document.activeElement;
+  overlay.hidden = false;
+  input.value = "";
+  input.setAttribute("aria-expanded", "true");
+  renderCommandPalette("");
+  input.focus();
+}
+
+function closeCommandPalette({ restoreFocus = true } = {}) {
+  const overlay = $("command-palette");
+  const input = $("command-palette-input");
+  if (!overlay) return;
+  overlay.hidden = true;
+  if (input) {
+    input.value = "";
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+  }
+  state.paletteItems = [];
+  state.paletteIndex = 0;
+  if (restoreFocus && state.paletteTrigger && typeof state.paletteTrigger.focus === "function") {
+    state.paletteTrigger.focus();
+  }
+  state.paletteTrigger = null;
+}
+
+function runCommandPaletteItem(item) {
+  closeCommandPalette();
+  if (item.type === "page") {
+    navigate(item.page);
+    return;
+  }
+  if (item.type === "agent") {
+    navigate("overview", false);
+    openAgent(item.id);
+  }
+}
+
+function runCommandPaletteSelection() {
+  const item = state.paletteItems[state.paletteIndex];
+  if (item) runCommandPaletteItem(item);
+}
+
 async function api(path, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   const headers = { Accept: "application/json", ...(options.headers || {}) };
@@ -408,7 +604,7 @@ async function checkForUpdates() {
 
 function navigate(page, load = true) {
   if (!PAGE_META[page]) page = "overview";
-  if (["enroll", "audit", "users", "profiles", "remote-install"].includes(page) && !state.permissions.admin) page = "overview";
+  if (ADMIN_PAGES.includes(page) && !state.permissions.admin) page = "overview";
   state.page = page;
   const [title, subtitle] = PAGE_META[page];
   setText("page-title", title);
@@ -417,7 +613,10 @@ function navigate(page, load = true) {
     el.hidden = el.id !== `page-${page}`;
   });
   document.querySelectorAll(".nav-item[data-page]").forEach((el) => {
-    el.classList.toggle("is-active", el.dataset.page === page);
+    const active = el.dataset.page === page;
+    el.classList.toggle("is-active", active);
+    if (active) el.setAttribute("aria-current", "page");
+    else el.removeAttribute("aria-current");
   });
   $("sidebar").classList.remove("is-open");
   $("sidebar-scrim").hidden = true;
@@ -466,6 +665,11 @@ function renderStats() {
   setText("stat-online-detail", stats.total ? `${Math.round((stats.online / stats.total) * 100)}% of fleet` : "Waiting for heartbeat");
   const affected = (state.dashboard?.agents || []).filter((agent) => agent.alert_count > 0).length;
   setText("stat-alerts-detail", affected ? `${affected} machine${affected === 1 ? "" : "s"} affected` : "All clear");
+  const signature = `${stats.total}|${stats.online}|${stats.offline}|${stats.alerts}`;
+  if (signature !== state.fleetStatusSignature) {
+    state.fleetStatusSignature = signature;
+    announceFleetStatus(fleetSummary());
+  }
 }
 
 function renderFleetFilters(all) {
@@ -661,12 +865,47 @@ function renderAlertCenter() {
   }
 }
 
+const BULK_BUTTON_IDS = [
+  "bulk-refresh",
+  "bulk-wake",
+  "bulk-reboot",
+  "bulk-shutdown",
+  "bulk-service-start",
+  "bulk-service-stop",
+  "bulk-service-restart",
+  "bulk-profile-apply",
+  "bulk-clear",
+];
+
 function renderBulkActions() {
   const bar = $("bulk-actions");
   if (!bar) return;
   const selected = [...state.selectedAgents];
-  bar.hidden = selected.length === 0 || !state.permissions.operate;
-  setText("bulk-count", `${selected.length} selected`);
+  bar.hidden = !state.permissions.operate;
+  setText(
+    "bulk-count",
+    selected.length ? `${selected.length} selected` : "0 selected · select machines to enable bulk actions",
+  );
+  updateBulkControls();
+}
+
+function updateBulkControls() {
+  const selected = state.selectedAgents.size;
+  const noSelection = selected === 0;
+  const serviceName = ($("bulk-service-name")?.value || "").trim();
+  const profileSlug = $("bulk-profile")?.value || "";
+  for (const id of BULK_BUTTON_IDS) {
+    const control = $(id);
+    if (!control) continue;
+    let disabled = noSelection;
+    if (["bulk-service-start", "bulk-service-stop", "bulk-service-restart"].includes(id)) {
+      disabled = disabled || !serviceName;
+    }
+    if (id === "bulk-profile-apply") {
+      disabled = disabled || !profileSlug || !state.permissions.admin;
+    }
+    control.disabled = disabled;
+  }
 }
 
 function selectedAgents() {
@@ -674,36 +913,150 @@ function selectedAgents() {
   return all.filter((agent) => state.selectedAgents.has(agent.id));
 }
 
+function plural(count, word) {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
+function bulkTargets(capability) {
+  const allowed = [];
+  const skipped = [];
+  for (const agent of selectedAgents()) {
+    const blocked =
+      (capability === "power" && agent.policy?.allow_power === false) ||
+      (capability === "service" && agent.policy?.allow_service === false);
+    if (!agent.online || blocked) skipped.push(agent);
+    else allowed.push(agent);
+  }
+  return { allowed, skipped };
+}
+
+async function runBulk(label, agents, action, note = "") {
+  let succeeded = 0;
+  const failures = [];
+  for (const agent of agents) {
+    try {
+      await action(agent);
+      succeeded += 1;
+    } catch (error) {
+      failures.push(`${agent.name}: ${error.message}`);
+    }
+  }
+  const total = agents.length;
+  const suffix = note ? ` ${note}` : "";
+  if (!succeeded) {
+    toast(`${label} failed for ${plural(total, "selected machine")}. ${short(failures[0] || "", 120)}`, "error");
+  } else if (failures.length) {
+    toast(`${label}: ${succeeded} of ${total} succeeded, ${failures.length} failed. ${short(failures[0], 120)}${suffix}`, "warn");
+  } else {
+    toast(`${label}: ${succeeded} of ${total} succeeded.${suffix}`);
+  }
+  return { succeeded, failures, total };
+}
+
 async function bulkRefresh() {
   const agents = selectedAgents();
   if (!agents.length) return;
-  let queued = 0;
-  for (const agent of agents) {
-    try {
-      await api(`/api/agents/${agent.id}/commands`, { method: "POST", body: { kind: "refresh", args: {} } });
-      queued += 1;
-    } catch (_error) {
-      // Continue with the rest; the individual error is visible in command history.
-    }
-  }
-  toast(`Telemetry refresh queued for ${queued} of ${agents.length} machines.`);
+  await runBulk("Telemetry refresh", agents, (agent) =>
+    api(`/api/agents/${agent.id}/commands`, { method: "POST", body: { kind: "refresh", args: {} } }),
+  );
   loadDashboard(true);
 }
 
 async function bulkWake() {
   const agents = selectedAgents();
   if (!agents.length) return;
-  let sent = 0;
-  for (const agent of agents) {
-    if (agent.online || !agent.mac) continue;
-    try {
-      await api(`/api/agents/${agent.id}/wake`, { method: "POST", body: {} });
-      sent += 1;
-    } catch (_error) {
-      // Keep going; report the aggregate below.
-    }
+  const offline = agents.filter((agent) => !agent.online && agent.mac);
+  if (!offline.length) {
+    toast("No selected machines needed a wake packet.", "warn");
+    return;
   }
-  toast(sent ? `Wake packets sent to ${sent} machine${sent === 1 ? "" : "s"}.` : "No selected machines needed a wake packet.");
+  await runBulk("Wake", offline, (agent) => api(`/api/agents/${agent.id}/wake`, { method: "POST", body: {} }));
+}
+
+async function bulkPower(action) {
+  if (!state.permissions.operate) return toast("Operator access required.", "error");
+  const selected = selectedAgents();
+  if (!selected.length) return;
+  const { allowed, skipped } = bulkTargets("power");
+  const verb = action === "shutdown" ? "Shut down" : "Reboot";
+  if (!allowed.length) {
+    toast(`No selected machines are online with power actions allowed. ${plural(skipped.length, "machine")} skipped.`, "warn");
+    return;
+  }
+  const note = skipped.length ? `${plural(skipped.length, "offline or blocked machine")} skipped.` : "";
+  const confirmed = await confirmAction(
+    `${verb} ${plural(allowed.length, "machine")}?`,
+    `The agents will schedule ${action} in 30 seconds. Unsaved work on those machines may be lost.${note ? ` ${note}` : ""}`,
+    verb,
+  );
+  if (!confirmed) return;
+  const result = await runBulk(
+    verb,
+    allowed,
+    (agent) => api(`/api/agents/${agent.id}/commands`, { method: "POST", body: { kind: "power", args: { action, delay: 30 } } }),
+    note,
+  );
+  if (result.succeeded) {
+    state.selectedAgents.clear();
+    renderAgentGrid();
+  }
+  loadDashboard(true);
+}
+
+async function bulkService(action) {
+  if (!state.permissions.operate) return toast("Operator access required.", "error");
+  const input = $("bulk-service-name");
+  const name = (input?.value || "").trim();
+  if (!name) {
+    toast("Enter a service name first.", "warn");
+    input?.focus();
+    return;
+  }
+  const { allowed, skipped } = bulkTargets("service");
+  const verb = action.charAt(0).toUpperCase() + action.slice(1);
+  if (!allowed.length) {
+    toast(`No selected machines are online with service control allowed. ${plural(skipped.length, "machine")} skipped.`, "warn");
+    return;
+  }
+  const note = skipped.length ? `${plural(skipped.length, "offline or blocked machine")} skipped.` : "";
+  const confirmed = await confirmAction(
+    `${verb} ${name} on ${plural(allowed.length, "machine")}?`,
+    `Queue a ${action} command for the ${name} service on every eligible selected machine.${note ? ` ${note}` : ""}`,
+    `${verb} service`,
+  );
+  if (!confirmed) return;
+  await runBulk(
+    `${verb} ${name}`,
+    allowed,
+    (agent) =>
+      api(`/api/agents/${agent.id}/commands`, {
+        method: "POST",
+        body: { kind: "service", args: { action, name } },
+      }),
+    note,
+  );
+  loadDashboard(true);
+}
+
+async function bulkApplyProfile() {
+  if (!state.permissions.admin) return toast("Administrator access required.", "error");
+  const selected = selectedAgents();
+  if (!selected.length) return;
+  const select = $("bulk-profile");
+  const slug = select?.value || "";
+  if (!slug) {
+    toast("Choose a profile first.", "warn");
+    select?.focus();
+    return;
+  }
+  const profile = state.profiles.find((item) => item.slug === slug);
+  const result = await runBulk(`Profile ${profile?.name || slug}`, selected, (agent) =>
+    api(`/api/agents/${agent.id}`, { method: "PATCH", body: { profile: slug } }),
+  );
+  if (result.succeeded) {
+    await loadProfiles(true);
+    loadDashboard(true);
+  }
 }
 
 function agentCard(agent) {
@@ -2555,6 +2908,7 @@ async function loadProfiles(silent = false) {
     renderTagAssignments();
     populateTagProfileSelect();
     populateRemoteProfileSelect();
+    populateBulkProfileSelect();
     if (state.dashboard) renderAgentGrid();
     if (state.detailAgent) renderDrawerActions(state.detailAgent);
   } catch (error) {
@@ -2615,6 +2969,19 @@ function populateTagProfileSelect() {
     select.append(h("option", { value: profile.slug }, `${profile.name} (${profile.slug})`));
   }
   if (current) select.value = current;
+}
+
+function populateBulkProfileSelect() {
+  const select = $("bulk-profile");
+  if (!select) return;
+  const current = select.value;
+  clear(select);
+  select.append(h("option", { value: "" }, "Choose profile…"));
+  for (const profile of state.profiles) {
+    select.append(h("option", { value: profile.slug }, `${profile.name} (${profile.slug})`));
+  }
+  if (state.profiles.some((profile) => profile.slug === current)) select.value = current;
+  updateBulkControls();
 }
 
 function renderTagAssignments() {
@@ -3047,6 +3414,7 @@ function deleteSavedView() {
 }
 
 async function init() {
+  loadTheme();
   loadFleetFilters();
   loadSavedViews();
   wireEvents();
@@ -3127,10 +3495,39 @@ function wireEvents() {
     $("sidebar-scrim").hidden = true;
   });
 
-  $("refresh-button").addEventListener("click", () => {
-    if (state.page === "overview") loadDashboard();
+  $("refresh-button").addEventListener("click", async () => {
+    if (state.page === "overview") await loadDashboard(true);
     else navigate(state.page);
     if (state.detailId) loadAgentDetail(state.detailId);
+    announceFleetStatus(fleetSummary("Fleet refreshed"));
+  });
+
+  $("theme-toggle")?.addEventListener("click", toggleTheme);
+  $("command-palette-button")?.addEventListener("click", openCommandPalette);
+  document.querySelectorAll("[data-close-palette]").forEach((el) => {
+    el.addEventListener("click", () => closeCommandPalette());
+  });
+  $("command-palette-input")?.addEventListener("input", (event) => {
+    renderCommandPalette(event.target.value);
+  });
+  $("command-palette-input")?.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveCommandPalette(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveCommandPalette(-1);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      runCommandPaletteSelection();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeCommandPalette();
+    } else if (event.key === "Tab") {
+      event.preventDefault();
+      event.target.focus();
+    }
   });
 
   $("search-input").addEventListener("input", (event) => {
@@ -3176,6 +3573,14 @@ function wireEvents() {
   });
   $("bulk-refresh").addEventListener("click", bulkRefresh);
   $("bulk-wake").addEventListener("click", bulkWake);
+  $("bulk-reboot").addEventListener("click", () => bulkPower("reboot"));
+  $("bulk-shutdown").addEventListener("click", () => bulkPower("shutdown"));
+  $("bulk-service-start").addEventListener("click", () => bulkService("start"));
+  $("bulk-service-stop").addEventListener("click", () => bulkService("stop"));
+  $("bulk-service-restart").addEventListener("click", () => bulkService("restart"));
+  $("bulk-service-name").addEventListener("input", updateBulkControls);
+  $("bulk-profile").addEventListener("change", updateBulkControls);
+  $("bulk-profile-apply").addEventListener("click", bulkApplyProfile);
 
   $("wake-target-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -3358,6 +3763,18 @@ function wireEvents() {
   $("revoke-all-sessions").addEventListener("click", revokeAllUserSessions);
 
   document.addEventListener("keydown", (event) => {
+    const paletteOpen = !$("command-palette").hidden;
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      if (paletteOpen) closeCommandPalette();
+      else openCommandPalette();
+      return;
+    }
+    if (event.key === "Escape" && paletteOpen) {
+      event.preventDefault();
+      closeCommandPalette();
+      return;
+    }
     if (event.key === "Escape" && !$("agent-drawer").hidden) closeDrawer();
     if (event.key === "Escape") {
       $("sidebar").classList.remove("is-open");

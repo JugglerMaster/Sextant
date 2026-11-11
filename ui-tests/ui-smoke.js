@@ -22,8 +22,10 @@ if (!window.HTMLDialogElement.prototype.showModal) {
   window.HTMLDialogElement.prototype.showModal = function () {
     this.setAttribute("open", "");
   };
-  window.HTMLDialogElement.prototype.close = function () {
+  window.HTMLDialogElement.prototype.close = function (value) {
     this.removeAttribute("open");
+    if (value !== undefined) this.returnValue = value;
+    this.dispatchEvent(new window.Event("close"));
   };
 }
 const findButton = (root, text) =>
@@ -44,7 +46,7 @@ const agent = {
   notes: "",
   watch_services: ["Spooler"],
   profile_id: "prof_workstation",
-  policy: { allow_shell: true, allow_power: true, allow_service: false, allow_packages: true },
+  policy: { allow_shell: true, allow_power: true, allow_service: true, allow_packages: true },
   enrolled_at: "2026-11-06T07:00:00Z",
   last_seen: "2026-11-06T08:00:00Z",
   service_inventory_at: "2026-11-06T07:45:00Z",
@@ -236,7 +238,27 @@ const responses = {
 
 window.fetch = async (path, options = {}) => {
   const key = String(path).split("?")[0];
-  const response = responses[key] || { status: 404, body: { detail: `No mock for ${key}` } };
+  const method = String(options.method || "GET").toUpperCase();
+  let body = null;
+  if (options.body) {
+    try {
+      body = JSON.parse(options.body);
+    } catch (_error) {
+      body = options.body;
+    }
+  }
+  window.__requests = window.__requests || [];
+  window.__requests.push({ path: key, method, body });
+  let response;
+  if (method === "POST" && /^\/api\/agents\/[^/]+\/commands$/.test(key)) {
+    response = { status: 200, body: { id: "cmd_bulk", agent_id: "agt_demo", kind: body?.kind || "refresh", args: body?.args || {}, status: "queued" } };
+  } else if (method === "PATCH" && key === "/api/agents/agt_demo") {
+    response = { status: 200, body: { agent: { ...agent, profile_id: body?.profile === "server" ? "prof_server" : agent.profile_id } } };
+  } else if (method === "POST" && key === "/api/agents/agt_demo/wake") {
+    response = { status: 200, body: { mac: agent.mac, sent: 3 } };
+  } else {
+    response = responses[key] || { status: 404, body: { detail: `No mock for ${key}` } };
+  }
   return {
     status: response.status,
     ok: response.status >= 200 && response.status < 300,
@@ -263,6 +285,11 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   if (window.document.getElementById("app-view").hidden) throw new Error("app shell should be visible after login");
   if (window.document.getElementById("stat-total").textContent !== "1") throw new Error("stats did not render");
+  const fleetStatus = window.document.getElementById("fleet-status");
+  if (!fleetStatus || fleetStatus.getAttribute("aria-live") !== "polite" || fleetStatus.getAttribute("role") !== "status") {
+    throw new Error("fleet status live region missing");
+  }
+  if (!fleetStatus.textContent.includes("1 machine")) throw new Error("fleet status was not announced");
   const updateBanner = window.document.getElementById("update-banner");
   if (updateBanner.hidden) throw new Error("update banner should be visible for an available release");
   if (!updateBanner.textContent.includes("9.9.9")) throw new Error("update banner missing version");
@@ -287,13 +314,91 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!window.document.getElementById("toast-region").textContent.includes("Alert cleared")) {
     throw new Error("alert clear action did not run");
   }
+  const bulkBar = window.document.getElementById("bulk-actions");
+  if (bulkBar.hidden) throw new Error("bulk actions should be visible for operators");
+  const rebootButton = window.document.getElementById("bulk-reboot");
+  const shutdownButton = window.document.getElementById("bulk-shutdown");
+  if (!rebootButton || !shutdownButton) throw new Error("bulk power controls missing");
+  if (!rebootButton.disabled) throw new Error("bulk actions should be disabled without a selection");
   const selector = window.document.querySelector(".agent-select");
   if (!selector) throw new Error("agent selection checkbox missing");
   selector.checked = false;
   selector.click();
   await sleep(10);
-  if (window.document.getElementById("bulk-actions").hidden) throw new Error("bulk actions should be visible");
+  if (window.document.getElementById("bulk-count").textContent !== "1 selected") {
+    throw new Error("bulk selection count is wrong");
+  }
+  if (rebootButton.disabled) throw new Error("bulk actions should enable with a selection");
+
+  const closeConfirm = async (expected) => {
+    const dialog = window.document.getElementById("confirm-dialog");
+    if (!dialog.open) throw new Error(`confirmation dialog did not open for ${expected}`);
+    if (!dialog.textContent.includes(expected)) throw new Error(`confirmation text missing ${expected}`);
+    dialog.returnValue = "confirm";
+    dialog.close("confirm");
+    await sleep(60);
+  };
+
+  rebootButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await closeConfirm("Reboot 1 machine?");
+  const powerRequest = window.__requests.find(
+    (request) => request.method === "POST" && request.path === "/api/agents/agt_demo/commands" && request.body?.kind === "power",
+  );
+  if (!powerRequest || powerRequest.body.args.action !== "reboot" || powerRequest.body.args.delay !== 30) {
+    throw new Error("bulk reboot command was not queued");
+  }
+  if (!window.document.getElementById("toast-region").textContent.includes("Reboot: 1 of 1 succeeded")) {
+    throw new Error("bulk reboot result was not reported");
+  }
+  if (window.document.getElementById("bulk-count").textContent !== "0 selected · select machines to enable bulk actions") {
+    throw new Error("selection should clear after a bulk power action");
+  }
+  if (!rebootButton.disabled) throw new Error("bulk actions should disable after clearing the selection");
+
+  window.document.querySelector(".agent-select").click();
+  await sleep(10);
+  const serviceName = window.document.getElementById("bulk-service-name");
+  const serviceRestart = window.document.getElementById("bulk-service-restart");
+  if (!serviceName || !serviceRestart) throw new Error("bulk service controls missing");
+  if (!serviceRestart.disabled) throw new Error("bulk service action should require a service name");
+  serviceName.value = "Spooler";
+  serviceName.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(10);
+  if (serviceRestart.disabled) throw new Error("bulk service action should enable with a name");
+  serviceRestart.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await closeConfirm("Restart Spooler on 1 machine?");
+  const serviceRequest = window.__requests.find(
+    (request) => request.method === "POST" && request.path === "/api/agents/agt_demo/commands" && request.body?.kind === "service",
+  );
+  if (!serviceRequest || serviceRequest.body.args.action !== "restart" || serviceRequest.body.args.name !== "Spooler") {
+    throw new Error("bulk service command was not queued");
+  }
+  if (!window.document.getElementById("toast-region").textContent.includes("Restart Spooler: 1 of 1 succeeded")) {
+    throw new Error("bulk service result was not reported");
+  }
+
+  const bulkProfile = window.document.getElementById("bulk-profile");
+  const applyProfile = window.document.getElementById("bulk-profile-apply");
+  if (!bulkProfile || !applyProfile) throw new Error("bulk profile controls missing");
+  if (!bulkProfile.textContent.includes("Server")) throw new Error("bulk profile options missing");
+  bulkProfile.value = "server";
+  bulkProfile.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(10);
+  if (applyProfile.disabled) throw new Error("bulk profile apply should enable with a profile");
+  applyProfile.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  const profileRequest = window.__requests.find(
+    (request) => request.method === "PATCH" && request.path === "/api/agents/agt_demo",
+  );
+  if (!profileRequest || profileRequest.body?.profile !== "server") {
+    throw new Error("bulk profile patch was not sent");
+  }
+  if (!window.document.getElementById("toast-region").textContent.includes("Profile Server: 1 of 1 succeeded")) {
+    throw new Error("bulk profile result was not reported");
+  }
+
   window.document.getElementById("bulk-clear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(10);
 
   const savedViewSelect = window.document.getElementById("saved-view-select");
   const saveViewButton = window.document.getElementById("save-view");
@@ -547,8 +652,63 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!window.document.getElementById("reset-password-dialog").open) throw new Error("reset password dialog did not open");
   window.document.querySelector("[data-close-reset-password]").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 
+  const themeToggle = window.document.getElementById("theme-toggle");
+  if (!themeToggle) throw new Error("theme toggle missing");
+  if (window.document.documentElement.dataset.theme !== "dark") throw new Error("dark theme should be the default");
+  themeToggle.click();
+  await sleep(10);
+  if (window.document.documentElement.dataset.theme !== "light") throw new Error("theme toggle did not switch to light");
+  if (window.localStorage.getItem("rc.theme") !== "light") throw new Error("light theme was not persisted");
+  if (themeToggle.getAttribute("aria-pressed") !== "true") throw new Error("theme toggle aria-pressed missing");
+  themeToggle.click();
+  await sleep(10);
+  if (window.document.documentElement.dataset.theme !== "dark") throw new Error("theme toggle did not switch back to dark");
+
+  const palette = window.document.getElementById("command-palette");
+  const paletteInput = window.document.getElementById("command-palette-input");
+  const paletteList = window.document.getElementById("command-palette-list");
+  if (!palette || !paletteInput || !paletteList) throw new Error("command palette markup missing");
+  const paletteDialog = palette.querySelector('[role="dialog"]');
+  if (!paletteDialog || paletteDialog.getAttribute("aria-modal") !== "true" || !paletteDialog.getAttribute("aria-labelledby")) {
+    throw new Error("command palette dialog semantics missing");
+  }
+  window.document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }));
+  await sleep(10);
+  if (palette.hidden) throw new Error("Ctrl+K did not open the command palette");
+  if (window.document.activeElement !== paletteInput) throw new Error("command palette did not focus its input");
+  if (!paletteList.textContent.includes("Fleet") || !paletteList.textContent.includes("Studio PC")) {
+    throw new Error("command palette is missing pages or agents");
+  }
+  paletteInput.value = "studio";
+  paletteInput.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(10);
+  if (paletteList.querySelectorAll('[role="option"]').length !== 1) throw new Error("command palette did not filter");
+  paletteInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await sleep(40);
+  if (!palette.hidden) throw new Error("command palette did not close after activation");
+  if (window.document.getElementById("agent-drawer").hidden) throw new Error("command palette did not open the selected agent");
+  if (!window.document.getElementById("drawer-title").textContent.includes("Studio PC")) {
+    throw new Error("command palette opened the wrong agent");
+  }
+  window.document.querySelector("[data-close-drawer]").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(10);
+
+  window.document.getElementById("command-palette-button").click();
+  await sleep(10);
+  paletteInput.value = "wake";
+  paletteInput.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(10);
+  paletteInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await sleep(30);
+  if (window.document.getElementById("page-wake").hidden) throw new Error("command palette did not activate a page");
+  window.document.getElementById("command-palette-button").click();
+  await sleep(10);
+  paletteInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await sleep(10);
+  if (!palette.hidden) throw new Error("Escape did not close the command palette");
+
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, dashboard, saved views, drawer, services filters, GPU processes, remote terminal, history actions, trends charts, timeline, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, dashboard, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, history actions, trends charts, timeline, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

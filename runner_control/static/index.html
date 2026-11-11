@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -131,8 +131,10 @@
         <div class="topbar-actions">
           <label class="search-box">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M16 16l4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-            <input id="search-input" type="search" placeholder="Search name, OS, IP, tag" autocomplete="off">
+            <input id="search-input" type="search" aria-label="Search machines by name, OS, IP, or tag" placeholder="Search name, OS, IP, tag" autocomplete="off">
           </label>
+          <button class="icon-button palette-trigger" id="command-palette-button" type="button" title="Command palette (Ctrl/Cmd+K)" aria-label="Open command palette" aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K">⌘K</button>
+          <button class="icon-button theme-toggle" id="theme-toggle" type="button" title="Switch to light theme" aria-label="Switch to light theme" aria-pressed="false"><span id="theme-toggle-icon" aria-hidden="true">☀</span></button>
           <button class="icon-button" id="refresh-button" type="button" title="Refresh now" aria-label="Refresh now">↻</button>
         </div>
       </header>
@@ -165,16 +167,37 @@
             <span class="stat-detail">Queued or running</span>
           </article>
         </div>
+        <p class="sr-only" id="fleet-status" role="status" aria-live="polite"></p>
 
         <section class="panel" id="alert-center" hidden>
           <div class="panel-head"><div><p class="eyebrow">Attention</p><h2>Alert center</h2></div><span class="form-hint" id="alert-center-count" aria-live="polite"></span></div>
           <div id="alert-center-list" class="list-stack"></div>
         </section>
 
-        <div class="section-toolbar" id="bulk-actions" hidden>
-          <span class="form-hint" id="bulk-count"></span>
-          <button class="button button-secondary button-small" id="bulk-refresh" type="button">Refresh telemetry</button>
-          <button class="button button-secondary button-small" id="bulk-wake" type="button">Wake</button>
+        <div class="section-toolbar bulk-actions" id="bulk-actions" hidden aria-label="Bulk actions">
+          <span class="form-hint" id="bulk-count" role="status" aria-live="polite"></span>
+          <div class="bulk-group" role="group" aria-label="Telemetry and power">
+            <button class="button button-secondary button-small" id="bulk-refresh" type="button">Refresh telemetry</button>
+            <button class="button button-secondary button-small" id="bulk-wake" type="button">Wake</button>
+            <button class="button button-secondary button-small" id="bulk-reboot" type="button">Reboot</button>
+            <button class="button button-danger button-small" id="bulk-shutdown" type="button">Shut down</button>
+          </div>
+          <div class="bulk-group" role="group" aria-label="Bulk service control">
+            <label class="field bulk-inline-field">
+              <span class="sr-only">Service name</span>
+              <input id="bulk-service-name" type="text" placeholder="Service name" maxlength="200" autocomplete="off">
+            </label>
+            <button class="button button-secondary button-small" id="bulk-service-start" type="button">Start</button>
+            <button class="button button-secondary button-small" id="bulk-service-stop" type="button">Stop</button>
+            <button class="button button-secondary button-small" id="bulk-service-restart" type="button">Restart</button>
+          </div>
+          <div class="bulk-group nav-admin" role="group" aria-label="Bulk profile assignment">
+            <label class="field bulk-inline-field">
+              <span class="sr-only">Profile</span>
+              <select id="bulk-profile" aria-label="Profile to apply to selected machines"></select>
+            </label>
+            <button class="button button-secondary button-small" id="bulk-profile-apply" type="button">Apply profile</button>
+          </div>
           <button class="button button-ghost button-small" id="bulk-clear" type="button">Clear selection</button>
         </div>
 
@@ -493,6 +516,19 @@
       </div>
     </form>
   </dialog>
+
+  <div class="command-palette" id="command-palette" hidden>
+    <div class="command-palette-backdrop" data-close-palette></div>
+    <div class="command-palette-panel" role="dialog" aria-modal="true" aria-labelledby="command-palette-title">
+      <h2 class="sr-only" id="command-palette-title">Command palette</h2>
+      <label class="command-palette-search">
+        <span class="sr-only">Search pages and machines</span>
+        <input id="command-palette-input" type="text" role="combobox" aria-expanded="true" aria-controls="command-palette-list" aria-autocomplete="list" placeholder="Jump to a page or machine…" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="command-palette-list" id="command-palette-list" role="listbox" aria-label="Pages and machines"></div>
+      <p class="command-palette-foot"><span>↑↓ navigate</span><span>Enter open</span><span>Esc close</span></p>
+    </div>
+  </div>
 
   <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="false"></div>
   <script src="/static/app.js" type="module"></script>
