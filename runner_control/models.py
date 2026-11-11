@@ -237,6 +237,30 @@ class CommandIn(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
 
 
+class BulkActionIn(BaseModel):
+    action: Literal[
+        "refresh",
+        "refresh_telemetry",
+        "wake",
+        "power",
+        "reboot",
+        "shutdown",
+        "service",
+        "service_start",
+        "service_stop",
+        "service_restart",
+        "profile",
+        "profile_apply",
+    ]
+    agent_ids: list[str] = Field(min_length=1, max_length=200)
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+class SavedViewIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentWakeIn(BaseModel):
     broadcast: str = Field(default="255.255.255.255", max_length=64)
     port: int = Field(default=9, ge=1, le=65535)

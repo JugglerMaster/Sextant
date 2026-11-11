@@ -275,6 +275,16 @@ CREATE TABLE IF NOT EXISTS remote_install_jobs (
     started_at TEXT,
     finished_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS saved_views (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL COLLATE NOCASE,
+    filters TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(user_id, name)
+);
 """
 
 INDEXES = """
@@ -299,6 +309,7 @@ CREATE INDEX IF NOT EXISTS idx_store_events_at ON store_events(at);
 CREATE INDEX IF NOT EXISTS idx_package_inventory_agent ON package_inventory(agent_id, manager);
 CREATE INDEX IF NOT EXISTS idx_package_rules_agent ON package_rules(agent_id, manager);
 CREATE INDEX IF NOT EXISTS idx_agent_profiles_slug ON agent_profiles(slug);
+CREATE INDEX IF NOT EXISTS idx_saved_views_user ON saved_views(user_id);
 """
 
 DEFAULT_PROFILES = [
@@ -1737,6 +1748,44 @@ class Database:
                     "SELECT COUNT(*) AS n FROM remote_install_jobs WHERE status IN ('queued', 'running')"
                 ).fetchone()["n"]
             )
+
+    # ---- Saved fleet views ---------------------------------------------
+
+    def list_saved_views(self, user_id: int) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """SELECT * FROM saved_views WHERE user_id = ?
+                       ORDER BY name COLLATE NOCASE""",
+                    (user_id,),
+                ).fetchall()
+            )
+
+    def get_saved_view(self, view_id: str, user_id: int) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM saved_views WHERE id = ? AND user_id = ?",
+                (view_id, user_id),
+            ).fetchone()
+
+    def create_saved_view(self, user_id: int, name: str, filters: dict[str, Any]) -> sqlite3.Row:
+        now = utcnow_iso()
+        view_id = "sv_" + secrets.token_hex(8)
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT INTO saved_views (id, user_id, name, filters, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (view_id, user_id, name, dumps(filters), now, now),
+            )
+            return conn.execute("SELECT * FROM saved_views WHERE id = ?", (view_id,)).fetchone()
+
+    def delete_saved_view(self, view_id: str, user_id: int) -> bool:
+        with self.connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM saved_views WHERE id = ? AND user_id = ?",
+                (view_id, user_id),
+            )
+            return bool(cur.rowcount)
 
     def audit(
         self,

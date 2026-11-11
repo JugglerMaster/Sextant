@@ -26,6 +26,10 @@ const state = {
   remoteJobId: null,
   remoteTimer: null,
   fleetFilters: { status: "all", profile: "", tag: "" },
+  fleetRenderLimit: 60,
+  agentCards: new Map(),
+  agentSignatures: new Map(),
+  fleetEmptyNode: null,
   savedViews: [],
   selectedAgents: new Set(),
   drawerTrigger: null,
@@ -38,6 +42,7 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+const FLEET_PAGE_SIZE = 60;
 const SERVICE_PAGE_SIZE = 50;
 const SERVICE_STATUS_FILTERS = ["all", "running", "stopped", "failed", "watched"];
 const HISTORY_PAGE_SIZES = [25, 50, 100];
@@ -574,6 +579,7 @@ function enterApp(me) {
   navigate("overview", false);
   loadDashboard();
   loadProfiles(true);
+  void loadSavedViewsFromServer();
   void checkForUpdates();
   startLiveUpdates();
 }
@@ -791,9 +797,69 @@ function filteredAgents() {
   });
 }
 
+function resetFleetRenderLimit() {
+  state.fleetRenderLimit = FLEET_PAGE_SIZE;
+}
+
+function agentCardSignature(agent) {
+  const profile = profileForAgent(agent);
+  return JSON.stringify([
+    state.permissions.operate,
+    Math.floor(Date.now() / 60000),
+    agent.id,
+    agent.name,
+    agent.hostname,
+    agent.os,
+    agent.os_version,
+    agent.ip,
+    agent.mac,
+    agent.online,
+    agent.cpu_pct,
+    agent.mem_pct,
+    agent.mem_used,
+    agent.mem_total,
+    agent.uptime_seconds,
+    agent.last_seen,
+    agent.service_inventory_at,
+    agent.tags || [],
+    (agent.disks || []).map((disk) => disk.percent || 0),
+    (agent.gpus || []).map((gpu) => [gpu.name, gpu.util_pct, gpu.temp_c]),
+    agent.alert_count,
+    profile ? [profile.settings?.heartbeat_seconds, profile.settings?.collection?.service_inventory_seconds] : null,
+  ]);
+}
+
+function captureFleetFocus(grid) {
+  const active = document.activeElement;
+  if (!active || !grid.contains(active)) return null;
+  const card = active.closest(".agent-card");
+  if (!card || !card.dataset.agentId) return null;
+  return {
+    agentId: card.dataset.agentId,
+    select: active.classList.contains("agent-select"),
+  };
+}
+
+function restoreFleetFocus(info) {
+  if (!info) return;
+  const card = state.agentCards.get(info.agentId);
+  if (!card) return;
+  const target = info.select ? card.querySelector(".agent-select") : card;
+  if (target && document.activeElement !== target) target.focus();
+}
+
+function renderFleetMore(total, shown) {
+  const wrap = $("fleet-more");
+  const control = $("fleet-more-button");
+  if (!wrap || !control) return;
+  wrap.hidden = total <= shown;
+  if (!wrap.hidden) control.textContent = `Show more machines (${total - shown} remaining)`;
+}
+
 function renderAgentGrid() {
   const grid = $("agent-grid");
-  clear(grid);
+  if (!grid) return;
+  const focusInfo = captureFleetFocus(grid);
   const all = state.dashboard?.agents || [];
   const currentIds = new Set(all.map((agent) => agent.id));
   for (const id of [...state.selectedAgents]) {
@@ -804,12 +870,57 @@ function renderAgentGrid() {
   renderBulkActions();
   const agents = filteredAgents();
   $("empty-agents").hidden = all.length > 0;
-  if (all.length === 0) return;
-  if (agents.length === 0) {
-    grid.append(h("div", { class: "empty-inline" }, "No machines match that search."));
+  if (all.length === 0) {
+    for (const [id, node] of [...state.agentCards]) {
+      node.remove();
+      state.agentCards.delete(id);
+      state.agentSignatures.delete(id);
+    }
+    if (state.fleetEmptyNode) {
+      state.fleetEmptyNode.remove();
+      state.fleetEmptyNode = null;
+    }
+    renderFleetMore(0, 0);
     return;
   }
-  for (const agent of agents) grid.append(agentCard(agent));
+  const visible = agents.slice(0, state.fleetRenderLimit);
+  const wanted = new Set(visible.map((agent) => agent.id));
+  for (const [id, node] of [...state.agentCards]) {
+    if (!wanted.has(id)) {
+      node.remove();
+      state.agentCards.delete(id);
+      state.agentSignatures.delete(id);
+    }
+  }
+  let index = 0;
+  for (const agent of visible) {
+    const signature = agentCardSignature(agent);
+    let node = state.agentCards.get(agent.id);
+    const signatureChanged = state.agentSignatures.get(agent.id) !== signature;
+    if (!node || signatureChanged) {
+      const next = agentCard(agent);
+      if (node) node.replaceWith(next);
+      state.agentCards.set(agent.id, next);
+      state.agentSignatures.set(agent.id, signature);
+      node = next;
+    } else {
+      const checkbox = node.querySelector(".agent-select");
+      if (checkbox) checkbox.checked = state.selectedAgents.has(agent.id);
+    }
+    const current = grid.children[index];
+    if (current !== node) grid.insertBefore(node, current || null);
+    index += 1;
+  }
+  if (agents.length === 0) {
+    if (!state.fleetEmptyNode) {
+      state.fleetEmptyNode = h("div", { class: "empty-inline" }, "No machines match that search.");
+    }
+    if (!state.fleetEmptyNode.isConnected) grid.append(state.fleetEmptyNode);
+  } else if (state.fleetEmptyNode) {
+    state.fleetEmptyNode.remove();
+  }
+  renderFleetMore(agents.length, visible.length);
+  restoreFleetFocus(focusInfo);
 }
 
 function profileForAgent(agent) {
@@ -1008,35 +1119,81 @@ function bulkTargets(capability) {
   return { allowed, skipped };
 }
 
-async function runBulk(label, agents, action, note = "") {
-  let succeeded = 0;
-  const failures = [];
-  for (const agent of agents) {
-    try {
-      await action(agent);
-      succeeded += 1;
-    } catch (error) {
-      failures.push(`${agent.name}: ${error.message}`);
+function clearBulkResult() {
+  const el = $("bulk-result");
+  if (!el) return;
+  el.hidden = true;
+  el.className = "bulk-result";
+  clear(el);
+}
+
+function bulkCountsText(summary) {
+  return [
+    `${summary.queued || 0} queued`,
+    `${summary.sent || 0} sent`,
+    `${summary.updated || 0} updated`,
+    `${summary.failed || 0} failed`,
+  ].join(" · ");
+}
+
+function renderBulkResult(label, result) {
+  const el = $("bulk-result");
+  if (!el) return;
+  const summary = result.summary || { total: (result.results || []).length, failed: 0 };
+  const failed = (result.results || []).filter((item) => item.status === "failed");
+  el.hidden = false;
+  el.className = `bulk-result${failed.length ? " has-failures" : ""}`;
+  clear(el);
+  el.append(
+    h("strong", {}, `${label}: ${summary.total || 0} machine${summary.total === 1 ? "" : "s"}`),
+    h("span", { class: "form-hint" }, bulkCountsText(summary)),
+  );
+  if (failed.length) {
+    const list = h("ul", { class: "bulk-failures" });
+    for (const item of failed) {
+      list.append(h("li", {}, `${item.name || item.agent_id}: ${item.message || "failed"}`));
     }
+    el.append(list);
   }
-  const total = agents.length;
-  const suffix = note ? ` ${note}` : "";
-  if (!succeeded) {
-    toast(`${label} failed for ${plural(total, "selected machine")}. ${short(failures[0] || "", 120)}`, "error");
-  } else if (failures.length) {
-    toast(`${label}: ${succeeded} of ${total} succeeded, ${failures.length} failed. ${short(failures[0], 120)}${suffix}`, "warn");
-  } else {
-    toast(`${label}: ${succeeded} of ${total} succeeded.${suffix}`);
+}
+
+async function runBulk(label, action, agents, args = {}, note = "") {
+  if (!agents.length) return { results: [], summary: { total: 0, queued: 0, sent: 0, updated: 0, failed: 0 } };
+  clearBulkResult();
+  try {
+    const result = await api("/api/agents/bulk", {
+      method: "POST",
+      body: { action, agent_ids: agents.map((agent) => agent.id), args },
+    });
+    renderBulkResult(label, result);
+    const summary = result.summary || {};
+    const suffix = note ? ` ${note}` : "";
+    if (summary.failed) {
+      toast(`${label}: ${summary.failed} failed. See the per-machine result summary.${suffix}`, "warn");
+    } else {
+      toast(`${label}: ${bulkCountsText(summary)}.${suffix}`);
+    }
+    return result;
+  } catch (error) {
+    const el = $("bulk-result");
+    if (el) {
+      el.hidden = false;
+      el.className = "bulk-result has-failures";
+      clear(el);
+      el.append(
+        h("strong", {}, `${label}: request failed`),
+        h("span", { class: "form-hint" }, error.message),
+      );
+    }
+    toast(`${label} failed: ${error.message}`, "error");
+    return { results: [], summary: { total: agents.length, queued: 0, sent: 0, updated: 0, failed: agents.length } };
   }
-  return { succeeded, failures, total };
 }
 
 async function bulkRefresh() {
   const agents = selectedAgents();
   if (!agents.length) return;
-  await runBulk("Telemetry refresh", agents, (agent) =>
-    api(`/api/agents/${agent.id}/commands`, { method: "POST", body: { kind: "refresh", args: {} } }),
-  );
+  await runBulk("Telemetry refresh", "refresh", agents);
   loadDashboard(true);
 }
 
@@ -1048,7 +1205,7 @@ async function bulkWake() {
     toast("No selected machines needed a wake packet.", "warn");
     return;
   }
-  await runBulk("Wake", offline, (agent) => api(`/api/agents/${agent.id}/wake`, { method: "POST", body: {} }));
+  await runBulk("Wake", "wake", offline);
 }
 
 async function bulkPower(action) {
@@ -1068,16 +1225,7 @@ async function bulkPower(action) {
     verb,
   );
   if (!confirmed) return;
-  const result = await runBulk(
-    verb,
-    allowed,
-    (agent) => api(`/api/agents/${agent.id}/commands`, { method: "POST", body: { kind: "power", args: { action, delay: 30 } } }),
-    note,
-  );
-  if (result.succeeded) {
-    state.selectedAgents.clear();
-    renderAgentGrid();
-  }
+  await runBulk(verb, action, allowed, {}, note);
   loadDashboard(true);
 }
 
@@ -1103,16 +1251,7 @@ async function bulkService(action) {
     `${verb} service`,
   );
   if (!confirmed) return;
-  await runBulk(
-    `${verb} ${name}`,
-    allowed,
-    (agent) =>
-      api(`/api/agents/${agent.id}/commands`, {
-        method: "POST",
-        body: { kind: "service", args: { action, name } },
-      }),
-    note,
-  );
+  await runBulk(`${verb} ${name}`, `service_${action}`, allowed, { name }, note);
   loadDashboard(true);
 }
 
@@ -1128,10 +1267,8 @@ async function bulkApplyProfile() {
     return;
   }
   const profile = state.profiles.find((item) => item.slug === slug);
-  const result = await runBulk(`Profile ${profile?.name || slug}`, selected, (agent) =>
-    api(`/api/agents/${agent.id}`, { method: "PATCH", body: { profile: slug } }),
-  );
-  if (result.succeeded) {
+  const result = await runBulk(`Profile ${profile?.name || slug}`, "profile_apply", selected, { profile: slug });
+  if (!result.summary?.failed) {
     await loadProfiles(true);
     loadDashboard(true);
   }
@@ -1145,6 +1282,7 @@ function agentCard(agent) {
     "article",
     {
       class: `agent-card${agent.online ? "" : " is-offline"}${stale.heartbeatStale || stale.inventoryStale ? " is-stale" : ""}`,
+      dataset: { agentId: agent.id },
       tabindex: "0",
       role: "button",
       "aria-label": `Open ${agent.name}`,
@@ -3793,24 +3931,34 @@ function loadFleetFilters() {
   }
 }
 
-function loadSavedViews() {
+function normalizeSavedView(view) {
+  const source = view && typeof view.filters === "object" && view.filters ? view.filters : view || {};
+  return {
+    id: typeof view?.id === "string" ? view.id : "",
+    name: typeof view?.name === "string" ? view.name.trim() : "",
+    status: FLEET_STATUS_VALUES.includes(source.status) ? source.status : "all",
+    profile: typeof source.profile === "string" ? source.profile : "",
+    tag: typeof source.tag === "string" ? source.tag : "",
+    search: typeof source.search === "string" ? source.search : "",
+  };
+}
+
+function readLocalSavedViews() {
   try {
     const raw = localStorage.getItem("rc.savedViews");
-    if (!raw) return;
+    if (!raw) return [];
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return;
-    state.savedViews = parsed
-      .filter((view) => view && typeof view.name === "string" && view.name.trim())
-      .map((view) => ({
-        name: view.name.trim(),
-        status: FLEET_STATUS_VALUES.includes(view.status) ? view.status : "all",
-        profile: typeof view.profile === "string" ? view.profile : "",
-        tag: typeof view.tag === "string" ? view.tag : "",
-        search: typeof view.search === "string" ? view.search : "",
-      }));
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map(normalizeSavedView)
+      .filter((view) => view.name);
   } catch (_error) {
-    // Ignore corrupt storage.
+    return [];
   }
+}
+
+function loadSavedViews() {
+  state.savedViews = readLocalSavedViews();
 }
 
 function persistSavedViews() {
@@ -3818,6 +3966,57 @@ function persistSavedViews() {
     localStorage.setItem("rc.savedViews", JSON.stringify(state.savedViews));
   } catch (_error) {
     // Storage may be unavailable in private contexts.
+  }
+}
+
+function clearLocalSavedViews() {
+  try {
+    localStorage.removeItem("rc.savedViews");
+  } catch (_error) {
+    // Storage may be unavailable in private contexts.
+  }
+}
+
+async function migrateLocalSavedViews() {
+  const local = readLocalSavedViews();
+  if (!local.length) return;
+  let complete = true;
+  const existing = new Set(state.savedViews.map((view) => view.name.toLowerCase()));
+  for (const view of local) {
+    if (existing.has(view.name.toLowerCase())) continue;
+    try {
+      const data = await api("/api/saved-views", {
+        method: "POST",
+        body: {
+          name: view.name,
+          filters: { status: view.status, profile: view.profile, tag: view.tag, search: view.search },
+        },
+      });
+      const created = normalizeSavedView(data.view || view);
+      state.savedViews.push(created);
+      existing.add(created.name.toLowerCase());
+    } catch (error) {
+      if (/already exists/i.test(error.message)) {
+        existing.add(view.name.toLowerCase());
+        continue;
+      }
+      complete = false;
+    }
+  }
+  state.savedViews.sort((a, b) => a.name.localeCompare(b.name));
+  if (complete) clearLocalSavedViews();
+}
+
+async function loadSavedViewsFromServer() {
+  try {
+    const data = await api("/api/saved-views");
+    state.savedViews = (data.views || []).map(normalizeSavedView).filter((view) => view.name);
+    await migrateLocalSavedViews();
+    renderSavedViews();
+  } catch (error) {
+    loadSavedViews();
+    renderSavedViews();
+    toast(`Saved views are unavailable from the server (${error.message}). Showing this browser's local copy.`, "warn");
   }
 }
 
@@ -3837,7 +4036,7 @@ function renderSavedViews(selected = "") {
   updateSavedViewControls();
 }
 
-function saveCurrentFleetView() {
+async function saveCurrentFleetView() {
   const answer = window.prompt("Name this saved view", "");
   if (answer === null) return;
   const name = answer.trim();
@@ -3852,12 +4051,34 @@ function saveCurrentFleetView() {
     tag: state.fleetFilters.tag,
     search: state.search,
   };
-  const index = state.savedViews.findIndex((item) => item.name === name);
-  if (index >= 0) state.savedViews[index] = view;
-  else state.savedViews.push(view);
-  persistSavedViews();
-  renderSavedViews(name);
-  toast(`Saved view "${name}".`);
+  const existing = state.savedViews.find((item) => item.name.toLowerCase() === name.toLowerCase());
+  try {
+    if (existing?.id) {
+      await api(`/api/saved-views/${encodeURIComponent(existing.id)}`, { method: "DELETE" });
+    }
+    const data = await api("/api/saved-views", {
+      method: "POST",
+      body: {
+        name,
+        filters: { status: view.status, profile: view.profile, tag: view.tag, search: view.search },
+      },
+    });
+    const saved = normalizeSavedView(data.view || view);
+    const index = state.savedViews.findIndex((item) => item.name.toLowerCase() === name.toLowerCase());
+    if (index >= 0) state.savedViews[index] = saved;
+    else state.savedViews.push(saved);
+    state.savedViews.sort((a, b) => a.name.localeCompare(b.name));
+    if (state.savedViews.every((item) => item.id)) clearLocalSavedViews();
+    renderSavedViews(saved.name);
+    toast(`Saved view "${saved.name}".`);
+  } catch (error) {
+    const index = state.savedViews.findIndex((item) => item.name.toLowerCase() === name.toLowerCase());
+    if (index >= 0) state.savedViews[index] = view;
+    else state.savedViews.push(view);
+    persistSavedViews();
+    renderSavedViews(name);
+    toast(`Could not save the view to the server: ${error.message}. It was kept in this browser and will sync later.`, "warn");
+  }
 }
 
 function applySavedView(name) {
@@ -3870,16 +4091,28 @@ function applySavedView(name) {
   state.search = view.search;
   $("search-input").value = view.search;
   saveFleetFilters();
+  resetFleetRenderLimit();
   renderAgentGrid();
   updateSavedViewControls();
 }
 
-function deleteSavedView() {
+async function deleteSavedView() {
   const select = $("saved-view-select");
   const name = select ? select.value : "";
   if (!name) return;
-  state.savedViews = state.savedViews.filter((view) => view.name !== name);
-  persistSavedViews();
+  const view = state.savedViews.find((item) => item.name === name);
+  if (!view) return;
+  if (view.id) {
+    try {
+      await api(`/api/saved-views/${encodeURIComponent(view.id)}`, { method: "DELETE" });
+    } catch (error) {
+      toast(`Could not delete the saved view: ${error.message}`, "error");
+      return;
+    }
+  }
+  state.savedViews = state.savedViews.filter((item) => item.name !== name);
+  if (state.savedViews.every((item) => item.id)) clearLocalSavedViews();
+  else persistSavedViews();
   renderSavedViews();
   toast(`Deleted saved view "${name}".`);
 }
@@ -4003,22 +4236,26 @@ function wireEvents() {
 
   $("search-input").addEventListener("input", (event) => {
     state.search = event.target.value;
+    resetFleetRenderLimit();
     renderAgentGrid();
   });
 
   $("filter-status").addEventListener("change", (event) => {
     state.fleetFilters.status = event.target.value;
     saveFleetFilters();
+    resetFleetRenderLimit();
     renderAgentGrid();
   });
   $("filter-profile").addEventListener("change", (event) => {
     state.fleetFilters.profile = event.target.value;
     saveFleetFilters();
+    resetFleetRenderLimit();
     renderAgentGrid();
   });
   $("filter-tag").addEventListener("change", (event) => {
     state.fleetFilters.tag = event.target.value;
     saveFleetFilters();
+    resetFleetRenderLimit();
     renderAgentGrid();
   });
   $("filter-clear").addEventListener("click", () => {
@@ -4026,7 +4263,12 @@ function wireEvents() {
     state.search = "";
     $("search-input").value = "";
     saveFleetFilters();
+    resetFleetRenderLimit();
     renderSavedViews();
+    renderAgentGrid();
+  });
+  $("fleet-more-button")?.addEventListener("click", () => {
+    state.fleetRenderLimit += FLEET_PAGE_SIZE;
     renderAgentGrid();
   });
   $("saved-view-select").addEventListener("change", (event) => {
@@ -4040,6 +4282,7 @@ function wireEvents() {
 
   $("bulk-clear").addEventListener("click", () => {
     state.selectedAgents.clear();
+    clearBulkResult();
     renderAgentGrid();
   });
   $("bulk-refresh").addEventListener("click", bulkRefresh);

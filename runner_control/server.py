@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
@@ -35,6 +36,7 @@ from .models import (
     AgentUpdateIn,
     AgentWakeIn,
     AlertSnoozeIn,
+    BulkActionIn,
     CommandIn,
     CommandOutputIn,
     CommandResultIn,
@@ -45,6 +47,7 @@ from .models import (
     PasswordChangeIn,
     ProfileTagIn,
     RemoteInstallIn,
+    SavedViewIn,
     StorePackageIn,
     UserCreateIn,
     UserUpdateIn,
@@ -97,6 +100,18 @@ COMMAND_HISTORY_MAX_LIMIT = 200
 COMMAND_OUTPUT_CHUNK_BYTES = 64 * 1024
 COMMAND_OUTPUT_REPLAY_LIMIT = 2000
 COMMAND_OUTPUT_POLL_LIMIT = 500
+BULK_ACTION_MAX_AGENTS = 200
+BULK_ACTIONS = {
+    "refresh",
+    "wake",
+    "reboot",
+    "shutdown",
+    "service_start",
+    "service_stop",
+    "service_restart",
+    "profile_apply",
+}
+SAVED_VIEW_STATUSES = {"all", "online", "offline", "alerts"}
 
 
 def _timestamp_filter(value: str, field_name: str) -> str | None:
@@ -852,6 +867,107 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         notify_dashboard()
         return command_to_dict(row)
 
+    def resolve_agent_profile(conn: sqlite3.Connection, value: str) -> sqlite3.Row:
+        profile_row = conn.execute(
+            "SELECT * FROM agent_profiles WHERE id = ? OR slug = ? COLLATE NOCASE",
+            (value, value),
+        ).fetchone()
+        if profile_row is None:
+            raise HTTPException(status_code=400, detail="Unknown agent profile.")
+        return profile_row
+
+    def apply_agent_profile(
+        agent_id: str,
+        profile_value: str,
+        user: dict[str, Any],
+        request: Request,
+        database: Database,
+        config: Settings,
+        *,
+        extra_detail: dict[str, Any] | None = None,
+    ) -> sqlite3.Row:
+        with database.transaction() as conn:
+            row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Agent not found.")
+            previous_profile_id = row["profile_id"]
+            profile_row = resolve_agent_profile(conn, profile_value)
+            conn.execute(
+                "UPDATE agents SET profile_id = ? WHERE id = ?",
+                (profile_row["id"], agent_id),
+            )
+            database.audit(
+                actor=user["username"],
+                action="agent.updated",
+                target=agent_id,
+                detail={
+                    "name": row["name"],
+                    "profile_id": profile_row["id"],
+                    **(extra_detail or {}),
+                },
+                ip=client_ip(request, config.trust_proxy),
+                conn=conn,
+            )
+            updated = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        if previous_profile_id != profile_row["id"]:
+            _record_agent_events(
+                database,
+                [
+                    {
+                        "agent_id": agent_id,
+                        "kind": "profile",
+                        "severity": "info",
+                        "title": "Agent profile changed",
+                        "detail": {
+                            "from": previous_profile_id,
+                            "to": profile_row["id"],
+                            "actor": user["username"],
+                        },
+                    }
+                ],
+            )
+        return updated
+
+    def send_agent_wake(
+        agent_id: str,
+        payload: AgentWakeIn,
+        user: dict[str, Any],
+        request: Request,
+        database: Database,
+        config: Settings,
+        *,
+        extra_detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        with database.connection() as conn:
+            row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Agent not found.")
+        if not row["mac"]:
+            raise HTTPException(status_code=400, detail="Agent has not reported a MAC address.")
+        try:
+            mac = normalize_mac(row["mac"])
+            broadcast = _validate_broadcast(payload.broadcast)
+            packets = send_magic_packet(mac, broadcast, payload.port, payload.packets)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except OSError as exc:
+            logger.warning("WoL send failed: %s", exc)
+            raise HTTPException(status_code=502, detail="Could not send the wake packet.")
+        database.audit(
+            actor=user["username"],
+            action="wol.sent",
+            target=agent_id,
+            detail={
+                "mac": mac,
+                "broadcast": broadcast,
+                "port": payload.port,
+                "packets": packets,
+                **(extra_detail or {}),
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return {"sent": packets, "mac": mac, "broadcast": broadcast, "port": payload.port}
+
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
         index_file = settings.static_dir / "index.html"
@@ -1038,6 +1154,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "server_time": utcnow_iso(),
             "permissions": _permissions(user),
         }
+
+    @app.get("/api/saved-views")
+    def list_saved_views(
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        rows = database.list_saved_views(int(user["id"]))
+        return {"views": [_saved_view_to_dict(row) for row in rows]}
+
+    @app.post("/api/saved-views")
+    def create_saved_view(
+        payload: SavedViewIn,
+        request: Request,
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Saved view needs a name.")
+        filters = _normalize_saved_view_filters(payload.filters)
+        try:
+            row = database.create_saved_view(int(user["id"]), name, filters)
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=409, detail="A saved view with that name already exists.")
+        database.audit(
+            actor=user["username"],
+            action="saved_view.created",
+            target=row["id"],
+            detail={"name": name, "filters": filters},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return {"view": _saved_view_to_dict(row)}
+
+    @app.delete("/api/saved-views/{view_id}")
+    def delete_saved_view(
+        view_id: str,
+        request: Request,
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> Response:
+        row = database.get_saved_view(view_id, int(user["id"]))
+        if row is None:
+            raise HTTPException(status_code=404, detail="Saved view not found.")
+        if not database.delete_saved_view(view_id, int(user["id"])):
+            raise HTTPException(status_code=404, detail="Saved view not found.")
+        database.audit(
+            actor=user["username"],
+            action="saved_view.deleted",
+            target=view_id,
+            detail={"name": row["name"]},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return Response(status_code=204)
 
     @app.post("/api/me/password")
     def change_password(
@@ -1318,6 +1489,188 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    @app.post("/api/agents/bulk")
+    def bulk_agents(
+        payload: BulkActionIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        args = payload.args if isinstance(payload.args, dict) else {}
+        action = payload.action
+        if action == "refresh_telemetry":
+            action = "refresh"
+        elif action == "profile":
+            action = "profile_apply"
+        elif action in {"service", "power"}:
+            requested = str(args.get("action", "")).lower()
+            if action == "service" and requested in {"start", "stop", "restart"}:
+                action = f"service_{requested}"
+            elif action == "power" and requested in {"reboot", "shutdown"}:
+                action = requested
+            else:
+                raise HTTPException(status_code=400, detail=f"Invalid {payload.action} action arguments.")
+        if action not in BULK_ACTIONS:
+            raise HTTPException(status_code=400, detail="Unsupported bulk action.")
+        if action == "profile_apply" and not role_at_least(user, "admin"):
+            raise HTTPException(status_code=403, detail="Administrator access required for profile apply.")
+        agent_ids = list(dict.fromkeys(str(item).strip() for item in payload.agent_ids if str(item).strip()))
+        if not agent_ids:
+            raise HTTPException(status_code=400, detail="At least one agent_id is required.")
+        if len(agent_ids) > BULK_ACTION_MAX_AGENTS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"At most {BULK_ACTION_MAX_AGENTS} agents may be targeted per bulk request.",
+            )
+        command_kind: str | None = None
+        command_args: dict[str, Any] = {}
+        wake_payload = AgentWakeIn()
+        profile_row: sqlite3.Row | None = None
+        try:
+            if action == "refresh":
+                command_kind = "refresh"
+                command_args = validate_command_args("refresh", {})
+            elif action in {"reboot", "shutdown"}:
+                command_kind = "power"
+                command_args = validate_command_args(
+                    "power",
+                    {"action": action, "delay": args.get("delay", 30)},
+                )
+            elif action.startswith("service_"):
+                command_kind = "service"
+                command_args = validate_command_args(
+                    "service",
+                    {"action": action.split("_", 1)[1], "name": args.get("name", "")},
+                )
+            elif action == "wake":
+                wake_payload = AgentWakeIn(
+                    broadcast=str(args.get("broadcast", "255.255.255.255")),
+                    port=int(args.get("port", 9)),
+                    packets=int(args.get("packets", 3)),
+                )
+            elif action == "profile_apply":
+                profile_value = str(args.get("profile", "")).strip()
+                if not profile_value:
+                    raise ValueError("profile is required for profile apply")
+                profile_row = database.get_profile_by_id(profile_value) or database.get_profile_by_slug(profile_value)
+                if profile_row is None:
+                    raise ValueError("unknown agent profile")
+        except (TypeError, ValueError, ValidationError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        bulk_id = "blk_" + secrets.token_hex(6)
+        results: list[dict[str, Any]] = []
+        counts = {"queued": 0, "sent": 0, "updated": 0, "failed": 0}
+        for agent_id in agent_ids:
+            with database.connection() as conn:
+                name_row = conn.execute("SELECT name FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            agent_name = name_row["name"] if name_row is not None else agent_id
+            try:
+                if action == "profile_apply":
+                    assert profile_row is not None
+                    updated = apply_agent_profile(
+                        agent_id,
+                        profile_row["slug"],
+                        user,
+                        request,
+                        database,
+                        config,
+                        extra_detail={"bulk_id": bulk_id, "bulk_action": action},
+                    )
+                    agent_name = updated["name"]
+                    status = "updated"
+                    message = f"Profile set to {profile_row['name']}."
+                elif action == "wake":
+                    result = send_agent_wake(
+                        agent_id,
+                        wake_payload,
+                        user,
+                        request,
+                        database,
+                        config,
+                        extra_detail={"bulk_id": bulk_id, "bulk_action": action},
+                    )
+                    status = "sent"
+                    message = f"Wake packet sent ({result['sent']} packets)."
+                else:
+                    assert command_kind is not None
+                    command = queue_command(
+                        agent_id,
+                        command_kind,
+                        command_args,
+                        user,
+                        request,
+                        database,
+                        config,
+                        extra_detail={"bulk_id": bulk_id, "bulk_action": action},
+                    )
+                    status = "queued"
+                    if command_kind == "refresh":
+                        message = "Telemetry refresh queued."
+                    elif command_kind == "power":
+                        message = f"{action.capitalize()} queued with a {command_args['delay']}s delay."
+                    else:
+                        message = f"Service {command_args['action']} queued for {command_args['name']}."
+                    results.append(
+                        {
+                            "agent_id": agent_id,
+                            "name": agent_name,
+                            "status": status,
+                            "message": message,
+                            "command_id": command["id"],
+                        }
+                    )
+                    counts[status] += 1
+                    continue
+                results.append(
+                    {
+                        "agent_id": agent_id,
+                        "name": agent_name,
+                        "status": status,
+                        "message": message,
+                    }
+                )
+                counts[status] += 1
+            except HTTPException as exc:
+                results.append(
+                    {
+                        "agent_id": agent_id,
+                        "name": agent_name,
+                        "status": "failed",
+                        "message": str(exc.detail),
+                    }
+                )
+                counts["failed"] += 1
+            except Exception:  # noqa: BLE001 - one agent must not abort the batch
+                logger.exception("Bulk action %s failed for %s", action, agent_id)
+                results.append(
+                    {
+                        "agent_id": agent_id,
+                        "name": agent_name,
+                        "status": "failed",
+                        "message": "Unexpected error while applying the action.",
+                    }
+                )
+                counts["failed"] += 1
+
+        summary = {"total": len(agent_ids), **counts}
+        database.audit(
+            actor=user["username"],
+            action="agents.bulk",
+            target=f"bulk:{bulk_id}",
+            detail={
+                "action": action,
+                "bulk_id": bulk_id,
+                "agent_ids": agent_ids,
+                "args": command_args or (wake_payload.model_dump() if action == "wake" else args),
+                "summary": summary,
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        notify_dashboard()
+        return {"action": action, "bulk_id": bulk_id, "results": results, "summary": summary}
+
     @app.get("/api/agents/{agent_id}")
     def agent_detail(
         agent_id: str,
@@ -1580,12 +1933,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ][:64]
             profile_id = row["profile_id"]
             if payload.profile is not None:
-                profile_row = conn.execute(
-                    "SELECT * FROM agent_profiles WHERE id = ? OR slug = ? COLLATE NOCASE",
-                    (payload.profile, payload.profile),
-                ).fetchone()
-                if profile_row is None:
-                    raise HTTPException(status_code=400, detail="Unknown agent profile.")
+                profile_row = resolve_agent_profile(conn, payload.profile)
                 profile_id = profile_row["id"]
             elif payload.tags is not None:
                 tag_profile_id = database.profile_for_tags(tags)
@@ -1869,29 +2217,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database: Database = Depends(get_db),
         config: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
-        with database.connection() as conn:
-            row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Agent not found.")
-        if not row["mac"]:
-            raise HTTPException(status_code=400, detail="Agent has not reported a MAC address.")
-        try:
-            mac = normalize_mac(row["mac"])
-            broadcast = _validate_broadcast(payload.broadcast)
-            packets = send_magic_packet(mac, broadcast, payload.port, payload.packets)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        except OSError as exc:
-            logger.warning("WoL send failed: %s", exc)
-            raise HTTPException(status_code=502, detail="Could not send the wake packet.")
-        database.audit(
-            actor=user["username"],
-            action="wol.sent",
-            target=agent_id,
-            detail={"mac": mac, "broadcast": broadcast, "port": payload.port, "packets": packets},
-            ip=client_ip(request, config.trust_proxy),
-        )
-        return {"sent": packets, "mac": mac, "broadcast": broadcast, "port": payload.port}
+        return send_agent_wake(agent_id, payload, user, request, database, config)
 
     @app.get("/api/wake-targets")
     def list_wake_targets(
@@ -3720,6 +4046,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     return app
 
+
+
+def _saved_view_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    filters = loads(row["filters"], {})
+    if not isinstance(filters, dict):
+        filters = {}
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "filters": filters,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _normalize_saved_view_filters(filters: dict[str, Any]) -> dict[str, str]:
+    if not isinstance(filters, dict):
+        raise HTTPException(status_code=400, detail="filters must be a JSON object.")
+    allowed = {"status", "profile", "tag", "search"}
+    unknown = sorted(set(filters) - allowed)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported saved-view filter(s): {', '.join(unknown)}.",
+        )
+    status = str(filters.get("status") or "all")
+    if status not in SAVED_VIEW_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail="status must be all, online, offline, or alerts.",
+        )
+    normalized = {"status": status}
+    for key, limit in (("profile", 64), ("tag", 64), ("search", 255)):
+        value = filters.get(key, "")
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            raise HTTPException(status_code=400, detail=f"{key} must be a string.")
+        normalized[key] = value.strip()[:limit]
+    return normalized
 
 
 def _latest_agent_release(database: Database) -> Any:

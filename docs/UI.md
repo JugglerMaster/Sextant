@@ -1,12 +1,14 @@
 # UI status and refinements
 
-The dashboard is a vanilla HTML/CSS/JS single page backed by the FastAPI API. It is optimized for a small fleet (10–20 machines), not a dense enterprise console.
+The dashboard is a vanilla HTML/CSS/JS single page backed by the FastAPI API. The fleet grid is incremental and bounded so it stays responsive with hundreds of agents without rebuilding the whole DOM on every update.
 
 ---
 
 ## Current shape
 
-- **Fleet** — stats, search, status/profile/tag filters, agent cards with CPU/memory/disk/GPU/uptime, **heartbeat**, and **inventory updated**, click/Enter to open a drawer.
+- **Fleet** — stats, search, status/profile/tag filters, keyed incremental agent cards with CPU/memory/disk/GPU/uptime, **heartbeat**, and **inventory updated**, click/Enter to open a drawer. The first pass renders 60 cards with a **Show more** control; offscreen cards use `content-visibility`.
+- **Saved views** — per-user server-side views (`GET`/`POST`/`DELETE /api/saved-views`) with a localStorage import/fallback only.
+- **Bulk actions** — one `POST /api/agents/bulk` request with a per-agent queued/sent/updated/failed summary, including failed machine names and messages.
 - **Device drawer** — Overview (with 24h sparklines), Disks, GPU, Services, Startup, Packages, Remote, History, Trends.
 - **Packages** — inventory with interactive table, **desired-state rule editor** (admin), drift summary, Sync now.
 - **Profiles** — create/edit/reset/delete profiles, modules, action gates, cadences, tag assignments.
@@ -61,12 +63,12 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 - Services search, status filter, row count, and bounded show-more paging.
 - Users search (username, display name, email, role, source) with a visible row count.
 - Fleet filters: status, profile, and tag (persisted in local storage).
-- Named fleet saved views stored in local storage.
+- Named fleet saved views stored per user on the server; legacy localStorage views are migrated once without duplicating names and remain a fallback when the API is unreachable.
 - 24-hour CPU/memory/disk/GPU sparklines in the drawer.
 - Drawer focus trap, focus return to the trigger, and sortable-header `aria-sort` markers.
 - Cadence-aware stale badges for heartbeat and inventory age.
 - Alert center with acknowledge, snooze, and clear actions for every current health alert.
-- Bulk selection with refresh-telemetry, wake, reboot, shutdown, service, and profile actions.
+- Bulk selection with refresh-telemetry, wake, reboot, shutdown, service, and profile actions, sent as one batch request and reported per agent.
 - CSV export for the fleet, per-agent package inventory, and filtered command history.
 - Trends tab with gap-aware 24h/7d detail charts, a persistent state-change timeline, and a What changed summary.
 - Light/dark theme toggle and a Ctrl/Cmd+K command palette.
@@ -94,8 +96,9 @@ Priority: full pagination for Services and Users next.
 
 ### 3. Fleet UX
 
-- Status/profile/tag filters, persistence, and named saved views are implemented.
-- Bulk select with refresh-telemetry, wake, reboot, shutdown, service, and profile actions is implemented.
+- Status/profile/tag filters, persistence, and per-user server-side saved views are implemented.
+- Agent cards render incrementally by keyed agent id, reuse unchanged nodes, preserve selection/focus through SSE updates, and are bounded with Show more.
+- Bulk select with refresh-telemetry, wake, reboot, shutdown, service, and profile actions is implemented through one batch request; results list counts and failed agent names/messages. Selection is preserved until the user clears it.
 - Alert center lists current alerts with acknowledge/snooze/clear and links to the machine.
 - Remaining: profile badges.
 
@@ -116,7 +119,7 @@ Priority: full pagination for Services and Users next.
 
 - The dashboard streams `GET /api/events` over `EventSource`. The server sends an immediate snapshot, then a new dashboard event only when dashboard state changes (heartbeat, command, alert, agent/profile update), plus a roughly 10-second safety refresh for time-derived fields such as online/offline and server time. Clients at the same revision share one server-side build. If the stream fails, the UI falls back to the previous 10-second dashboard polling. If the server sends an `auth` event because the session was revoked, expired, disabled, or its version changed, the UI closes the stream without reconnecting and shows the login view. The stream closes while the document is hidden and reconnects on visibility.
 - Command waits use `GET /api/commands/{id}/events` when available, with the existing poll as fallback. The terminal appends `output` events live, styling stdout and stderr separately. On reconnect the server replays stored chunks (bounded); the UI de-duplicates by `(stream, seq)`. When the terminal `command` event arrives, the canonical final stdout/stderr is rendered without repeating text already streamed. Chunk delivery is best-effort and the final result remains authoritative.
-- Remaining: virtualization for very large tables (100+ agents).
+- The fleet grid grows in bounded increments (60 cards initially, then Show more) and uses `content-visibility` for offscreen cards. Remaining: full row virtualization for very large tables.
 
 ---
 
@@ -128,11 +131,11 @@ Priority: full pagination for Services and Users next.
 | Package inventory + rule editor | Implemented |
 | Freshness labels in Packages | Implemented |
 | Freshness on cards/drawer | Implemented with cadence + stale badges |
-| Fleet status/profile/tag filters | Implemented and persisted; named saved views in local storage |
+| Fleet status/profile/tag filters | Implemented and persisted; named saved views stored per user on the server (localStorage migration/fallback) |
 | Table sort/pagination | Implemented for Packages, Startup, Audit, and History; Services bounded show-more; Users search/count |
 | Charts/sparklines | 24h sparklines plus gap-aware 24h/7d detail charts, persistent event timeline, and What changed summary |
 | Accessibility pass | Implemented: focus trap/return, aria-sort, live regions, theme toggle, command palette; formal contrast audit pending |
 | Alert center | Implemented with acknowledge/snooze/clear |
-| Bulk actions | Implemented: refresh, wake, reboot, shutdown, service, profile |
-| Saved views/export | CSV export (fleet, packages, filtered command history) and named fleet views stored in local storage |
+| Bulk actions | Implemented through one batch request: refresh, wake, reboot, shutdown, service, profile, with per-agent results |
+| Saved views/export | CSV export (fleet, packages, filtered command history) and per-user server-side named fleet views |
 | SSE/WebSocket | Change-driven dashboard SSE with shared snapshot cache, periodic safety refresh, session revalidation, and polling fallback; command status/result SSE with live stdout/stderr chunks, replay, and poll fallback |

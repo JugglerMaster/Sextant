@@ -103,6 +103,47 @@ The path agent ID and token must belong together. Enrollment uses a one-time enr
 }
 ```
 
+## Saved views
+
+Saved fleet views are stored per user on the server. Any signed-in user manages
+only their own views; names are unique per user (case-insensitive).
+
+| Method | Path | Role | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/saved-views` | any | List your saved views |
+| `POST` | `/api/saved-views` | any | Create a view (`409` if the name already exists) |
+| `DELETE` | `/api/saved-views/{id}` | owner | Delete one of your views (`404` for another user's id) |
+
+Create body:
+
+```json
+{
+  "name": "GPU hosts",
+  "filters": {"status": "online", "profile": "prof_server", "tag": "gpu", "search": "studio"}
+}
+```
+
+`filters` must be a JSON object. Allowed keys are `status` (`all`, `online`,
+`offline`, `alerts`), `profile`, `tag`, and `search`. Unknown keys, non-string
+values, or an invalid status return `400`. The filters are normalized and
+returned with the view:
+
+```json
+{
+  "view": {
+    "id": "sv_123",
+    "name": "GPU hosts",
+    "filters": {"status": "online", "profile": "prof_server", "tag": "gpu", "search": "studio"},
+    "created_at": "2026-11-06T08:00:00Z",
+    "updated_at": "2026-11-06T08:00:00Z"
+  }
+}
+```
+
+The browser imports legacy `rc.savedViews` localStorage entries once after
+sign-in, skipping names that already exist on the server. localStorage is not
+the source of truth for saved views.
+
 ## Fleet endpoints
 
 | Method | Path | Role | Purpose |
@@ -120,6 +161,7 @@ The path agent ID and token must belong together. Enrollment uses a one-time enr
 | `POST` | `/api/commands/{id}/cancel` | operator | Cancel a still-queued command |
 | `POST` | `/api/commands/{id}/retry` | operator | Retry a failed/cancelled command as a new row |
 | `POST` | `/api/agents/{id}/wake` | operator | Send WoL to the agent's MAC |
+| `POST` | `/api/agents/bulk` | operator/admin | Batch refresh, wake, power, service, or profile action |
 | `POST` | `/api/agents/{id}/rotate-token` | admin | Rotate agent bearer token |
 | `DELETE` | `/api/agents/{id}` | admin | Delete agent and command history |
 
@@ -252,6 +294,53 @@ Response is the queued command. It stays `queued` until the agent's next heartbe
 ```
 
 Poll `GET /api/commands/{id}` until `status` is terminal. Results are idempotent.
+
+### Batch fleet actions
+
+```http
+POST /api/agents/bulk
+X-CSRF-Token: …
+Content-Type: application/json
+
+{
+  "action": "service_restart",
+  "agent_ids": ["agt_123", "agt_456"],
+  "args": {"name": "nginx.service"}
+}
+```
+
+`action` is one of `refresh`, `wake`, `reboot`, `shutdown`, `service_start`,
+`service_stop`, `service_restart`, or `profile_apply`. Generic aliases also
+work: `service` with `args.action` (`start`/`stop`/`restart`), `power` with
+`args.action` (`reboot`/`shutdown`), `profile`, and `refresh_telemetry`.
+`agent_ids` is required
+and capped at 200 unique ids. `args` are the same arguments accepted by the
+single-agent endpoints: `name` for service actions, optional `delay` for power
+actions, optional `broadcast`/`port`/`packets` for wake, and `profile` for
+profile apply.
+
+Refresh, wake, power, and service actions require operator access.
+`profile_apply` requires admin. The route reuses the single-agent command queue,
+policy checks, WoL validation, and profile validation. One bad agent does not
+abort the rest; each result is returned independently:
+
+```json
+{
+  "action": "service_restart",
+  "bulk_id": "blk_123",
+  "results": [
+    {"agent_id": "agt_123", "name": "web-01", "status": "queued", "message": "Service restart queued for nginx.service.", "command_id": "cmd_123"},
+    {"agent_id": "agt_456", "name": "web-02", "status": "failed", "message": "Agent is offline and the server policy rejects new commands."}
+  ],
+  "summary": {"total": 2, "queued": 1, "sent": 0, "updated": 0, "failed": 1}
+}
+```
+
+Statuses are `queued` (command accepted), `sent` (wake packet sent), `updated`
+(profile applied), and `failed`. Per-agent failures still return `200`; invalid
+actions, arguments, or an oversized id list return `400`/`422`. The batch
+request is audited as `agents.bulk`, and each individual command, wake, or
+profile update keeps its own audit entry with the `bulk_id`.
 
 Cancel and retry:
 
@@ -781,8 +870,8 @@ Content-Type: application/json
 | `400` | Validation or business rule failure |
 | `401` | Missing/expired session, bad login, bad agent/enrollment token |
 | `403` | Role or CSRF failure |
-| `404` | Unknown agent/command/target/user |
-| `409` | Duplicate username, result/output for an undispatched or finished command, output sequence conflict, queue full, offline-policy rejection, cancel after dispatch, revoking an already-used enrollment token |
+| `404` | Unknown agent/command/target/user/saved view (or a view owned by another user) |
+| `409` | Duplicate username or saved-view name, result/output for an undispatched or finished command, output sequence conflict, queue full, offline-policy rejection, cancel after dispatch, revoking an already-used enrollment token |
 | `413` | Body over `RC_MAX_BODY_BYTES`, output chunk over 64 KiB, or per-command output over `RC_COMMAND_OUTPUT_LIMIT` |
 | `422` | Pydantic shape/field validation |
 | `429` | Login rate limit |

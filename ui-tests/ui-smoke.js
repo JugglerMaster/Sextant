@@ -290,6 +290,8 @@ const responses = {
   },
 };
 
+const savedViews = [];
+
 window.fetch = async (path, options = {}) => {
   const url = String(path);
   const key = url.split("?")[0];
@@ -305,7 +307,59 @@ window.fetch = async (path, options = {}) => {
   window.__requests = window.__requests || [];
   window.__requests.push({ path: key, url, method, body });
   let response;
-  if (method === "GET" && key === "/api/agents/agt_demo/commands") {
+  if (method === "POST" && key === "/api/agents/bulk") {
+    const ids = Array.isArray(body?.agent_ids) ? body.agent_ids : [];
+    const action = body?.action || "refresh";
+    const status = action === "wake" ? "sent" : action === "profile_apply" ? "updated" : "queued";
+    const results = ids.map((id) => ({
+      agent_id: id,
+      name: id === "agt_demo" ? "Studio PC" : id,
+      status,
+      message: `${action} applied`,
+      ...(status === "queued" ? { command_id: "cmd_bulk" } : {}),
+    }));
+    response = {
+      status: 200,
+      body: {
+        action,
+        bulk_id: "blk_demo",
+        results,
+        summary: {
+          total: ids.length,
+          queued: status === "queued" ? ids.length : 0,
+          sent: status === "sent" ? ids.length : 0,
+          updated: status === "updated" ? ids.length : 0,
+          failed: 0,
+        },
+      },
+    };
+  } else if (method === "GET" && key === "/api/saved-views") {
+    response = { status: 200, body: { views: savedViews.map((view) => ({ ...view, filters: { ...view.filters } })) } };
+  } else if (method === "POST" && key === "/api/saved-views") {
+    const name = String(body?.name || "").trim();
+    if (savedViews.some((view) => view.name.toLowerCase() === name.toLowerCase())) {
+      response = { status: 409, body: { detail: "A saved view with that name already exists." } };
+    } else {
+      const view = {
+        id: `sv_${savedViews.length + 1}`,
+        name,
+        filters: body?.filters || {},
+        created_at: "2026-11-06T08:00:00Z",
+        updated_at: "2026-11-06T08:00:00Z",
+      };
+      savedViews.push(view);
+      response = { status: 200, body: { view } };
+    }
+  } else if (method === "DELETE" && key.startsWith("/api/saved-views/")) {
+    const id = key.slice("/api/saved-views/".length);
+    const index = savedViews.findIndex((view) => view.id === id);
+    if (index < 0) {
+      response = { status: 404, body: { detail: "Saved view not found." } };
+    } else {
+      savedViews.splice(index, 1);
+      response = { status: 204, body: null };
+    }
+  } else if (method === "GET" && key === "/api/agents/agt_demo/commands") {
     const params = new URLSearchParams(url.split("?")[1] || "");
     const status = params.get("status") || "all";
     const query = (params.get("q") || "").toLowerCase();
@@ -336,6 +390,10 @@ window.fetch = async (path, options = {}) => {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 (async () => {
+  window.localStorage.setItem(
+    "rc.savedViews",
+    JSON.stringify([{ name: "Migrated fleet", status: "online", profile: "", tag: "", search: "studio" }]),
+  );
   window.eval(source);
   await sleep(30);
 
@@ -348,10 +406,20 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   window.document.getElementById("login-form").dispatchEvent(
     new window.Event("submit", { bubbles: true, cancelable: true }),
   );
-  await sleep(80);
+  await sleep(140);
 
   if (window.document.getElementById("app-view").hidden) throw new Error("app shell should be visible after login");
   if (window.document.getElementById("stat-total").textContent !== "1") throw new Error("stats did not render");
+  const migrationRequest = window.__requests.find(
+    (request) => request.method === "POST" && request.path === "/api/saved-views" && request.body?.name === "Migrated fleet",
+  );
+  if (!migrationRequest) throw new Error("localStorage saved view was not migrated to the server");
+  if (savedViews.filter((view) => view.name === "Migrated fleet").length !== 1) {
+    throw new Error("localStorage saved view migration duplicated a name");
+  }
+  if (window.localStorage.getItem("rc.savedViews")) {
+    throw new Error("migrated localStorage saved views should be cleared");
+  }
   const liveSource = window.__eventSources[0];
   if (!liveSource || liveSource.url !== "/api/events") {
     throw new Error("dashboard did not open the SSE stream");
@@ -370,6 +438,31 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (window.document.getElementById("stat-total").textContent !== "1") {
     throw new Error("SSE dashboard event did not restore the stats");
   }
+  const keyedCard = window.document.querySelector("#agent-grid .agent-card");
+  const keyedSelector = keyedCard.querySelector(".agent-select");
+  keyedSelector.checked = false;
+  keyedSelector.click();
+  keyedSelector.focus();
+  liveSource.emit("dashboard", dashboardBody);
+  await sleep(30);
+  if (window.document.querySelector("#agent-grid .agent-card") !== keyedCard) {
+    throw new Error("keyed rendering rebuilt an unchanged agent card");
+  }
+  if (!keyedSelector.checked) throw new Error("keyed rendering lost the selected checkbox state");
+  if (window.document.activeElement !== keyedSelector) throw new Error("keyed rendering lost keyboard focus");
+  liveSource.emit("dashboard", {
+    ...dashboardBody,
+    agents: [{ ...agent, cpu_pct: 55.0 }],
+  });
+  await sleep(30);
+  const updatedCard = window.document.querySelector("#agent-grid .agent-card");
+  const updatedSelector = updatedCard.querySelector(".agent-select");
+  if (!updatedSelector.checked) throw new Error("updated agent card lost the selected checkbox state");
+  if (window.document.activeElement !== updatedSelector) throw new Error("updated agent card lost keyboard focus");
+  updatedSelector.click();
+  await sleep(10);
+  liveSource.emit("dashboard", dashboardBody);
+  await sleep(30);
   const fleetStatus = window.document.getElementById("fleet-status");
   if (!fleetStatus || fleetStatus.getAttribute("aria-live") !== "polite" || fleetStatus.getAttribute("role") !== "status") {
     throw new Error("fleet status live region missing");
@@ -427,21 +520,27 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   rebootButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await closeConfirm("Reboot 1 machine?");
   const powerRequest = window.__requests.find(
-    (request) => request.method === "POST" && request.path === "/api/agents/agt_demo/commands" && request.body?.kind === "power",
+    (request) => request.method === "POST" && request.path === "/api/agents/bulk" && request.body?.action === "reboot",
   );
-  if (!powerRequest || powerRequest.body.args.action !== "reboot" || powerRequest.body.args.delay !== 30) {
-    throw new Error("bulk reboot command was not queued");
+  if (!powerRequest || !powerRequest.body.agent_ids.includes("agt_demo")) {
+    throw new Error("bulk reboot was not sent through the batch endpoint");
   }
-  if (!window.document.getElementById("toast-region").textContent.includes("Reboot: 1 of 1 succeeded")) {
-    throw new Error("bulk reboot result was not reported");
+  if (
+    window.__requests.some(
+      (request) => request.method === "POST" && request.path === "/api/agents/agt_demo/commands" && request.body?.kind === "power",
+    )
+  ) {
+    throw new Error("bulk reboot still made a per-agent request");
   }
-  if (window.document.getElementById("bulk-count").textContent !== "0 selected · select machines to enable bulk actions") {
-    throw new Error("selection should clear after a bulk power action");
+  const bootResult = window.document.getElementById("bulk-result");
+  if (!bootResult.textContent.includes("Reboot: 1 machine") || !bootResult.textContent.includes("1 queued")) {
+    throw new Error(`bulk reboot result summary is missing: ${bootResult.textContent}`);
   }
-  if (!rebootButton.disabled) throw new Error("bulk actions should disable after clearing the selection");
+  if (window.document.getElementById("bulk-count").textContent !== "1 selected") {
+    throw new Error("bulk selection should be preserved after a power action");
+  }
+  if (rebootButton.disabled) throw new Error("bulk actions should stay enabled after a power action");
 
-  window.document.querySelector(".agent-select").click();
-  await sleep(10);
   const serviceName = window.document.getElementById("bulk-service-name");
   const serviceRestart = window.document.getElementById("bulk-service-restart");
   if (!serviceName || !serviceRestart) throw new Error("bulk service controls missing");
@@ -453,13 +552,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   serviceRestart.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await closeConfirm("Restart Spooler on 1 machine?");
   const serviceRequest = window.__requests.find(
-    (request) => request.method === "POST" && request.path === "/api/agents/agt_demo/commands" && request.body?.kind === "service",
+    (request) => request.method === "POST" && request.path === "/api/agents/bulk" && request.body?.action === "service_restart",
   );
-  if (!serviceRequest || serviceRequest.body.args.action !== "restart" || serviceRequest.body.args.name !== "Spooler") {
-    throw new Error("bulk service command was not queued");
+  if (!serviceRequest || serviceRequest.body.args.name !== "Spooler") {
+    throw new Error("bulk service was not sent through the batch endpoint");
   }
-  if (!window.document.getElementById("toast-region").textContent.includes("Restart Spooler: 1 of 1 succeeded")) {
-    throw new Error("bulk service result was not reported");
+  if (!window.document.getElementById("bulk-result").textContent.includes("Restart Spooler: 1 machine")) {
+    throw new Error("bulk service result summary was not reported");
   }
 
   const bulkProfile = window.document.getElementById("bulk-profile");
@@ -473,13 +572,34 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   applyProfile.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(60);
   const profileRequest = window.__requests.find(
-    (request) => request.method === "PATCH" && request.path === "/api/agents/agt_demo",
+    (request) => request.method === "POST" && request.path === "/api/agents/bulk" && request.body?.action === "profile_apply",
   );
-  if (!profileRequest || profileRequest.body?.profile !== "server") {
-    throw new Error("bulk profile patch was not sent");
+  if (!profileRequest || profileRequest.body.args?.profile !== "server") {
+    throw new Error("bulk profile apply was not sent through the batch endpoint");
   }
-  if (!window.document.getElementById("toast-region").textContent.includes("Profile Server: 1 of 1 succeeded")) {
-    throw new Error("bulk profile result was not reported");
+  if (
+    window.__requests.some((request) => request.method === "PATCH" && request.path === "/api/agents/agt_demo")
+  ) {
+    throw new Error("bulk profile apply still patched agents one at a time");
+  }
+  const profileResult = window.document.getElementById("bulk-result");
+  if (!profileResult.textContent.includes("Profile Server: 1 machine") || !profileResult.textContent.includes("1 updated")) {
+    throw new Error(`bulk profile result summary was not reported: ${profileResult.textContent}`);
+  }
+  if (window.document.getElementById("bulk-count").textContent !== "1 selected") {
+    throw new Error("bulk selection should be preserved after profile apply");
+  }
+
+  window.renderBulkResult("Probe", {
+    summary: { total: 2, queued: 1, sent: 0, updated: 0, failed: 1 },
+    results: [
+      { agent_id: "agt_demo", name: "Studio PC", status: "queued", message: "ok" },
+      { agent_id: "agt_bad", name: "Broken PC", status: "failed", message: "Agent is offline" },
+    ],
+  });
+  const failureResult = window.document.getElementById("bulk-result");
+  if (!failureResult.textContent.includes("1 failed") || !failureResult.textContent.includes("Broken PC: Agent is offline")) {
+    throw new Error(`per-agent failure summary is missing: ${failureResult.textContent}`);
   }
 
   window.document.getElementById("bulk-clear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -502,19 +622,26 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const originalPrompt = window.prompt;
   window.prompt = () => "GPU hosts";
   saveViewButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  await sleep(10);
+  await sleep(40);
   window.prompt = originalPrompt;
-  const storedViews = JSON.parse(window.localStorage.getItem("rc.savedViews") || "[]");
-  if (storedViews.length !== 1) throw new Error("saved view was not persisted");
-  const storedView = storedViews[0];
+  const saveRequest = [...window.__requests]
+    .reverse()
+    .find((request) => request.method === "POST" && request.path === "/api/saved-views" && request.body?.name === "GPU hosts");
+  if (!saveRequest) throw new Error("saved view was not created through the API");
+  const savedFilters = saveRequest.body.filters || {};
   if (
-    storedView.name !== "GPU hosts" ||
-    storedView.status !== "online" ||
-    storedView.profile !== "" ||
-    storedView.tag !== "" ||
-    storedView.search !== "studio"
+    savedFilters.status !== "online" ||
+    savedFilters.profile !== "" ||
+    savedFilters.tag !== "" ||
+    savedFilters.search !== "studio"
   ) {
-    throw new Error(`saved view fields are wrong: ${JSON.stringify(storedView)}`);
+    throw new Error(`saved view filters are wrong: ${JSON.stringify(savedFilters)}`);
+  }
+  if (savedViews.filter((view) => view.name === "GPU hosts").length !== 1) {
+    throw new Error("saved view was not stored on the server");
+  }
+  if (window.localStorage.getItem("rc.savedViews")) {
+    throw new Error("server-backed saved views should not keep a localStorage copy");
   }
   if (!savedViewSelect.textContent.includes("GPU hosts")) throw new Error("saved view option missing");
   if (savedViewSelect.value !== "GPU hosts") throw new Error("saved view was not selected after save");
@@ -533,9 +660,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     throw new Error("saved view did not restore filtered cards");
   }
   deleteViewButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  await sleep(10);
-  if (JSON.parse(window.localStorage.getItem("rc.savedViews") || "[]").length !== 0) {
-    throw new Error("saved view was not deleted");
+  await sleep(30);
+  const deleteRequest = window.__requests.find(
+    (request) => request.method === "DELETE" && request.path.startsWith("/api/saved-views/"),
+  );
+  if (!deleteRequest) throw new Error("saved view was not deleted through the API");
+  if (savedViews.some((view) => view.name === "GPU hosts")) {
+    throw new Error("saved view was not deleted from the server");
   }
   if (savedViewSelect.value !== "") throw new Error("saved view selection was not cleared");
   if (!deleteViewButton.disabled) throw new Error("delete view should be disabled without a selection");

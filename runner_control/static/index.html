@@ -200,6 +200,7 @@
           </div>
           <button class="button button-ghost button-small" id="bulk-clear" type="button">Clear selection</button>
         </div>
+        <div class="bulk-result" id="bulk-result" role="status" aria-live="polite" hidden></div>
 
         <div class="section-head">
           <div>
@@ -223,6 +224,9 @@
           <span class="form-hint" id="fleet-filter-count" aria-live="polite"></span>
         </div>
         <div class="agent-grid" id="agent-grid"></div>
+        <div class="fleet-more" id="fleet-more" hidden>
+          <button class="button button-secondary button-small" id="fleet-more-button" type="button">Show more machines</button>
+        </div>
         <div class="empty-state" id="empty-agents" hidden>
           <span class="empty-icon" aria-hidden="true">⌁</span>
           <h3>No machines yet</h3>

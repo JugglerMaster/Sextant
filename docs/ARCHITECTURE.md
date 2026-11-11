@@ -56,6 +56,7 @@ Key properties:
 - Dispatched commands are failed automatically after their timeout plus a grace period. Queued commands expire after `RC_QUEUED_COMMAND_TTL_HOURS` so an endpoint does not receive week-old work when it reconnects.
 - The server does not execute shell commands. It only stores them and returns them to the matching agent.
 - Shell/service/power commands are created only by `operator` or `admin` roles.
+- `POST /api/agents/bulk` fans one validated action out to at most 200 unique agents, reusing the single-agent queue, policy, WoL, and profile checks. Per-agent failures are returned in place and never abort the rest of the batch; the request and each action are audited.
 
 ## Data model
 
@@ -75,12 +76,15 @@ Key properties:
 | `profile_tag_assignments` | Tag → profile assignments (applied to matching agents) |
 | `enrollment_tokens` | One-time token hashes with expiry and use metadata |
 | `commands` | Kind, validated args, status, dispatcher, timestamps, output |
+| `saved_views` | Per-user named fleet filters (`status`, `profile`, `tag`, `search`), unique per user |
 | `audit_log` | Actor, action, target, detail JSON, source IP, time |
 | `wake_targets` | Agent-less named MAC addresses, broadcast address, port, last wake |
 
 Telemetry is stored denormalized in the agent row (`disks`, `gpus`, `services`, `startup`, `extra`) because the dashboard only needs the latest sample. A separate `telemetry_samples` table keeps one bounded row per heartbeat for trend queries; it is pruned to `RC_TELEMETRY_RETENTION_DAYS` (default 7) and can be disabled with `RC_TELEMETRY_HISTORY=0`. Trend queries fill every requested bucket, so missing heartbeats are explicit `null` points with real timestamps rather than omitted rows. Command history is retained per agent (the drawer History tab paginates and filters it server-side, with CSV export; the overview keeps a bounded latest-50 preview) and terminal commands are pruned after `RC_COMMAND_RETENTION_DAYS` (default 90). Audit rows are pruned after `RC_AUDIT_RETENTION_DAYS` (default 365).
 
 `agent_events` is an append-only, best-effort state-change log recording transitions rather than every heartbeat: an agent returning online after being offline, watched-service status changes, package additions/removals/version changes, agent version changes, profile assignments, and alert raise/clear/acknowledge/snooze lifecycle entries. Writes are fail-open so they cannot break a heartbeat or command path, and detail JSON is bounded. Events share the command retention policy (`RC_COMMAND_RETENTION_DAYS`, default 90).
+
+`saved_views` belongs to a user row and is scoped by `user_id`, with a case-insensitive unique name per user. The browser imports legacy `rc.savedViews` localStorage data after sign-in, skipping names already present, and uses localStorage only as an offline fallback; the database is authoritative when the API is reachable.
 
 ## Authentication and authorization
 
@@ -102,6 +106,10 @@ Roles:
 | Operator | yes | no | yes | yes | no |
 | Admin | yes | yes | yes | yes | yes |
 
+Bulk refresh, wake, power, and service actions follow the same operator gate;
+bulk profile apply requires admin. Saved views are available to every signed-in
+user but each user can only read, create, or delete their own.
+
 Agent authentication is separate: each agent has a 256-bit bearer token. The database stores only `SHA-256(token)`. The route agent ID and token must match. Enrollment tokens are also one-time and stored hashed.
 
 Agents report a stable machine identity (Windows `MachineGuid`, Linux `/etc/machine-id`, or a host/MAC fallback). Re-enrolling the same machine rotates credentials on the existing agent row instead of creating a duplicate, preserving command history and admin-managed policy.
@@ -117,6 +125,8 @@ Agents report a stable machine identity (Windows `MachineGuid`, Linux `/etc/mach
 - While the stream is open, the same signed-cookie/session/user validation used by normal authenticated requests is re-run every few seconds. Revocation, expiry, a disabled user, or a changed `session_version` produces a final `auth` event and closes the stream.
 
 This is deliberately single-node state. It is not shared or coordinated across multiple server processes or replicas; each process would maintain its own revision and cache. Running multiple control-plane replicas is outside the current deployment model.
+
+On the browser side, the fleet grid keeps a keyed map of agent id to card node, reuses unchanged cards, and replaces only cards whose rendered signature changed. This preserves keyboard focus and selected checkboxes through SSE updates. The initial render is bounded (60 cards) with a **Show more** control, and offscreen cards use CSS `content-visibility`, so a large fleet does not create an unbounded DOM in one pass.
 
 ## Agent policy
 

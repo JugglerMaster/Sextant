@@ -539,6 +539,8 @@ svg { display: block; }
   border-radius: var(--radius);
   background: var(--card-gradient);
   cursor: pointer;
+  content-visibility: auto;
+  contain-intrinsic-size: 305px 320px;
   transition: border-color 0.15s ease, transform 0.15s ease, background 0.15s ease;
 }
 .agent-card:hover { border-color: var(--line-strong); background: var(--card-gradient-hover); transform: translateY(-1px); }
@@ -790,6 +792,10 @@ svg { display: block; }
 #fleet-filters { flex-wrap: wrap; }
 .bulk-actions { flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: 8px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--row-bg); }
 .bulk-actions #bulk-count { min-width: 190px; }
+.bulk-result { display: grid; gap: 4px; margin: 8px 0 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--row-bg); font-size: 12px; }
+.bulk-result.has-failures { border-color: rgba(255, 107, 115, 0.35); }
+.bulk-failures { display: grid; gap: 3px; margin: 2px 0 0; padding-left: 18px; color: var(--alert-danger-text); font-size: 11.5px; }
+.fleet-more { display: flex; justify-content: center; margin-top: 12px; }
 .bulk-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-left: 8px; border-left: 1px solid var(--line); }
 .bulk-group:first-of-type { border-left: 0; padding-left: 0; }
 .bulk-actions .bulk-inline-field { display: block; margin: 0; }
