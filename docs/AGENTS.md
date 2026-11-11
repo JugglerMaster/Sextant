@@ -45,6 +45,12 @@ Environment options for the installer:
 | `AGENT_TAGS` | Comma-separated tags shown in the dashboard |
 | `CA_FILE` | Private CA bundle for TLS verification |
 | `ALLOW_PACKAGES` | Set to `0` to disable managed package actions locally (default `1`) |
+| `ALLOW_DOCKER` | Set to `1` to enable read-only Docker discovery/inventory (default `0`) |
+| `ALLOW_DOCKER_EXEC` | Reserved for D2 exec/console; stored in the agent config |
+| `ALLOW_DOCKER_COMPOSE` | Reserved for D3 Compose support; stored in the agent config |
+| `ALLOW_DOCKER_PRUNE` | Reserved for D2 cleanup; stored in the agent config |
+| `DOCKER_SOCKET` | Override the Docker socket/`DOCKER_HOST` (default `unix:///var/run/docker.sock`) |
+| `DOCKER_COMMAND` | Override the Docker CLI command/path (default `docker`) |
 | `NO_SELF_UPDATE` | Set to `1` to disable agent self-update |
 | `PROFILE` | Profile slug selected at enrollment (default `workstation`) |
 | `INSTALL_DIR` | Default `/opt/sextant-agent` |
@@ -182,6 +188,14 @@ sudo systemctl daemon-reload
   "allow_service": true,
   "allow_packages": true,
   "allow_self_update": true,
+  "allow_docker": false,
+  "allow_docker_exec": false,
+  "allow_docker_compose": false,
+  "allow_docker_prune": false,
+  "docker_socket": "unix:///var/run/docker.sock",
+  "docker_command": "docker",
+  "docker_timeout": 60,
+  "docker_inventory_interval": 300,
   "max_output_bytes": 200000
 }
 ```
@@ -207,6 +221,14 @@ sudo systemctl daemon-reload
 | `allow_service` | If false, reject service start/stop/restart/enable/disable locally |
 | `allow_packages` | Enabled by default; set false (or enroll with `--no-packages`) to reject managed package actions locally |
 | `allow_self_update` | If false, ignore agent update notices and refuse `sextant-agent update --apply` |
+| `allow_docker` | Hard local ceiling for Docker discovery/inventory; false by default |
+| `allow_docker_exec` | Reserved for D2 container exec/console; false by default |
+| `allow_docker_compose` | Reserved for D3 Compose actions; false by default |
+| `allow_docker_prune` | Reserved for D2 cleanup actions; false by default |
+| `docker_socket` | Docker socket or `DOCKER_HOST`; local config only |
+| `docker_command` | Docker CLI command/path |
+| `docker_timeout` | Docker CLI timeout in seconds (5–300) |
+| `docker_inventory_interval` | Local fallback inventory cadence (60–86400; profile overrides) |
 | `max_output_bytes` | Local cap before upload (server also caps) |
 
 The local flags are a hard ceiling. Server-side policy can disable an action, but it cannot re-enable one denied locally. The effective permission is the intersection of local config and server policy.
@@ -224,6 +246,7 @@ The file contains a bearer token. Keep it mode 0600 (Linux) and ACL-restricted (
 - Windows runs a fast PowerShell CIM script every heartbeat and a separate inventory script on the `inventory_interval` cadence, then `nvidia-smi` if available.
 - Fast metrics (CPU, memory, disks, GPU utilization/VRAM/temperature) refresh every heartbeat. Services, startup entries, GPU compute processes, CPU model, and kernel are cached and refreshed on the profile's `service_inventory_seconds` cadence (6h workstation, 1h server; legacy `inventory_interval` fallback), when the server watch list changes, or when an operator sends `refresh`. Packages use `package_inventory_seconds` (24h workstation, 6h server) and are hash-gated.
 - GPU utilization/VRAM/temperature and GPU compute-process names/PIDs require NVIDIA drivers with `nvidia-smi` in `PATH`.
+- **Docker (D1, Linux only):** when `allow_docker` is true and the assigned profile enables the Docker module, the agent probes the local Docker CLI/socket and sends a compact heartbeat summary. It uploads a bounded full inventory (containers, images, volumes, networks) on the profile cadence, when the server requests it, or after a `docker inventory.refresh` command. Container environment variables are never collected. Windows agents report `unsupported_os` and never appear as Docker hosts.
 - Startup entries are listed read-only. Use the Services tab for start/stop/restart/enable/disable.
 - Watched services that are stopped produce a critical alert. Watched service inventory is refreshed on the inventory cadence (or immediately after a watch-list change or `refresh`).
 - Admins can edit watched services, tags, notes, and action permissions in the machine drawer. Changes are delivered on the next heartbeat.
@@ -237,7 +260,8 @@ The file contains a bearer token. Keep it mode 0600 (Linux) and ACL-restricted (
 | Service | action and conservative name pattern | `systemctl` or PowerShell service cmdlets |
 | Power | shutdown/reboot/cancel, delay 0–600s | `shutdown` or `shutdown.exe` |
 | Package | 1–25 actions; manager ∈ {apt, dnf, winget, choco}; action ∈ {install, remove, upgrade}; validated name/version | argv-based package manager call, no shell; requires local `allow_packages` and profile package settings |
-| Refresh | no args | Immediate success; next heartbeat refreshes metrics |
+| Docker | D1 only `inventory.refresh` | Read-only probe and full inventory upload; requires local `allow_docker` and profile Docker module/action |
+| Refresh | no args | Immediate success; next heartbeat refreshes metrics and Docker inventory when enabled |
 
 Linux power commands use `shutdown -h +N` / `shutdown -r +N` for a delay (minimum one minute due to the tool), and `now` for zero. Windows uses `shutdown.exe /s|/r /t N`.
 

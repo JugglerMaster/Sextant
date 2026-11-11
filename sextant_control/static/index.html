@@ -85,6 +85,10 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9M7 6.5a8 8 0 1 0 10 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
           <span>Wake targets</span>
         </button>
+        <button class="nav-item" data-page="docker-hosts" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h12v4.5A5.5 5.5 0 0 1 9.5 22h-1A5.5 5.5 0 0 1 3 16.5zM6 9h2v3H6zM9 9h2v3H9zM12 9h2v3h-2zM15 9h2v3h-2zM18 10h3c0 2-1.2 3-3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+          <span>Docker Hosts</span>
+        </button>
         <button class="nav-item nav-admin" data-page="enroll" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
           <span>Enrollment</span>
@@ -261,6 +265,46 @@
         </div>
       </section>
 
+      <section class="page" id="page-docker-hosts" hidden>
+        <div class="panel-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">Containers</p><h2>Docker Hosts</h2></div>
+              <button class="button button-secondary button-small" id="docker-refresh-list" type="button">Refresh list</button>
+            </div>
+            <p class="form-hint" id="docker-hosts-status" aria-live="polite">Select a host to inspect its cached Docker inventory.</p>
+            <div id="docker-host-list" class="list-stack"></div>
+            <div class="empty-state" id="docker-hosts-empty" hidden>
+              <span class="empty-icon" aria-hidden="true">▣</span>
+              <h3>No Docker hosts yet</h3>
+              <p id="docker-hosts-empty-text">Docker inventory is off by default. Enable the Docker module in an agent profile and install or enroll the Linux agent with <code>ALLOW_DOCKER=1</code>. Windows Docker is not supported.</p>
+            </div>
+          </article>
+          <article class="panel panel-span" id="docker-host-detail" hidden>
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow" id="docker-host-eyebrow">Selected host</p>
+                <h2 id="docker-host-title">Docker host</h2>
+              </div>
+              <div class="list-row-actions">
+                <button class="button button-secondary button-small" id="docker-refresh-host" type="button">Refresh now</button>
+                <button class="button button-ghost button-small" id="docker-close-host" type="button">Close</button>
+              </div>
+            </div>
+            <p class="form-hint" id="docker-host-meta">Select a Docker host from the list.</p>
+            <div class="callout" id="docker-host-notice" hidden></div>
+            <nav class="tabs" id="docker-host-tabs" aria-label="Docker host detail tabs">
+              <button class="tab is-active" data-docker-tab="overview" type="button">Overview</button>
+              <button class="tab" data-docker-tab="containers" type="button">Containers</button>
+              <button class="tab" data-docker-tab="images" type="button">Images</button>
+              <button class="tab" data-docker-tab="volumes" type="button">Volumes</button>
+              <button class="tab" data-docker-tab="networks" type="button">Networks</button>
+            </nav>
+            <div id="docker-host-body" aria-live="polite"></div>
+          </article>
+        </div>
+      </section>
+
       <section class="page" id="page-enroll" hidden>
         <div class="panel-grid">
           <article class="panel">
@@ -332,6 +376,7 @@
                 <label class="field"><span>Service inventory seconds</span><input name="service_inventory_seconds" type="number" min="60" max="86400" value="21600"></label>
                 <label class="field"><span>Package inventory seconds</span><input name="package_inventory_seconds" type="number" min="300" max="604800" value="86400"></label>
                 <label class="field"><span>Package full seconds</span><input name="package_full_seconds" type="number" min="3600" max="2592000" value="604800"></label>
+                <label class="field"><span>Docker inventory seconds</span><input name="docker_inventory_seconds" type="number" min="60" max="86400" value="300"></label>
                 <label class="field"><span>Update channel</span><select name="update_channel"><option value="stable">Stable</option><option value="beta">Beta</option></select></label>
               </div>
               <p class="eyebrow">Modules</p>
@@ -346,6 +391,7 @@
                 <label class="checkbox-row"><input type="checkbox" name="module_service_control" checked><span>Service control</span></label>
                 <label class="checkbox-row"><input type="checkbox" name="module_package_management" checked><span>Package management</span></label>
                 <label class="checkbox-row"><input type="checkbox" name="module_self_update" checked><span>Self-update</span></label>
+                <label class="checkbox-row"><input type="checkbox" name="module_docker"><span>Docker (read-only inventory)</span></label>
               </div>
               <p class="eyebrow">Action gates</p>
               <div class="checkbox-grid">
@@ -353,6 +399,7 @@
                 <label class="checkbox-row"><input type="checkbox" name="allow_power" checked><span>Allow power</span></label>
                 <label class="checkbox-row"><input type="checkbox" name="allow_service" checked><span>Allow service</span></label>
                 <label class="checkbox-row"><input type="checkbox" name="allow_packages" checked><span>Allow packages</span></label>
+                <label class="checkbox-row"><input type="checkbox" name="allow_docker"><span>Allow Docker access</span></label>
                 <label class="checkbox-row"><input type="checkbox" name="allow_self_update" checked><span>Allow self-update</span></label>
               </div>
               <p class="form-error" id="profile-error" role="alert"></p>

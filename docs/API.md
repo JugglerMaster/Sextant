@@ -297,6 +297,7 @@ Kinds and validated arguments:
 {"kind":"power","args":{"action":"shutdown","delay":30}}
 {"kind":"refresh","args":{}}
 {"kind":"package","args":{"actions":[{"manager":"apt","action":"install","package":"nginx"}]}}
+{"kind":"docker","args":{"action":"inventory.refresh"}}
 ```
 
 - `shell`: `bash` | `powershell` | `cmd`; command 1–8000 chars; timeout 5–300 seconds.
@@ -304,6 +305,7 @@ Kinds and validated arguments:
 - `power`: `shutdown` | `reboot` | `cancel`; delay 0–600 seconds.
 - `refresh`: no args.
 - `package`: 1–25 actions; each has `manager` (`apt` | `dnf` | `winget` | `choco`), `action` (`install` | `remove` | `upgrade`), `package`, optional `version`. Requires both the agent-local `allow_packages` flag and the server policy flag.
+- `docker`: D1 accepts only `action=inventory.refresh`; it triggers a read-only probe and inventory upload. The Linux agent, profile Docker module, `allow_docker` action gate, and per-agent policy must all allow it. Container mutations are not accepted in this phase.
 
 Queue guardrails:
 
@@ -522,6 +524,52 @@ Any authenticated role can read. `hours` must be 1–720 and `limit` must be 1�
 
 Kinds are `online`, `service`, `package`, `version`, `profile`, and `alert`. Alert detail identifies the lifecycle action (`raised`, `cleared`, `acknowledged`, `reacknowledged`, `snoozed`, or `acknowledgement_expired`) plus the `incident_id` where applicable. Raises are recorded on the first heartbeat that sees a condition; a recurrence is still a `raised` event with `recurrence: true` and the previous incident id. Steady heartbeats only advance `last_seen_at` and do not create events. Events are recorded best-effort: a failed event write never breaks a heartbeat or command path. Detail is deliberately bounded (for package transitions, at most the first ten names plus counts and a `truncated` flag), and an oversized detail payload is replaced with `{"truncated": true}`. Events are pruned with `SEXTANT_COMMAND_RETENTION_DAYS` (default 90).
 
+## Docker Hosts (D1, read-only)
+
+Docker is off by default. A host appears only when the Linux agent reports Docker,
+the agent profile enables `modules.docker` and `actions.allow_docker`, and the
+local `allow_docker` flag is true. Windows agents report `unsupported_os` and
+never appear. The server stores cached inventory; it never connects to a Docker
+socket.
+
+| Method | Path | Role | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/docker/hosts` | viewer+ | Host summaries, counts, versions, availability/reason, and freshness |
+| `GET` | `/api/docker/hosts/{agent_id}` | viewer+ | One selected host plus cached containers, images, volumes, and networks |
+| `POST` | `/api/docker/hosts/{agent_id}/refresh` | operator+ | Queue a non-mutating `docker` / `inventory.refresh` command |
+
+Host response shape (counts abbreviated):
+
+```json
+{
+  "agent_id": "agt_123",
+  "name": "docker-01",
+  "hostname": "docker-01",
+  "os": "linux",
+  "online": true,
+  "available": true,
+  "reason": "",
+  "engine_version": "27.5.1",
+  "api_version": "1.47",
+  "compose_version": "2.32.4",
+  "compose_available": true,
+  "rootless": false,
+  "storage_driver": "overlay2",
+  "counts": {"containers": 4, "running": 3, "stopped": 1, "unhealthy": 0, "images": 5, "volumes": 2, "networks": 3},
+  "inventory_hash": "…",
+  "inventory_revision": 7,
+  "inventory_at": "2026-11-11T12:00:00Z",
+  "collected_at": "2026-11-11T12:00:00Z",
+  "heartbeat_at": "2026-11-11T12:00:10Z",
+  "age_seconds": 10,
+  "stale": false
+}
+```
+
+`POST /api/docker/hosts/{id}/refresh` returns the queued command with
+`"queued": true`. It obeys the normal offline-command policy and the
+one-command-per-heartbeat queue.
+
 ## Package management
 
 | Method | Route | Role | Purpose |
@@ -722,7 +770,8 @@ These paths bypass browser CSRF and use the agent bearer token.
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | `POST` | `/api/agent/enroll` | enrollment token in body | Exchange one-time token for agent credentials |
-| `POST` | `/api/agent/{id}/heartbeat` | Bearer | Upload telemetry, fetch queued commands |
+| `POST` | `/api/agent/{id}/heartbeat` | Bearer | Upload telemetry + Docker summary, fetch queued commands |
+| `POST` | `/api/agent/{id}/docker/inventory` | Bearer | Upload a bounded full Docker inventory |
 | `POST` | `/api/agent/{id}/commands/{command_id}/output` | Bearer | Upload an incremental stdout/stderr chunk |
 | `POST` | `/api/agent/{id}/commands/{command_id}/result` | Bearer | Upload the authoritative final command result |
 
@@ -813,6 +862,22 @@ Content-Type: application/json
   "package_inventory_revision": 5,
   "package_inventory_deletes": [["apt", "telnet"]],
   "service_inventory_collected_at": "2026-11-10T12:00:00Z",
+  "docker": {
+    "available": true,
+    "reason": "",
+    "engine_version": "27.5.1",
+    "api_version": "1.47",
+    "compose_version": "2.32.4",
+    "compose_available": true,
+    "rootless": false,
+    "storage_driver": "overlay2",
+    "cgroup_driver": "systemd",
+    "docker_root_dir": "/var/lib/docker",
+    "counts": {"containers": 4, "running": 3, "stopped": 1, "unhealthy": 0, "images": 5, "volumes": 2, "networks": 3},
+    "inventory_hash": "…",
+    "inventory_revision": 7,
+    "collected_at": "2026-11-10T12:00:00Z"
+  },
   "extra": {
     "cpu_model":"…",
     "kernel":"6.8",
@@ -833,6 +898,10 @@ Response:
     "allow_power": false,
     "allow_service": true,
     "allow_packages": false,
+    "allow_docker": false,
+    "allow_docker_exec": false,
+    "allow_docker_compose": false,
+    "allow_docker_prune": false,
     "watch_services": ["sshd", "nginx"]
   },
   "profile": {
@@ -840,16 +909,18 @@ Response:
     "slug": "server",
     "revision": 3,
     "heartbeat_seconds": 30,
-    "modules": {"telemetry": true, "services": true, "packages": true},
+    "modules": {"telemetry": true, "services": true, "packages": true, "docker": false},
     "collection": {
       "service_inventory_seconds": 3600,
       "package_inventory_seconds": 21600,
-      "package_full_seconds": 604800
+      "package_full_seconds": 604800,
+      "docker_inventory_seconds": 300
     },
-    "actions": {"allow_shell": true, "allow_power": true, "allow_service": true, "allow_packages": true}
+    "actions": {"allow_shell": true, "allow_power": true, "allow_service": true, "allow_packages": true, "allow_docker": false, "allow_docker_exec": false, "allow_docker_compose": false, "allow_docker_prune": false}
   },
   "request_package_inventory": "",
   "package_inventory_revision": 5,
+  "request_docker_inventory": "",
   "agent_update": {
     "available": true,
     "current_version": "0.2.0",
@@ -867,6 +938,31 @@ Response:
 The agent applies `policy` before executing any commands in that heartbeat. Local config remains a hard ceiling.
 
 The server marks returned commands `dispatched` before sending. An agent that crashes after receiving but before reporting leaves the command `dispatched`; create a new command or inspect history. There is no automatic redelivery.
+
+### Docker inventory upload
+
+```http
+POST /api/agent/agt_123/docker/inventory
+Authorization: Bearer sextant_agent_...
+Content-Type: application/json
+
+{
+  "summary": {"available": true, "engine_version": "27.5.1", "compose_available": true, "...": "..."},
+  "containers": [{"id": "a1b2…", "name": "web-1", "image": "nginx:latest", "state": "running", "...": "..."}],
+  "images": [{"id": "sha256:…", "repo_tags": ["nginx:latest"], "size": 187000000, "dangling": false}],
+  "volumes": [{"name": "web_data", "driver": "local", "scope": "local", "in_use": false}],
+  "networks": [{"id": "c3d4…", "name": "web_default", "driver": "bridge", "scope": "local"}],
+  "collected_at": "2026-11-11T12:00:00Z",
+  "hash": "…64 hex…",
+  "revision": 7
+}
+```
+
+The payload is strict: unknown fields, row caps (1000 containers, 2000 images,
+1000 volumes, 500 networks), an oversized body, a hash/summary mismatch, a
+non-Linux agent, or a Docker-disabled profile/policy returns `4xx`. The server
+replaces the host's cached inventory atomically and recomputes counts from the
+rows. Container environment variables are never part of the payload.
 
 ### Command output chunk
 

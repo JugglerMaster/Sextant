@@ -46,6 +46,14 @@ def cmd_enroll(args: argparse.Namespace) -> int:
         profile=getattr(args, "profile", "workstation"),
         allow_packages=not bool(getattr(args, "no_packages", False)),
         allow_self_update=not bool(getattr(args, "no_self_update", False)),
+        allow_docker=bool(getattr(args, "allow_docker", False)),
+        allow_docker_exec=bool(getattr(args, "allow_docker_exec", False)),
+        allow_docker_compose=bool(getattr(args, "allow_docker_compose", False)),
+        allow_docker_prune=bool(getattr(args, "allow_docker_prune", False)),
+        docker_socket=getattr(args, "docker_socket", "") or "unix:///var/run/docker.sock",
+        docker_command=getattr(args, "docker_command", "") or "docker",
+        docker_timeout=int(getattr(args, "docker_timeout", 60)),
+        docker_inventory_interval=int(getattr(args, "docker_inventory_interval", 300)),
     )
     identity = enrollment_identity(temporary)
     client = AgentClient(temporary)
@@ -72,6 +80,14 @@ def cmd_enroll(args: argparse.Namespace) -> int:
         profile=getattr(args, "profile", "workstation"),
         allow_packages=not bool(getattr(args, "no_packages", False)),
         allow_self_update=not bool(getattr(args, "no_self_update", False)),
+        allow_docker=bool(getattr(args, "allow_docker", False)),
+        allow_docker_exec=bool(getattr(args, "allow_docker_exec", False)),
+        allow_docker_compose=bool(getattr(args, "allow_docker_compose", False)),
+        allow_docker_prune=bool(getattr(args, "allow_docker_prune", False)),
+        docker_socket=getattr(args, "docker_socket", "") or "unix:///var/run/docker.sock",
+        docker_command=getattr(args, "docker_command", "") or "docker",
+        docker_timeout=int(getattr(args, "docker_timeout", 60)),
+        docker_inventory_interval=int(getattr(args, "docker_inventory_interval", 300)),
     )
     save_config(config, config_path)
     print(f"Enrolled as {config.agent_id} ({config.name}).")
@@ -163,6 +179,14 @@ def build_parser() -> argparse.ArgumentParser:
     enroll.add_argument("--allow-packages", action="store_true", help="Deprecated: package management is enabled by default")
     enroll.add_argument("--no-packages", action="store_true", help="Disable managed OS package actions locally")
     enroll.add_argument("--no-self-update", action="store_true", help="Disable agent self-update in the config")
+    enroll.add_argument("--allow-docker", action="store_true", help="Enable read-only Docker discovery and inventory")
+    enroll.add_argument("--allow-docker-exec", action="store_true", help="Reserved for Docker exec/console support")
+    enroll.add_argument("--allow-docker-compose", action="store_true", help="Reserved for Docker Compose support")
+    enroll.add_argument("--allow-docker-prune", action="store_true", help="Reserved for Docker prune support")
+    enroll.add_argument("--docker-socket", default="", help="Docker socket or DOCKER_HOST (default unix:///var/run/docker.sock)")
+    enroll.add_argument("--docker-command", default="", help="Docker CLI command/path (default docker)")
+    enroll.add_argument("--docker-timeout", type=int, default=60)
+    enroll.add_argument("--docker-inventory-interval", type=int, default=300)
     enroll.set_defaults(func=cmd_enroll)
 
     run = sub.add_parser("run", parents=[common], help="Run the heartbeat/command loop")

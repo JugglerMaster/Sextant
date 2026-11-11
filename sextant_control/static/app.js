@@ -25,6 +25,12 @@ const state = {
   remoteJobs: [],
   remoteJobId: null,
   remoteTimer: null,
+  dockerHosts: [],
+  dockerHostId: null,
+  dockerHostDetail: null,
+  dockerTab: "overview",
+  dockerLoading: false,
+  dockerRefreshTimer: null,
   fleetFilters: { status: "all", profile: "", tag: "" },
   fleetRenderLimit: 60,
   agentCards: new Map(),
@@ -54,6 +60,7 @@ const THEME_KEY = "sextant.theme";
 const PAGE_META = {
   overview: ["Fleet", "Live machines and health at a glance."],
   wake: ["Wake targets", "Send Wake-on-LAN packets to machines without agents."],
+  "docker-hosts": ["Docker Hosts", "Select a host to inspect its cached Docker inventory."],
   enroll: ["Enrollment", "Issue one-time tokens and onboard agents."],
   audit: ["Audit log", "Who did what, from where, and when."],
   users: ["Users", "Local accounts and role-based access."],
@@ -527,7 +534,10 @@ async function copyText(text) {
 
 function showLogin(message = "") {
   stopLiveUpdates();
+  stopDockerRefreshPoll();
   state.user = null;
+  state.dockerHostId = null;
+  state.dockerHostDetail = null;
   state.csrf = null;
   state.detailId = null;
   state.detailAgent = null;
@@ -553,6 +563,9 @@ function updateChrome() {
   const admin = Boolean(state.permissions.admin);
   document.querySelectorAll(".nav-admin").forEach((el) => {
     el.hidden = !admin;
+  });
+  document.querySelectorAll('[data-page="docker-hosts"]').forEach((el) => {
+    el.hidden = state.settings?.docker?.enabled === false;
   });
   const securityHint = $("password-source-hint");
   if (securityHint) {
@@ -715,9 +728,14 @@ function navigate(page, load = true) {
   });
   $("sidebar").classList.remove("is-open");
   $("sidebar-scrim").hidden = true;
+  if (page !== "docker-hosts") stopDockerRefreshPoll();
   if (!load) return;
   if (page === "overview") loadDashboard();
   if (page === "wake") loadWakeTargets();
+  if (page === "docker-hosts") {
+    loadDockerHosts();
+    if (state.dockerHostId) loadDockerHostDetail(state.dockerHostId, true);
+  }
   if (page === "enroll") loadEnrollmentTokens();
   if (page === "audit") loadAudit();
   if (page === "users") loadUsers();
@@ -3542,8 +3560,10 @@ const PROFILE_MODULE_FIELDS = [
   "service_control",
   "package_management",
   "self_update",
+  "docker",
 ];
-const PROFILE_ACTION_FIELDS = ["allow_shell", "allow_power", "allow_service", "allow_packages"];
+const PROFILE_ACTION_FIELDS = ["allow_shell", "allow_power", "allow_service", "allow_packages", "allow_docker"];
+const PROFILE_FUTURE_ACTION_FIELDS = ["allow_docker_exec", "allow_docker_compose", "allow_docker_prune"];
 
 async function loadProfiles(silent = false) {
   try {
@@ -3668,6 +3688,7 @@ function editProfile(id) {
   form.elements.service_inventory_seconds.value = collection.service_inventory_seconds ?? 21600;
   form.elements.package_inventory_seconds.value = collection.package_inventory_seconds ?? 86400;
   form.elements.package_full_seconds.value = collection.package_full_seconds ?? 604800;
+  form.elements.docker_inventory_seconds.value = collection.docker_inventory_seconds ?? 300;
   form.elements.update_channel.value = settings.update?.channel || "stable";
   for (const key of PROFILE_MODULE_FIELDS) {
     form.elements[`module_${key}`].checked = settings.modules?.[key] !== false;
@@ -3699,6 +3720,9 @@ function profileSettingsFromForm(form) {
   for (const key of PROFILE_MODULE_FIELDS) modules[key] = Boolean(form.elements[`module_${key}`]?.checked);
   const actions = {};
   for (const key of PROFILE_ACTION_FIELDS) actions[key] = Boolean(form.elements[key]?.checked);
+  for (const key of PROFILE_FUTURE_ACTION_FIELDS) {
+    actions[key] = Boolean(state.editingProfile?.settings?.actions?.[key]);
+  }
   return {
     heartbeat_seconds: Number(form.elements.heartbeat_seconds.value),
     modules,
@@ -3706,6 +3730,7 @@ function profileSettingsFromForm(form) {
       service_inventory_seconds: Number(form.elements.service_inventory_seconds.value),
       package_inventory_seconds: Number(form.elements.package_inventory_seconds.value),
       package_full_seconds: Number(form.elements.package_full_seconds.value),
+      docker_inventory_seconds: Number(form.elements.docker_inventory_seconds.value),
     },
     actions,
     update: {
@@ -3922,6 +3947,419 @@ async function startRemoteInstall(event) {
   }
 }
 
+
+const DOCKER_REASON_LABELS = {
+  disabled: "Docker is disabled in the local agent config or profile",
+  unsupported_os: "Windows Docker is not supported",
+  not_installed: "Docker CLI is not installed",
+  socket_missing: "Docker socket is missing",
+  permission_denied: "The agent cannot access the Docker socket",
+  daemon_unreachable: "The Docker daemon is unreachable",
+  compose_missing: "Docker Compose v2 is not installed",
+  probe_error: "Docker probe failed",
+};
+
+function dockerReason(reason) {
+  return DOCKER_REASON_LABELS[reason] || (reason ? "Docker is unavailable" : "");
+}
+
+function dockerAge(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value)) return "never";
+  if (value < 60) return `${Math.max(0, Math.round(value))}s ago`;
+  if (value < 3600) return `${Math.floor(value / 60)}m ago`;
+  if (value < 86400) return `${Math.floor(value / 3600)}h ago`;
+  return `${Math.floor(value / 86400)}d ago`;
+}
+
+function stopDockerRefreshPoll() {
+  if (state.dockerRefreshTimer) {
+    clearTimeout(state.dockerRefreshTimer);
+    state.dockerRefreshTimer = null;
+  }
+}
+
+async function loadDockerHosts(silent = false) {
+  if (state.dockerLoading) return;
+  state.dockerLoading = true;
+  try {
+    const data = await api("/api/docker/hosts");
+    state.dockerHosts = data.hosts || [];
+    if (state.dockerHostId && !state.dockerHosts.some((host) => host.agent_id === state.dockerHostId)) {
+      closeDockerHost();
+    }
+    renderDockerHostList();
+  } catch (error) {
+    if (!silent) toast(error.message, "error");
+    const status = $("docker-hosts-status");
+    if (status) status.textContent = error.message;
+  } finally {
+    state.dockerLoading = false;
+  }
+}
+
+function renderDockerHostList() {
+  const container = $("docker-host-list");
+  const empty = $("docker-hosts-empty");
+  if (!container || !empty) return;
+  clear(container);
+  const hosts = state.dockerHosts || [];
+  empty.hidden = hosts.length > 0;
+  const status = $("docker-hosts-status");
+  if (status) {
+    status.textContent = hosts.length
+      ? `${hosts.length} Docker host${hosts.length === 1 ? "" : "s"} reporting. Select one to inspect its cached inventory.`
+      : "No Docker hosts are reporting yet.";
+  }
+  for (const host of hosts) {
+    const selected = host.agent_id === state.dockerHostId;
+    const row = h(
+      "div",
+      { class: "list-row" },
+      h(
+        "div",
+        {},
+        h(
+          "strong",
+          {},
+          host.name,
+          " ",
+          host.online ? statusPill("online", "online") : statusPill("offline", "neutral"),
+          " ",
+          host.stale ? statusPill("stale", "warning") : statusPill("fresh", "online"),
+        ),
+        h(
+          "p",
+          { class: "form-hint" },
+          `${host.hostname || host.agent_id} · Docker ${host.engine_version || "unknown"} · Compose ${host.compose_available ? host.compose_version : "missing"}${host.rootless ? " · rootless" : ""}`,
+        ),
+        h(
+          "p",
+          { class: "form-hint" },
+          `${host.counts.running} running · ${host.counts.stopped} stopped · ${host.counts.unhealthy} unhealthy · ${host.counts.images} images · ${host.counts.volumes} volumes · ${host.counts.networks} networks · inventory ${dockerAge(host.age_seconds)}`,
+        ),
+        host.reason
+          ? h("p", { class: "form-hint" }, dockerReason(host.reason))
+          : null,
+      ),
+      h(
+        "div",
+        { class: "list-row-actions" },
+        button(selected ? "Selected" : "Open", selected ? "button-ghost button-small" : "button-secondary button-small", () => openDockerHost(host.agent_id)),
+      ),
+    );
+    container.append(row);
+  }
+}
+
+function openDockerHost(agentId) {
+  stopDockerRefreshPoll();
+  state.dockerHostId = agentId;
+  state.dockerTab = "overview";
+  state.dockerHostDetail = null;
+  const detail = $("docker-host-detail");
+  if (detail) detail.hidden = false;
+  renderDockerHostList();
+  setText("docker-host-title", "Loading Docker host…");
+  setText("docker-host-meta", "Fetching the latest cached inventory.");
+  const body = $("docker-host-body");
+  if (body) {
+    clear(body);
+    body.append(h("div", { class: "empty-inline" }, "Loading containers, images, volumes, and networks…"));
+  }
+  loadDockerHostDetail(agentId);
+}
+
+function closeDockerHost() {
+  stopDockerRefreshPoll();
+  state.dockerHostId = null;
+  state.dockerHostDetail = null;
+  const detail = $("docker-host-detail");
+  if (detail) detail.hidden = true;
+  renderDockerHostList();
+}
+
+async function loadDockerHostDetail(agentId, silent = false) {
+  try {
+    const data = await api(`/api/docker/hosts/${encodeURIComponent(agentId)}`);
+    if (state.dockerHostId !== agentId) return;
+    state.dockerHostDetail = data;
+    renderDockerHostDetail();
+  } catch (error) {
+    if (!silent) toast(error.message, "error");
+    if (/not found/i.test(error.message)) closeDockerHost();
+  }
+}
+
+function renderDockerHostDetail() {
+  const detail = state.dockerHostDetail;
+  const host = detail?.host;
+  if (!host) return;
+  setText("docker-host-title", host.name);
+  setText("docker-host-eyebrow", host.hostname || host.agent_id);
+  const stale = host.stale ? " · stale" : "";
+  setText(
+    "docker-host-meta",
+    `${host.online ? "online" : "offline"} · Docker ${host.engine_version || "unknown"} · Compose ${host.compose_available ? host.compose_version : "missing"} · inventory ${dockerAge(host.age_seconds)}${stale}`,
+  );
+  const notice = $("docker-host-notice");
+  if (notice) {
+    clear(notice);
+    const messages = [];
+    if (!host.available) messages.push(`${dockerReason(host.reason)}. Showing the last cached inventory.`);
+    else if (!host.online) messages.push("The agent is offline. Showing cached inventory; mutations are unavailable in this phase.");
+    else if (host.stale) messages.push(`Cached inventory is older than ${Math.round((detail.stale_seconds || 900) / 60)} minutes. Use Refresh now.`);
+    if (host.reason === "compose_missing") messages.push("Compose v2 was not detected on this host.");
+    notice.hidden = messages.length === 0;
+    for (const message of messages) notice.append(h("p", {}, message));
+  }
+  const refresh = $("docker-refresh-host");
+  if (refresh) {
+    refresh.disabled = !host.available || !state.permissions.operate;
+    refresh.title = host.available
+      ? "Queue a read-only Docker inventory refresh"
+      : "Docker is not currently reachable on this host";
+  }
+  document.querySelectorAll("#docker-host-tabs .tab").forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.dockerTab === state.dockerTab);
+  });
+  renderDockerTab();
+}
+
+function renderDockerTab() {
+  const body = $("docker-host-body");
+  const detail = state.dockerHostDetail;
+  if (!body || !detail) return;
+  clear(body);
+  if (state.dockerTab === "containers") return renderDockerContainers(body, detail);
+  if (state.dockerTab === "images") return renderDockerImages(body, detail);
+  if (state.dockerTab === "volumes") return renderDockerVolumes(body, detail);
+  if (state.dockerTab === "networks") return renderDockerNetworks(body, detail);
+  renderDockerOverview(body, detail);
+}
+
+function renderDockerOverview(body, detail) {
+  const host = detail.host;
+  body.append(
+    section(
+      "Docker host",
+      "Overview",
+      h(
+        "div",
+        { class: "info-grid" },
+        infoTile("Engine", host.engine_version || "unknown"),
+        infoTile("API", host.api_version || "—"),
+        infoTile("Compose", host.compose_available ? host.compose_version : "missing"),
+        infoTile("Rootless", host.rootless ? "yes" : "no"),
+        infoTile("Storage driver", host.storage_driver || "—"),
+        infoTile("Cgroup driver", host.cgroup_driver || "—"),
+        infoTile("Docker root", host.docker_root_dir || "—"),
+        infoTile("Inventory revision", host.inventory_revision),
+      ),
+      h(
+        "div",
+        { class: "info-grid" },
+        infoTile("Containers", host.counts.containers),
+        infoTile("Running", host.counts.running),
+        infoTile("Stopped", host.counts.stopped),
+        infoTile("Unhealthy", host.counts.unhealthy),
+        infoTile("Images", host.counts.images),
+        infoTile("Volumes", host.counts.volumes),
+        infoTile("Networks", host.counts.networks),
+        infoTile("Inventory age", dockerAge(host.age_seconds)),
+      ),
+      h(
+        "p",
+        { class: "form-hint" },
+        `Last collected ${host.collected_at ? localTime(host.collected_at) : "never"}. Heartbeat ${host.heartbeat_at ? relativeTime(host.heartbeat_at) : "not reported"}.`,
+      ),
+    ),
+  );
+}
+
+function renderDockerContainers(body, detail) {
+  const containers = detail.containers || [];
+  if (!containers.length) {
+    body.append(section("Docker host", "Containers", h("div", { class: "empty-inline" }, "No containers reported. Refresh inventory if the host recently started a container.")));
+    return;
+  }
+  const rows = containers.map((container) =>
+    h(
+      "tr",
+      {},
+      h("td", {}, h("strong", {}, container.name || short(container.id, 12))),
+      h("td", { class: "mono" }, container.image || "—"),
+      h("td", {}, container.state || "—"),
+      h("td", {}, container.health ? statusPill(container.health, container.health === "unhealthy" ? "critical" : "online") : "—"),
+      h("td", {}, (container.ports || []).join(", ") || "—"),
+      h("td", {}, container.compose_project || "—"),
+      h("td", {}, container.status || "—"),
+    ),
+  );
+  body.append(
+    section(
+      "Docker host",
+      "Containers",
+      interactiveTable(
+        h(
+          "table",
+          { class: "data-table" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Image"), h("th", {}, "State"), h("th", {}, "Health"), h("th", {}, "Ports"), h("th", {}, "Compose project"), h("th", {}, "Uptime / status"))),
+          h("tbody", {}, ...rows),
+        ),
+        { placeholder: "Filter containers", pageSize: 25 },
+      ),
+    ),
+  );
+}
+
+function renderDockerImages(body, detail) {
+  const images = detail.images || [];
+  if (!images.length) {
+    body.append(section("Docker host", "Images", h("div", { class: "empty-inline" }, "No images reported.")));
+    return;
+  }
+  const rows = images.map((image) =>
+    h(
+      "tr",
+      {},
+      h("td", {}, (image.repo_tags || []).join(", ") || (image.dangling ? "<none>" : short(image.id, 16))),
+      h("td", { class: "mono" }, short(image.id, 20)),
+      h("td", {}, fmtBytes(image.size)),
+      h("td", {}, image.dangling ? statusPill("dangling", "warning") : statusPill("tagged", "online")),
+      h("td", {}, image.containers),
+    ),
+  );
+  body.append(
+    section(
+      "Docker host",
+      "Images",
+      interactiveTable(
+        h(
+          "table",
+          { class: "data-table" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Repository / tags"), h("th", {}, "Image ID"), h("th", {}, "Size"), h("th", {}, "State"), h("th", {}, "Containers"))),
+          h("tbody", {}, ...rows),
+        ),
+        { placeholder: "Filter images", pageSize: 25 },
+      ),
+    ),
+  );
+}
+
+function renderDockerVolumes(body, detail) {
+  const volumes = detail.volumes || [];
+  if (!volumes.length) {
+    body.append(section("Docker host", "Volumes", h("div", { class: "empty-inline" }, "No volumes reported.")));
+    return;
+  }
+  const rows = volumes.map((volume) =>
+    h(
+      "tr",
+      {},
+      h("td", {}, h("strong", {}, volume.name)),
+      h("td", {}, volume.driver || "—"),
+      h("td", {}, volume.scope || "—"),
+      h("td", {}, volume.in_use ? "yes" : "unknown"),
+      h("td", { class: "mono" }, short(volume.mountpoint || "—", 72)),
+    ),
+  );
+  body.append(
+    section(
+      "Docker host",
+      "Volumes",
+      interactiveTable(
+        h(
+          "table",
+          { class: "data-table" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Driver"), h("th", {}, "Scope"), h("th", {}, "In use"), h("th", {}, "Mountpoint"))),
+          h("tbody", {}, ...rows),
+        ),
+        { placeholder: "Filter volumes", pageSize: 25 },
+      ),
+    ),
+  );
+}
+
+function renderDockerNetworks(body, detail) {
+  const networks = detail.networks || [];
+  if (!networks.length) {
+    body.append(section("Docker host", "Networks", h("div", { class: "empty-inline" }, "No networks reported.")));
+    return;
+  }
+  const rows = networks.map((network) =>
+    h(
+      "tr",
+      {},
+      h("td", {}, h("strong", {}, network.name || short(network.id, 16))),
+      h("td", {}, network.driver || "—"),
+      h("td", {}, network.scope || "—"),
+      h("td", {}, network.internal ? "yes" : "no"),
+      h("td", {}, network.container_count),
+    ),
+  );
+  body.append(
+    section(
+      "Docker host",
+      "Networks",
+      interactiveTable(
+        h(
+          "table",
+          { class: "data-table" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Driver"), h("th", {}, "Scope"), h("th", {}, "Internal"), h("th", {}, "Containers"))),
+          h("tbody", {}, ...rows),
+        ),
+        { placeholder: "Filter networks", pageSize: 25 },
+      ),
+    ),
+  );
+}
+
+async function refreshDockerHost() {
+  const agentId = state.dockerHostId;
+  if (!agentId) return;
+  const refresh = $("docker-refresh-host");
+  if (refresh) refresh.disabled = true;
+  const baseline = state.dockerHostDetail?.host?.inventory_at || "";
+  const status = $("docker-hosts-status");
+  if (status) status.textContent = "Queueing Docker inventory refresh…";
+  try {
+    await api(`/api/docker/hosts/${encodeURIComponent(agentId)}/refresh`, { method: "POST", body: {} });
+    if (status) status.textContent = "Docker inventory refresh queued. Waiting for the agent heartbeat…";
+    startDockerRefreshPoll(agentId, baseline);
+  } catch (error) {
+    if (status) status.textContent = error.message;
+    toast(error.message, "error");
+    if (refresh) refresh.disabled = !state.dockerHostDetail?.host?.available;
+  }
+}
+
+function startDockerRefreshPoll(agentId, baseline) {
+  stopDockerRefreshPoll();
+  let attempts = 0;
+  const tick = async () => {
+    if (state.dockerHostId !== agentId) return;
+    attempts += 1;
+    await loadDockerHostDetail(agentId, true);
+    const current = state.dockerHostDetail?.host?.inventory_at || "";
+    if (current && current !== baseline) {
+      await loadDockerHosts(true);
+      const status = $("docker-hosts-status");
+      if (status) status.textContent = "Docker inventory updated.";
+      stopDockerRefreshPoll();
+      return;
+    }
+    if (attempts >= 10) {
+      const status = $("docker-hosts-status");
+      if (status) status.textContent = "Refresh queued; the agent has not reported new inventory yet.";
+      const refresh = $("docker-refresh-host");
+      if (refresh) refresh.disabled = !state.dockerHostDetail?.host?.available;
+      return;
+    }
+    state.dockerRefreshTimer = setTimeout(tick, 3000);
+  };
+  state.dockerRefreshTimer = setTimeout(tick, 1200);
+}
 
 function renderSecurity() {
   const details = $("security-details");
@@ -4241,6 +4679,19 @@ function wireEvents() {
     else navigate(state.page);
     if (state.detailId) loadAgentDetail(state.detailId);
     announceFleetStatus(fleetSummary("Fleet refreshed"));
+  });
+
+  $("docker-refresh-list")?.addEventListener("click", () => loadDockerHosts());
+  $("docker-refresh-host")?.addEventListener("click", refreshDockerHost);
+  $("docker-close-host")?.addEventListener("click", closeDockerHost);
+  document.querySelectorAll("#docker-host-tabs .tab").forEach((el) => {
+    el.addEventListener("click", () => {
+      state.dockerTab = el.dataset.dockerTab;
+      document.querySelectorAll("#docker-host-tabs .tab").forEach((tab) => {
+        tab.classList.toggle("is-active", tab === el);
+      });
+      renderDockerTab();
+    });
   });
 
   $("theme-toggle")?.addEventListener("click", toggleTheme);

@@ -86,6 +86,24 @@ if [[ "${ALLOW_PACKAGES:-1}" == "1" ]]; then
 else
   ENROLL_ARGS+=(--no-packages)
 fi
+if [[ "${ALLOW_DOCKER:-0}" == "1" ]]; then
+  ENROLL_ARGS+=(--allow-docker)
+fi
+if [[ "${ALLOW_DOCKER_EXEC:-0}" == "1" ]]; then
+  ENROLL_ARGS+=(--allow-docker-exec)
+fi
+if [[ "${ALLOW_DOCKER_COMPOSE:-0}" == "1" ]]; then
+  ENROLL_ARGS+=(--allow-docker-compose)
+fi
+if [[ "${ALLOW_DOCKER_PRUNE:-0}" == "1" ]]; then
+  ENROLL_ARGS+=(--allow-docker-prune)
+fi
+if [[ -n "${DOCKER_SOCKET:-}" ]]; then
+  ENROLL_ARGS+=(--docker-socket "$DOCKER_SOCKET")
+fi
+if [[ -n "${DOCKER_COMMAND:-}" ]]; then
+  ENROLL_ARGS+=(--docker-command "$DOCKER_COMMAND")
+fi
 if [[ "${NO_SELF_UPDATE:-0}" == "1" ]]; then
   ENROLL_ARGS+=(--no-self-update)
 fi

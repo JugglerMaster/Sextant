@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -59,6 +59,12 @@ def validate_command_args(kind: str, args: dict[str, Any]) -> dict[str, Any]:
 
     if kind == "refresh":
         return {}
+
+    if kind == "docker":
+        action = str(args.get("action", "")).lower()
+        if action != "inventory.refresh":
+            raise ValueError("unsupported Docker action in this phase")
+        return {"action": action}
 
     if kind == "package":
         actions = args.get("actions")
@@ -198,6 +204,10 @@ def agent_to_dict(
         "allow_power": bool(policy.get("allow_power", True)),
         "allow_service": bool(policy.get("allow_service", True)),
         "allow_packages": bool(policy.get("allow_packages", True)),
+        "allow_docker": bool(policy.get("allow_docker", False)),
+        "allow_docker_exec": bool(policy.get("allow_docker_exec", False)),
+        "allow_docker_compose": bool(policy.get("allow_docker_compose", False)),
+        "allow_docker_prune": bool(policy.get("allow_docker_prune", False)),
     }
     return {
         "id": row["id"],
@@ -248,6 +258,130 @@ def telemetry_sample_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "gpu_max_util": optional_float("gpu_max_util"),
         "gpu_max_temp": optional_float("gpu_max_temp"),
         "service_down": None if service_down is None else int(service_down),
+    }
+
+
+def docker_host_to_dict(
+    row: sqlite3.Row,
+    config: Settings,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    last_seen = parse_iso(row["agent_last_seen"])
+    online = bool(
+        last_seen and (now - last_seen).total_seconds() <= config.offline_after_seconds
+    )
+    inventory_at = parse_iso(row["inventory_at"])
+    age_seconds = None
+    if inventory_at is not None:
+        age_seconds = max(0, int((now - inventory_at).total_seconds()))
+    available = bool(row["available"])
+    stale = bool(
+        not available
+        or age_seconds is None
+        or age_seconds > config.docker_inventory_stale_seconds
+    )
+    return {
+        "agent_id": row["agent_id"],
+        "name": row["agent_name"],
+        "hostname": row["agent_hostname"],
+        "os": row["agent_os"],
+        "online": online,
+        "last_seen": row["agent_last_seen"],
+        "available": available,
+        "reason": row["reason"],
+        "engine_version": row["engine_version"],
+        "api_version": row["api_version"],
+        "compose_version": row["compose_version"],
+        "compose_available": bool(row["compose_available"]),
+        "rootless": bool(row["rootless"]),
+        "storage_driver": row["storage_driver"],
+        "cgroup_driver": row["cgroup_driver"],
+        "docker_root_dir": row["docker_root_dir"],
+        "counts": {
+            "containers": int(row["container_count"]),
+            "running": int(row["running_count"]),
+            "paused": int(row["paused_count"]),
+            "stopped": int(row["stopped_count"]),
+            "unhealthy": int(row["unhealthy_count"]),
+            "images": int(row["image_count"]),
+            "volumes": int(row["volume_count"]),
+            "networks": int(row["network_count"]),
+        },
+        "inventory_hash": row["inventory_hash"],
+        "inventory_revision": int(row["inventory_revision"]),
+        "inventory_at": row["inventory_at"],
+        "collected_at": row["collected_at"],
+        "heartbeat_at": row["heartbeat_at"],
+        "age_seconds": age_seconds,
+        "stale": stale,
+        "last_error": row["last_error"],
+    }
+
+
+def docker_container_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["container_id"],
+        "name": row["name"],
+        "image": row["image"],
+        "image_id": row["image_id"],
+        "command": row["command"],
+        "state": row["state"],
+        "status": row["status"],
+        "health": row["health"],
+        "created_at": row["created_at"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "exit_code": row["exit_code"],
+        "restart_policy": row["restart_policy"],
+        "ports": loads(row["ports"], []),
+        "labels": loads(row["labels"], {}),
+        "mounts": loads(row["mounts"], []),
+        "networks": loads(row["networks"], []),
+        "compose_project": row["compose_project"],
+        "compose_service": row["compose_service"],
+        "compose_config_hash": row["compose_config_hash"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def docker_image_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["image_id"],
+        "repo_tags": loads(row["repo_tags"], []),
+        "repo_digests": loads(row["repo_digests"], []),
+        "size": int(row["size"]),
+        "shared_size": int(row["shared_size"]),
+        "containers": int(row["container_count"]),
+        "dangling": bool(row["dangling"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def docker_volume_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "name": row["name"],
+        "driver": row["driver"],
+        "scope": row["scope"],
+        "mountpoint": row["mountpoint"],
+        "labels": loads(row["labels"], {}),
+        "in_use": bool(row["in_use"]),
+        "updated_at": row["updated_at"],
+    }
+
+
+def docker_network_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["network_id"],
+        "name": row["name"],
+        "driver": row["driver"],
+        "scope": row["scope"],
+        "internal": bool(row["internal"]),
+        "attachable": bool(row["attachable"]),
+        "labels": loads(row["labels"], {}),
+        "container_count": int(row["container_count"]),
+        "updated_at": row["updated_at"],
     }
 
 

@@ -1,6 +1,12 @@
 # Docker management — plan
 
-**Status:** proposed, not implemented.
+**Status:** **D1 implemented (read-only Docker Hosts).** D2–D5 are proposed and
+not implemented.
+
+> D1 ships Linux Docker detection, compact heartbeat summaries, bounded inventory
+> upload, SQLite storage, the viewer/operator Docker Hosts API, and the cached
+> read-only Docker Hosts page. Container mutations, exec/console, cleanup, and
+> Compose deployment remain future phases.
 
 **Scope:** add a separate **Docker Hosts** view to Sextant for Linux hosts. Every
 enrolled agent that reports a usable Docker engine appears in that view. Selecting
@@ -1075,7 +1081,7 @@ Server-side checks are authoritative; the UI only hides controls.
 
 | Phase | Deliverable | Effort | Risk | Acceptance criteria |
 | --- | --- | --- | --- | --- |
-| **D1** | Schema, settings, profile/local gates, agent detection + summary, inventory upload, **Docker Hosts** host list + cached read-only host view | M | low | A Linux agent with Docker enabled appears in Docker Hosts; its containers/images/volumes/networks are visible from a cached snapshot; Windows and disabled agents do not appear; no mutation path exists |
+| **D1 (implemented)** | Schema, settings, profile/local gates, agent detection + summary, inventory upload, **Docker Hosts** host list + cached read-only host view | M | low | A Linux agent with Docker enabled appears in Docker Hosts; its containers/images/volumes/networks are visible from a cached snapshot; Windows and disabled agents do not appear; no mutation path exists |
 | **D2** | `docker` command kind, container inspect, lifecycle/update/rename, logs, refresh, cleanup preview/execute, one-shot exec, events, audit, UI actions | M | medium | Start/stop/restart/pause/rename/update/remove, inspect, logs, cleanup, and one-shot exec work on the selected host; every action is audit-visible; policy/local denials are enforced |
 | **D3** | Compose library on disk, revisions, compose directory setting/migration, Compose Files view, deploy bundle endpoint, deploy/update/down/rollback, deployment history | L | medium–high | Admin creates a stack on disk; operator deploys it to one host; containers carry the expected Compose labels; a second revision updates in place; rollback works; bundle/path attacks are rejected |
 | **D4** | Interactive container console: PTY exec, long-poll stdin, SSE output, resize, idle/close handling, session caps, audit | L | high | An operator opens a real shell inside a container, runs interactive commands, resizes the terminal, and closes it; heartbeats continue; the session dies on idle or agent/server disconnect; no transcript is persisted |

@@ -41,6 +41,14 @@ class AgentConfig:
     allow_service: bool = True
     allow_packages: bool = True
     allow_self_update: bool = True
+    allow_docker: bool = False
+    allow_docker_exec: bool = False
+    allow_docker_compose: bool = False
+    allow_docker_prune: bool = False
+    docker_socket: str = "unix:///var/run/docker.sock"
+    docker_command: str = "docker"
+    docker_timeout: int = 60
+    docker_inventory_interval: int = 300
     max_output_bytes: int = 200_000
 
     def validate(self) -> None:
@@ -56,6 +64,10 @@ class AgentConfig:
         self.package_inventory_interval = max(300, min(int(self.package_inventory_interval), 604800))
         self.package_full_interval = max(3600, min(int(self.package_full_interval), 2592000))
         self.timeout = max(5, min(int(self.timeout), 300))
+        self.docker_timeout = max(5, min(int(self.docker_timeout), 300))
+        self.docker_inventory_interval = max(60, min(int(self.docker_inventory_interval), 86400))
+        self.docker_socket = str(self.docker_socket or "").strip()[:512]
+        self.docker_command = str(self.docker_command or "docker").strip()[:512] or "docker"
         self.max_output_bytes = max(1024, min(int(self.max_output_bytes), 1_000_000))
 
     def redacted(self) -> dict[str, Any]:

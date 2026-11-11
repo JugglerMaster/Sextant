@@ -70,6 +70,7 @@ way.
 - **Cross-platform agents** — Linux and Windows agents with outbound-only heartbeat/command polling and stable machine identity.
 - **Wake-on-LAN** — server-side magic packets for agents (using their reported MAC) and for saved agent-less targets.
 - **Live health** — online/offline status, CPU, memory, uptime, disks, NVIDIA GPU utilization/VRAM/temperature, GPU compute processes, service states, and startup entries.
+- **Docker Hosts (read-only)** — Linux agents can report Docker engine/Compose versions and a bounded inventory of containers, images, volumes, and networks. Select one host to inspect its cached environment, with freshness and on-demand refresh. Docker is off by default; Windows Docker is not supported.
 - **Agent profiles** — server-managed behavior profiles (`workstation`, `server`, custom) control heartbeat, collection cadence, enabled modules, action gates, and update policy. Includes a dashboard editor and tag-based assignment.
 - **Remote install (Linux)** — install an agent on a fresh Linux host over key-based SSH, with prerequisite checks, job log, and one-time enrollment.
 - **Telemetry history** — bounded per-heartbeat samples with configurable retention and a downsampled history API for trend queries.
@@ -168,9 +169,9 @@ npx playwright install chromium
 npm run test:visual
 ```
 
-The Python suite has **208 tests** (207 run on Linux; one Windows-only junction test is skipped there and runs on the Windows CI job). It covers password/session/CSRF security, the API RBAC and authentication contract, local and AD login, session revocation, user disable/reset, failed-login audit, enrollment, heartbeat, command dispatch/idempotency/cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication, WoL, audit logging, agent parsers, executor behavior, config handling, the Tier 0 package store, server update checks, agent self-update on Linux and Windows, package inventory/desired-state sync, agent profiles, revisioned inventory, Telegram notification evaluation/deduplication/retry, and key-based SSH remote install.
+The Python suite has **232 tests** (231 run on Linux; one Windows-only junction test is skipped there and runs on the Windows CI job). It covers password/session/CSRF security, the API RBAC and authentication contract, local and AD login, session revocation, user disable/reset, failed-login audit, enrollment, heartbeat, command dispatch/idempotency/cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication, WoL, audit logging, agent parsers, executor behavior, config handling, the Tier 0 package store, server update checks, agent self-update on Linux and Windows, package inventory/desired-state sync, agent profiles, revisioned inventory, Docker detection/inventory/API gating, Telegram notification evaluation/deduplication/retry, and key-based SSH remote install.
 
-The jsdom smoke test loads the real dashboard and verifies the fleet, live SSE fallback, drawer, paginated history, trends, timeline, alert lifecycle, bulk actions, saved views, policy/user/session dialogs, GPU process list, and remote terminal. The **10 Playwright + axe-core tests** cover dark/light themes at desktop and mobile widths, login, dashboard, drawer tabs, command-palette keyboard flow, focus trap/return, and serious/critical accessibility violations.
+The jsdom smoke test loads the real dashboard and verifies the fleet, live SSE fallback, drawer, paginated history, trends, timeline, alert lifecycle, bulk actions, saved views, policy/user/session dialogs, GPU process list, remote terminal, and the Docker Hosts list/detail/refresh/empty states. The **10 Playwright + axe-core tests** cover dark/light themes at desktop and mobile widths, login, dashboard, drawer tabs, command-palette keyboard flow, focus trap/return, and serious/critical accessibility violations.
 
 A real end-to-end server/agent smoke test is described in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#validation), and the Raspberry Pi run is recorded in [docs/TESTING.md](docs/TESTING.md#manual-live-validation). See [docs/TESTING.md](docs/TESTING.md) for the full coverage gaps.
 
@@ -205,6 +206,9 @@ All server configuration is environment variables. The common ones:
 | `SEXTANT_AUDIT_RETENTION_DAYS` | `365` | Retention for audit rows |
 | `SEXTANT_TELEMETRY_HISTORY` | `1` | Store bounded per-heartbeat telemetry history |
 | `SEXTANT_TELEMETRY_RETENTION_DAYS` | `7` | Telemetry history retention (1–365 days) |
+| `SEXTANT_DOCKER_ENABLED` | `1` | Enable the Docker Hosts API/page; agent Docker access still requires local/profile opt-in |
+| `SEXTANT_DOCKER_INVENTORY_MAX_BYTES` | `2000000` | Maximum Docker inventory upload size |
+| `SEXTANT_DOCKER_INVENTORY_STALE_SECONDS` | `900` | Docker inventory stale badge threshold |
 | `SEXTANT_STORE_ENABLED` | `1` | Enable the package store |
 | `SEXTANT_STORE_MAX_BLOB_MB` | `512` | Per-artifact upload limit |
 | `SEXTANT_STORE_MAX_TOTAL_GB` | `20` | Total store quota |
@@ -224,7 +228,7 @@ See [deploy/sextant.env.example](deploy/sextant.env.example) for a deployment te
 - [Deployment](docs/DEPLOYMENT.md)
 - [Agent installation and operation](docs/AGENTS.md)
 - [Discovery plan](docs/DISCOVERY.md)
-- [Docker management plan](docs/DOCKER_MANAGEMENT.md)
+- [Docker management plan — D1 implemented](docs/DOCKER_MANAGEMENT.md)
 - [Package management plan](docs/PACKAGE_MANAGEMENT.md)
 - [Package store plan](docs/PACKAGE_STORE.md)
 - [Agent self-update plan](docs/SELF_UPDATE.md)
@@ -241,6 +245,7 @@ See [deploy/sextant.env.example](deploy/sextant.env.example) for a deployment te
 
 - **Remote control is shell + service + power control**, not pixel-level remote desktop or keyboard/mouse injection.
 - **GPU telemetry currently uses `nvidia-smi`.** Windows falls back to WMI GPU names without utilization data. AMD ROCm is not collected.
+- **Docker management is D1 only.** The Docker Hosts view is read-only: no container mutations, exec/console, cleanup, or Compose deployment yet. Docker is Linux-only; Windows agents report `unsupported_os` and never appear as Docker hosts.
 - **Wake-on-LAN is layer-2 local.** A server packet reaches its own broadcast domain. Use a directed broadcast or a separate relay for other VLANs; agents do not act as WoL relays.
 - **AD group mapping checks direct `memberOf` membership.** Nested group expansion is not implemented.
 - **Single node.** SQLite and the in-process login limiter target a home/lab/small-office deployment, not a multi-region cluster.

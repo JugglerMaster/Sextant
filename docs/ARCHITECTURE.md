@@ -20,7 +20,8 @@ There is no agent listener and no third-party relay.
 | Update checker | `sextant_control/updates.py` | Read-only server release check (GitHub or static JSON). |
 | Notifications | `sextant_control/notifications.py` | Background condition evaluator, Telegram delivery, persisted outbox, retry/backoff. |
 | Remote install | `sextant_control/remote_install.py` | Key-based SSH install for Linux, job log, one-time enrollment. |
-| Agent | `sextant_agent/` | Heartbeat, telemetry collectors, package inventory/actions, self-update, queued command execution, result posting. |
+| Agent | `sextant_agent/` | Heartbeat, telemetry collectors, package inventory/actions, Docker detection/inventory, self-update, queued command execution, result posting. |
+| Docker inventory | `sextant_agent/docker.py`, server Docker routes | Local Docker CLI probe, bounded container/image/volume/network inventory, SQLite cache. Read-only in D1. |
 | Deployment assets | `deploy/` | systemd units, nginx config, Linux/Windows installers, env template. |
 
 ## Request and command flow
@@ -74,6 +75,8 @@ Key properties:
 | `package_inventory` | Latest installed packages and detected managers per agent |
 | `package_rules` | Per-device desired state (`present`/`absent`/`latest`/pinned) |
 | `package_inventory_state` | Last package inventory hash and full-refresh timestamp |
+| `docker_hosts` | Per-agent Docker summary: availability/reason, engine/Compose versions, counts, freshness |
+| `docker_containers`, `docker_images`, `docker_volumes`, `docker_networks` | Latest bounded Docker inventory per agent, replaced atomically |
 | `agent_profiles` | Server-managed behavior profiles (cadence, modules, action gates, update policy) |
 | `profile_tag_assignments` | Tag → profile assignments (applied to matching agents) |
 | `enrollment_tokens` | One-time token hashes with expiry and use metadata |
@@ -170,6 +173,17 @@ A fast PowerShell metrics script runs on every heartbeat; a second inventory scr
 
 NVIDIA GPUs are then queried with `nvidia-smi` for actual utilization/VRAM/temperature and compute processes. If it is absent, only GPU names are reported with zero statistics.
 
+### Docker inventory (D1)
+
+Linux agents can opt into read-only Docker discovery with local `allow_docker`
+plus the profile's `modules.docker` and `actions.allow_docker`. The agent probes
+the local Docker CLI/socket (never the Engine API from the server), sends a
+compact heartbeat summary, and uploads a bounded full inventory to
+`POST /api/agent/{id}/docker/inventory` on the profile cadence or when the server
+requests it. The server replaces `docker_hosts` and the four inventory tables in
+one transaction. Docker is off by default; Windows agents report `unsupported_os`
+and are never listed. Container environment variables are not collected.
+
 ### Alerts
 
 Alert conditions are computed at read time from the latest heartbeat telemetry:
@@ -223,6 +237,7 @@ The server must be on the same layer-2 broadcast domain as the target (or have a
 | `shell` | `shell`: bash/powershell/cmd, `command`, `timeout` 5–300s | Local shell, bounded streaming output, process-tree kill on timeout or output cap |
 | `service` | `action`: start/stop/restart/enable/disable/status, `name` | systemctl or PowerShell service cmdlets |
 | `power` | `action`: shutdown/reboot/cancel, `delay` 0–600s | `shutdown`/`shutdown.exe` |
+| `docker` | D1: `action=inventory.refresh` | Read-only Docker probe and inventory upload |
 | `refresh` | none | No-op result; prompts the UI to refresh after the next heartbeat |
 
 The server validates service names and power actions, but `shell` is intentionally arbitrary. Agent-local flags can disable shell, power, or service execution entirely.
@@ -256,5 +271,6 @@ The app server binds loopback by default in the provided unit. nginx terminates 
 - No nested AD group resolution.
 - No MFA in the app itself (deferred; see the roadmap).
 - NVIDIA-only utilization telemetry.
+- Docker management is D1 read-only and Linux-only: no container mutations, exec/console, cleanup, or Compose deployment yet. The server never mounts or connects to a Docker socket.
 - WoL is limited to the server's broadcast domain.
 - Windows agents require Python 3.11+.

@@ -137,6 +137,26 @@ There is no pixel-level remote desktop or input injection in this version. “Re
 - **GitHub is not an app source.** App packages are uploaded to the store by an admin or CI; agents never download apps from GitHub.
 - **Remote install is admin-only and key-based.** One private key is stored on the server filesystem (`SEXTANT_SSH_KEY_PATH`, mode 0600), not in SQLite. No SSH passwords, no agent forwarding, no forwarding, fixed install script, validated inputs, one job at a time, full audit. Host-key verification is intentionally disabled for rebuilt hosts, so use SSH only on a trusted admin network/VPN.
 
+## Docker inventory (D1)
+
+- **Read-only in D1.** Docker Hosts exposes cached container/image/volume/network
+  metadata; it does not start, stop, remove, exec, prune, or deploy anything yet.
+- **Docker access is local and opt-in.** The Linux agent's `allow_docker` flag
+  defaults to false, and the assigned profile must enable both `modules.docker`
+  and `actions.allow_docker`. Either side can deny. Windows agents report
+  `unsupported_os` and never appear.
+- **Docker socket access is root-equivalent.** The agent reads the socket as its
+  service user (root by default). Enabling Docker inventory therefore expands
+  the agent's read surface; keep the same VPN/TLS trust boundary as remote shell.
+- **No server-side Docker socket.** The server never mounts or connects to a
+  Docker socket; it stores inventory uploaded by the authenticated agent.
+- **Bounded and non-secret.** Inventory payloads are strict, row-capped, and
+  size-capped. Container environment variables are never collected. Uploads are
+  scoped to the agent's bearer token and path agent ID.
+- **Refresh is non-mutating.** `POST /api/docker/hosts/{id}/refresh` queues only
+  `docker` / `inventory.refresh`, obeys offline policy and the command queue, and
+  is audited like other command creation.
+
 ## Transport and deployment
 
 - Run behind HTTPS. The supplied deployment uses nginx with TLS 1.2/1.3 and HTTP→HTTPS redirect.

@@ -4,6 +4,18 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+DOCKER_REASONS = Literal[
+    "",
+    "disabled",
+    "unsupported_os",
+    "not_installed",
+    "socket_missing",
+    "permission_denied",
+    "daemon_unreachable",
+    "compose_missing",
+    "probe_error",
+]
+
 
 class LoginIn(BaseModel):
     username: str = Field(min_length=1, max_length=128)
@@ -43,6 +55,10 @@ class AgentUpdateIn(BaseModel):
     allow_power: bool | None = None
     allow_service: bool | None = None
     allow_packages: bool | None = None
+    allow_docker: bool | None = None
+    allow_docker_exec: bool | None = None
+    allow_docker_compose: bool | None = None
+    allow_docker_prune: bool | None = None
 
 
 class EnrollmentTokenIn(BaseModel):
@@ -94,12 +110,14 @@ class ProfileModules(BaseModel):
     service_control: bool = True
     package_management: bool = True
     self_update: bool = True
+    docker: bool = False
 
 
 class ProfileCollection(BaseModel):
     service_inventory_seconds: int = Field(default=21600, ge=60, le=86400)
     package_inventory_seconds: int = Field(default=86400, ge=300, le=604800)
     package_full_seconds: int = Field(default=604800, ge=3600, le=2592000)
+    docker_inventory_seconds: int = Field(default=300, ge=60, le=86400)
 
 
 class ProfileActions(BaseModel):
@@ -107,6 +125,10 @@ class ProfileActions(BaseModel):
     allow_power: bool = True
     allow_service: bool = True
     allow_packages: bool = True
+    allow_docker: bool = False
+    allow_docker_exec: bool = False
+    allow_docker_compose: bool = False
+    allow_docker_prune: bool = False
 
 
 class ProfileUpdate(BaseModel):
@@ -200,6 +222,106 @@ class PackageManagerMetric(BaseModel):
     version: str = Field(default="", max_length=128)
 
 
+class DockerCountsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    containers: int = Field(default=0, ge=0, le=1_000_000)
+    running: int = Field(default=0, ge=0, le=1_000_000)
+    paused: int = Field(default=0, ge=0, le=1_000_000)
+    stopped: int = Field(default=0, ge=0, le=1_000_000)
+    unhealthy: int = Field(default=0, ge=0, le=1_000_000)
+    images: int = Field(default=0, ge=0, le=1_000_000)
+    volumes: int = Field(default=0, ge=0, le=1_000_000)
+    networks: int = Field(default=0, ge=0, le=1_000_000)
+
+
+class DockerSummaryIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    available: bool = False
+    reason: DOCKER_REASONS = ""
+    engine_version: str = Field(default="", max_length=64)
+    api_version: str = Field(default="", max_length=64)
+    compose_version: str = Field(default="", max_length=64)
+    compose_available: bool = False
+    rootless: bool = False
+    storage_driver: str = Field(default="", max_length=64)
+    cgroup_driver: str = Field(default="", max_length=64)
+    docker_root_dir: str = Field(default="", max_length=255)
+    counts: DockerCountsIn = Field(default_factory=DockerCountsIn)
+    inventory_hash: str = Field(default="", max_length=64)
+    inventory_revision: int = Field(default=0, ge=0, le=2_000_000_000)
+    collected_at: str = Field(default="", max_length=64)
+
+
+class DockerContainerIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=64)
+    name: str = Field(default="", max_length=255)
+    image: str = Field(default="", max_length=512)
+    image_id: str = Field(default="", max_length=128)
+    command: str = Field(default="", max_length=2048)
+    state: str = Field(default="", max_length=32)
+    status: str = Field(default="", max_length=255)
+    health: str = Field(default="", max_length=32)
+    created_at: str = Field(default="", max_length=64)
+    started_at: str = Field(default="", max_length=64)
+    finished_at: str = Field(default="", max_length=64)
+    exit_code: int | None = Field(default=None, ge=-1, le=1_000_000)
+    restart_policy: str = Field(default="", max_length=64)
+    ports: list[str] = Field(default_factory=list, max_length=128)
+    labels: dict[str, str] = Field(default_factory=dict, max_length=64)
+    mounts: list[str] = Field(default_factory=list, max_length=128)
+    networks: list[str] = Field(default_factory=list, max_length=64)
+    compose_project: str = Field(default="", max_length=255)
+    compose_service: str = Field(default="", max_length=255)
+    compose_config_hash: str = Field(default="", max_length=128)
+
+
+class DockerImageIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=128)
+    repo_tags: list[str] = Field(default_factory=list, max_length=64)
+    repo_digests: list[str] = Field(default_factory=list, max_length=64)
+    size: int = Field(default=0, ge=0, le=10**15)
+    shared_size: int = Field(default=0, ge=0, le=10**15)
+    containers: int = Field(default=0, ge=0, le=1_000_000)
+    dangling: bool = False
+    created_at: str = Field(default="", max_length=64)
+
+
+class DockerVolumeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=255)
+    driver: str = Field(default="", max_length=64)
+    scope: str = Field(default="", max_length=32)
+    mountpoint: str = Field(default="", max_length=1024)
+    labels: dict[str, str] = Field(default_factory=dict, max_length=64)
+    in_use: bool = False
+
+
+class DockerNetworkIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=128)
+    name: str = Field(default="", max_length=255)
+    driver: str = Field(default="", max_length=64)
+    scope: str = Field(default="", max_length=32)
+    internal: bool = False
+    attachable: bool = False
+    labels: dict[str, str] = Field(default_factory=dict, max_length=64)
+    container_count: int = Field(default=0, ge=0, le=1_000_000)
+
+
+class DockerInventoryIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    summary: DockerSummaryIn
+    containers: list[DockerContainerIn] = Field(default_factory=list, max_length=1000)
+    images: list[DockerImageIn] = Field(default_factory=list, max_length=2000)
+    volumes: list[DockerVolumeIn] = Field(default_factory=list, max_length=1000)
+    networks: list[DockerNetworkIn] = Field(default_factory=list, max_length=500)
+    collected_at: str = Field(default="", max_length=64)
+    hash: str = Field(default="", max_length=64)
+    revision: int = Field(default=0, ge=0, le=2_000_000_000)
+
+
 class HeartbeatIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     hostname: str = Field(default="", max_length=255)
@@ -229,11 +351,12 @@ class HeartbeatIn(BaseModel):
     package_inventory_revision: int = Field(default=0, ge=0)
     package_inventory_deletes: list[list[str]] = Field(default_factory=list, max_length=5000)
     service_inventory_collected_at: str = Field(default="", max_length=64)
+    docker: DockerSummaryIn | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
 class CommandIn(BaseModel):
-    kind: Literal["shell", "power", "service", "refresh", "package"]
+    kind: Literal["shell", "power", "service", "refresh", "package", "docker"]
     args: dict[str, Any] = Field(default_factory=dict)
 
 

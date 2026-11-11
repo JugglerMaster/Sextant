@@ -96,6 +96,9 @@ class Settings:
     store_max_total_gb: int = 20
     update_feed: str = ""
     update_check_hours: int = 6
+    docker_enabled: bool = True
+    docker_inventory_max_bytes: int = 2_000_000
+    docker_inventory_stale_seconds: int = 900
     ssh_key_path: str = ""
     ssh_install_enabled: bool = True
     extra: dict = field(default_factory=dict)
@@ -200,6 +203,13 @@ class Settings:
             store_max_total_gb=_int(env.get("SEXTANT_STORE_MAX_TOTAL_GB"), 20, 1),
             update_feed=env.get("SEXTANT_UPDATE_FEED", "").strip(),
             update_check_hours=_int(env.get("SEXTANT_UPDATE_CHECK_HOURS"), 6, 1),
+            docker_enabled=_bool(env.get("SEXTANT_DOCKER_ENABLED"), True),
+            docker_inventory_max_bytes=max(
+                1024, _int(env.get("SEXTANT_DOCKER_INVENTORY_MAX_BYTES"), 2_000_000, 1024)
+            ),
+            docker_inventory_stale_seconds=max(
+                60, _int(env.get("SEXTANT_DOCKER_INVENTORY_STALE_SECONDS"), 900, 60)
+            ),
             ssh_key_path=env.get("SEXTANT_SSH_KEY_PATH", "").strip() or str(data_dir / "ssh" / "install_key"),
             ssh_install_enabled=_bool(env.get("SEXTANT_SSH_INSTALL_ENABLED"), True),
         )

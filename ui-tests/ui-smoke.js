@@ -144,6 +144,104 @@ const historyCommands = [
   })),
 ];
 
+const dockerHost = {
+  agent_id: "agt_demo",
+  name: "Studio PC",
+  hostname: "studio-pc",
+  os: "linux",
+  online: true,
+  last_seen: "2026-11-06T08:00:00Z",
+  available: true,
+  reason: "",
+  engine_version: "27.5.1",
+  api_version: "1.47",
+  compose_version: "2.32.4",
+  compose_available: true,
+  rootless: false,
+  storage_driver: "overlay2",
+  cgroup_driver: "systemd",
+  docker_root_dir: "/var/lib/docker",
+  counts: {
+    containers: 2,
+    running: 1,
+    paused: 0,
+    stopped: 1,
+    unhealthy: 0,
+    images: 1,
+    volumes: 1,
+    networks: 2,
+  },
+  inventory_hash: "a".repeat(64),
+  inventory_revision: 3,
+  inventory_at: "2026-11-06T08:00:00Z",
+  collected_at: "2026-11-06T08:00:00Z",
+  heartbeat_at: "2026-11-06T08:00:00Z",
+  age_seconds: 30,
+  stale: false,
+  last_error: "",
+};
+const dockerDetail = {
+  server_time: "2026-11-06T08:00:30Z",
+  stale_seconds: 900,
+  host: dockerHost,
+  containers: [
+    {
+      id: "a".repeat(64),
+      name: "web-1",
+      image: "nginx:latest",
+      state: "running",
+      status: "Up 2 hours (healthy)",
+      health: "healthy",
+      ports: ["0.0.0.0:8080->80/tcp"],
+      compose_project: "web",
+    },
+    {
+      id: "b".repeat(64),
+      name: "worker-1",
+      image: "worker:latest",
+      state: "exited",
+      status: "Exited (0) 3 hours ago",
+      health: "",
+      ports: [],
+      compose_project: "",
+    },
+  ],
+  images: [
+    {
+      id: "sha256:" + "c".repeat(64),
+      repo_tags: ["nginx:latest"],
+      repo_digests: [],
+      size: 187000000,
+      shared_size: 0,
+      containers: 1,
+      dangling: false,
+      created_at: "2026-11-06T07:00:00Z",
+    },
+  ],
+  volumes: [
+    {
+      name: "web_data",
+      driver: "local",
+      scope: "local",
+      mountpoint: "/var/lib/docker/volumes/web_data/_data",
+      labels: {},
+      in_use: false,
+    },
+  ],
+  networks: [
+    {
+      id: "d".repeat(64),
+      name: "web_default",
+      driver: "bridge",
+      scope: "local",
+      internal: false,
+      attachable: false,
+      labels: {},
+      container_count: 2,
+    },
+  ],
+};
+
 const responses = {
   "/api/auth/config": { status: 200, body: { ldap_enabled: false, version: "0.3.0", public_url: "" } },
   "/api/me": { status: 401, body: { detail: "Authentication required." } },
@@ -230,6 +328,8 @@ const responses = {
     },
   },
   "/api/profile-tags": { status: 200, body: { assignments: [] } },
+  "/api/docker/hosts": { status: 200, body: { server_time: "2026-11-06T08:00:30Z", stale_seconds: 900, hosts: [dockerHost] } },
+  "/api/docker/hosts/agt_demo": { status: 200, body: dockerDetail },
   "/api/remote-install": { status: 200, body: { jobs: [] } },
   "/api/profiles": {
     status: 200,
@@ -399,6 +499,15 @@ window.fetch = async (path, options = {}) => {
     response = { status: 200, body: { agent: { ...agent, profile_id: body?.profile === "server" ? "prof_server" : agent.profile_id } } };
   } else if (method === "POST" && key === "/api/agents/agt_demo/wake") {
     response = { status: 200, body: { mac: agent.mac, sent: 3 } };
+  } else if (method === "GET" && key === "/api/docker/hosts" && window.__dockerEmpty) {
+    response = { status: 200, body: { server_time: "2026-11-06T08:00:30Z", stale_seconds: 900, hosts: [] } };
+  } else if (method === "POST" && key === "/api/docker/hosts/agt_demo/refresh") {
+    dockerHost.inventory_at = "2026-11-06T08:01:00Z";
+    dockerHost.collected_at = "2026-11-06T08:01:00Z";
+    dockerHost.inventory_revision += 1;
+    dockerHost.age_seconds = 5;
+    dockerHost.stale = false;
+    response = { status: 200, body: { id: "cmd_docker", agent_id: "agt_demo", kind: "docker", args: { action: "inventory.refresh" }, status: "queued", queued: true } };
   } else {
     response = responses[key] || { status: 404, body: { detail: `No mock for ${key}` } };
   }
@@ -1051,6 +1160,60 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!window.document.getElementById("reset-password-dialog").open) throw new Error("reset password dialog did not open");
   window.document.querySelector("[data-close-reset-password]").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 
+  window.document.querySelector('[data-page="docker-hosts"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  if (window.document.getElementById("page-docker-hosts").hidden) throw new Error("Docker Hosts page did not open");
+  const dockerList = window.document.getElementById("docker-host-list");
+  if (!dockerList.textContent.includes("Studio PC") || !dockerList.textContent.includes("27.5.1")) {
+    throw new Error("Docker host list did not render");
+  }
+  if (!window.document.getElementById("docker-hosts-status").textContent.includes("Select one")) {
+    throw new Error("Docker host status did not render");
+  }
+  const dockerOpen = findButton(dockerList, "Open");
+  if (!dockerOpen) throw new Error("Docker host Open action missing");
+  dockerOpen.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  if (window.document.getElementById("docker-host-detail").hidden) throw new Error("Docker host detail did not open");
+  if (!window.document.getElementById("docker-host-title").textContent.includes("Studio PC")) {
+    throw new Error("Docker host detail title is wrong");
+  }
+  window.document.querySelector('[data-docker-tab="containers"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  if (!window.document.getElementById("docker-host-body").textContent.includes("web-1")) {
+    throw new Error("Docker containers did not render");
+  }
+  window.document.querySelector('[data-docker-tab="images"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  if (!window.document.getElementById("docker-host-body").textContent.includes("nginx:latest")) {
+    throw new Error("Docker images did not render");
+  }
+  window.document.getElementById("docker-refresh-host").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(1500);
+  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/docker/hosts/agt_demo/refresh")) {
+    throw new Error("Docker refresh was not queued");
+  }
+  if (!window.document.getElementById("docker-hosts-status").textContent.includes("updated")) {
+    throw new Error("Docker refresh status did not update");
+  }
+  window.document.getElementById("docker-close-host").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  if (!window.document.getElementById("docker-host-detail").hidden) throw new Error("Docker detail did not close");
+
+  window.__dockerEmpty = true;
+  window.document.getElementById("docker-refresh-list").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  if (window.document.getElementById("docker-hosts-empty").hidden) throw new Error("Docker empty state did not render");
+  if (!window.document.getElementById("docker-hosts-empty-text").textContent.includes("Windows Docker is not supported")) {
+    throw new Error("Docker empty state is missing platform guidance");
+  }
+  window.__dockerEmpty = false;
+  window.document.getElementById("docker-refresh-list").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  if (!window.document.getElementById("docker-host-list").textContent.includes("Studio PC")) {
+    throw new Error("Docker host list did not recover after empty state");
+  }
+
   const themeToggle = window.document.getElementById("theme-toggle");
   if (!themeToggle) throw new Error("theme toggle missing");
   if (window.document.documentElement.dataset.theme !== "dark") throw new Error("dark theme should be the default");
@@ -1120,7 +1283,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty state, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

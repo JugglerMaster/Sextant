@@ -271,6 +271,9 @@ Optional installer variables:
 | `AGENT_TAGS` | Comma-separated tags shown in the dashboard |
 | `CA_FILE` | Private CA bundle for TLS verification |
 | `ALLOW_PACKAGES` | Set to `0` to disable managed package actions locally (default `1`) |
+| `ALLOW_DOCKER` | Set to `1` to enable read-only Docker discovery/inventory (default `0`) |
+| `ALLOW_DOCKER_EXEC` / `ALLOW_DOCKER_COMPOSE` / `ALLOW_DOCKER_PRUNE` | Reserved Docker action flags for future phases; stored in the agent config |
+| `DOCKER_SOCKET` / `DOCKER_COMMAND` | Optional local Docker socket/CLI overrides |
 | `NO_SELF_UPDATE` | Set to `1` to disable agent self-update in the config |
 | `PROFILE` | Profile slug selected at enrollment (default `workstation`) |
 | `INSTALL_DIR` | Default `/opt/sextant-agent` |
@@ -278,6 +281,10 @@ Optional installer variables:
 | `CONFIG_FILE` | Default `<CONFIG_DIR>/config.json` |
 
 The installer creates `/opt/sextant-agent/.venv`, the `current -> .venv` symlink, installs the package with `--no-deps`, enrolls, writes mode-0600 config, installs `/etc/systemd/system/sextant-agent.service`, and starts it.
+
+Docker inventory also needs the assigned profile to enable `modules.docker` and
+`actions.allow_docker`; `ALLOW_DOCKER=1` only raises the local ceiling. Windows
+Docker is not supported.
 
 ### 3.2 Manual install
 

@@ -53,7 +53,9 @@ Run the whole suite:
 | `tests/test_assets.py` | Static assets stay compatible with the strict CSP: no inline style attributes or DOM inline-style writes |
 | `tests/test_hardening.py` | Failed-login audit, session registry and revocation, user disable/reset, command cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication |
 | `tests/test_security.py` | Password hashing/policy, session signing/tampering/expiry, token hashing, magic packets, LDAP escaping and role mapping, fake LDAP bind flow |
-| `tests/test_agent.py` | Linux/metric parsers, collector normalization, config persistence, executor builders and policy intersection, agent loop smoke test |
+| `tests/test_agent.py` | Linux/metric parsers, collector normalization, config persistence (including Docker flags/cadence), executor builders and policy intersection, agent loop smoke test |
+| `tests/test_docker_agent.py` | Docker CLI detection reasons, Windows unsupported, heartbeat summary, bounded inventory parsing/caps/hash/revision, Compose-missing reporting, no inspect/env collection, profile/policy gates |
+| `tests/test_docker_api.py` | Docker inventory bearer/ownership/profile gates, strict payload/caps/size limits, atomic replacement, host list/detail RBAC, refresh queue/offline policy, Windows/disabled behavior, read-only command validation |
 | `tests/test_ad_login.py` | AD login provisioning, role mapping, bad credentials, directory outage, local-account precedence |
 | `tests/test_db.py` | Schema initialization and migration of legacy schemas, including alert incident lifecycle columns |
 
@@ -91,7 +93,7 @@ npm ci
 npm test
 ```
 
-`npm test` runs `ui-tests/ui-smoke.js`. It loads the real `sextant_control/static/index.html` and `app.js` in jsdom, replaces `window.fetch` with mocked API responses and `EventSource` with a controllable mock, signs in, and checks the fleet view, update banner, SSE live updates and polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer tabs, package inventory and rule editor, service filters, GPU process list, gap-aware trends charts (timestamp-positioned points and broken lines over null buckets), persistent state-change timeline entries with real event timestamps, the What changed summary, alert first/last-seen and acknowledgement-age labels, recurrence rendering as a fresh active incident, alert actions, paginated command history (search, status filter, page sizes, Previous/Next, X-Y of Z count, and filter-aware CSV export), remote terminal, profiles page, remote install page, and the policy/user/session dialogs. It is a DOM smoke test, not a browser end-to-end test.
+`npm test` runs `ui-tests/ui-smoke.js`. It loads the real `sextant_control/static/index.html` and `app.js` in jsdom, replaces `window.fetch` with mocked API responses and `EventSource` with a controllable mock, signs in, and checks the fleet view, update banner, SSE live updates and polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer tabs, package inventory and rule editor, service filters, GPU process list, gap-aware trends charts (timestamp-positioned points and broken lines over null buckets), persistent state-change timeline entries with real event timestamps, the What changed summary, alert first/last-seen and acknowledgement-age labels, recurrence rendering as a fresh active incident, alert actions, paginated command history (search, status filter, page sizes, Previous/Next, X-Y of Z count, and filter-aware CSV export), remote terminal, profiles page, remote install page, Docker Hosts list/detail/tabs/refresh/empty state, and the policy/user/session dialogs. It is a DOM smoke test, not a browser end-to-end test.
 
 `ui-tests/node_modules` is not committed. `npm ci` needs network access to fetch jsdom; if the directory is absent and the environment is offline, skip the UI test rather than vendoring dependencies.
 
@@ -115,7 +117,7 @@ cd ui-tests
 npm run test:visual
 ```
 
-The suite covers the login page, fleet dashboard with agents and alerts, the drawer Overview/Trends/Services/Packages/History/Remote tabs, light and dark themes at a desktop viewport and a 390px mobile viewport, Ctrl/Cmd+K command palette open/filter/activate/Escape, keyboard-only drawer opening with focus trap and focus return, and axe-core scans of login, dashboard, drawer, and trends in both themes. The axe gate fails on any `serious` or `critical` violation. No rule is excluded for convenience; if a rule is a documented false positive, name the rule and the reason next to the scan.
+The suite covers the login page, fleet dashboard with agents and alerts, the drawer Overview/Trends/Services/Packages/History/Remote tabs, light and dark themes at a desktop viewport and a 390px mobile viewport, Ctrl/Cmd+K command palette open/filter/activate/Escape, keyboard-only drawer opening with focus trap and focus return, and axe-core scans of login, dashboard, drawer, and trends in both themes. Docker Hosts currently has jsdom smoke coverage only; Playwright/axe coverage for the new page is deferred to D2. The axe gate fails on any `serious` or `critical` violation. No rule is excluded for convenience; if a rule is a documented false positive, name the rule and the reason next to the scan.
 
 Screenshots are written to `ui-tests/artifacts/` for manual review. Both `ui-tests/artifacts/` and `ui-tests/test-results/` are gitignored, as are `node_modules` and downloaded browser binaries. The screenshots are review artifacts, not pixel baselines: the suite does not fail on screenshot differences.
 

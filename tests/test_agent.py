@@ -112,6 +112,40 @@ def test_config_rejects_bad_url():
         AgentConfig(server_url="ftp://x", agent_id="a", agent_token="b").validate()
 
 
+def test_docker_config_defaults_and_validation(tmp_path: Path):
+    config = AgentConfig(server_url="https://x", agent_id="a", agent_token="b")
+    assert config.allow_docker is False
+    assert config.allow_docker_exec is False
+    assert config.allow_docker_compose is False
+    assert config.allow_docker_prune is False
+    assert config.docker_socket == "unix:///var/run/docker.sock"
+    assert config.docker_command == "docker"
+    config.docker_timeout = 1
+    config.docker_inventory_interval = 1
+    config.validate()
+    assert config.docker_timeout == 5
+    assert config.docker_inventory_interval == 60
+
+    path = tmp_path / "agent.json"
+    saved = AgentConfig(
+        server_url="https://x",
+        agent_id="a",
+        agent_token="b",
+        allow_docker=True,
+        allow_docker_exec=True,
+        docker_socket="/run/docker.sock",
+        docker_command="/usr/bin/docker",
+        docker_inventory_interval=900,
+    )
+    save_config(saved, path)
+    loaded = load_config(path)
+    assert loaded.allow_docker is True
+    assert loaded.allow_docker_exec is True
+    assert loaded.docker_socket == "/run/docker.sock"
+    assert loaded.docker_command == "/usr/bin/docker"
+    assert loaded.docker_inventory_interval == 900
+
+
 def test_power_command_builders():
     linux = build_power_command("shutdown", 30, os_name="linux")
     assert linux[-1] == "+1"
@@ -266,6 +300,7 @@ def test_agent_runner_smoke(monkeypatch):
 
     def fake_heartbeat(snapshot):
         assert snapshot["hostname"] == "box"
+        assert "docker" in snapshot
         return {"commands": []}
 
     monkeypatch.setattr(runner.collector, "snapshot", fake_snapshot)
@@ -458,6 +493,22 @@ def test_inventory_interval_expiry(monkeypatch):
     now[0] += 2
     collector.snapshot()
     assert calls["services"] == 2
+
+
+def test_agent_docker_refresh_command(monkeypatch):
+    config = AgentConfig(
+        server_url="https://x", agent_id="a", agent_token="b", allow_docker=True
+    )
+    runner = AgentRunner(config)
+    results: list[dict] = []
+    monkeypatch.setattr(runner.docker, "enabled", lambda: True)
+    monkeypatch.setattr(runner, "_upload_docker_inventory", lambda force=False: True)
+    monkeypatch.setattr(runner.client, "send_result", lambda _id, result: results.append(result))
+
+    runner._execute({"id": "cmd-docker", "kind": "docker", "args": {"action": "inventory.refresh"}})
+    assert results
+    assert results[0]["status"] == "succeeded"
+    assert "inventory" in results[0]["stdout"].lower()
 
 
 def test_agent_refresh_command_requests_inventory(monkeypatch):

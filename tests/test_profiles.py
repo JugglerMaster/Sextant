@@ -14,6 +14,10 @@ def test_seeded_profiles_and_rbac(client, admin):
     assert profiles["workstation"]["settings"]["modules"]["package_management"] is True
     assert profiles["workstation"]["settings"]["actions"]["allow_packages"] is True
     assert profiles["server"]["settings"]["modules"]["package_management"] is True
+    assert profiles["workstation"]["settings"]["modules"]["docker"] is False
+    assert profiles["server"]["settings"]["modules"]["docker"] is False
+    assert profiles["workstation"]["settings"]["actions"]["allow_docker"] is False
+    assert profiles["server"]["settings"]["collection"]["docker_inventory_seconds"] == 300
 
     client.post(
         "/api/users",
@@ -112,6 +116,30 @@ def test_tag_profile_assignment_applies_to_members(client, admin):
     assert listing.json()["assignments"][0]["tag"] == "lab"
     deleted = client.delete("/api/profile-tags/lab", headers=headers(admin))
     assert deleted.status_code == 200
+
+
+def test_docker_profile_gate_and_cadence_sync_on_heartbeat(client, admin):
+    profile = next(
+        item for item in client.get("/api/profiles").json()["profiles"] if item["slug"] == "workstation"
+    )
+    settings = profile["settings"]
+    settings["modules"]["docker"] = True
+    settings["actions"]["allow_docker"] = True
+    settings["collection"]["docker_inventory_seconds"] = 120
+    updated = client.patch(
+        f"/api/profiles/{profile['id']}",
+        json={"settings": settings},
+        headers=headers(admin),
+    )
+    assert updated.status_code == 200, updated.text
+
+    agent = enroll_agent(admin)
+    beat = heartbeat(admin, agent, sample_metrics())
+    assert beat["profile"]["modules"]["docker"] is True
+    assert beat["profile"]["collection"]["docker_inventory_seconds"] == 120
+    assert beat["policy"]["allow_docker"] is True
+    assert beat["policy"]["allow_docker_exec"] is False
+    assert beat["policy"]["allow_docker_compose"] is False
 
 
 def test_unknown_profile_is_rejected(client, admin):

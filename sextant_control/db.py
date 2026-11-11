@@ -314,6 +314,100 @@ CREATE TABLE IF NOT EXISTS saved_views (
     updated_at TEXT NOT NULL,
     UNIQUE(user_id, name)
 );
+
+CREATE TABLE IF NOT EXISTS docker_hosts (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    available INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    engine_version TEXT NOT NULL DEFAULT '',
+    api_version TEXT NOT NULL DEFAULT '',
+    compose_version TEXT NOT NULL DEFAULT '',
+    compose_available INTEGER NOT NULL DEFAULT 0,
+    rootless INTEGER NOT NULL DEFAULT 0,
+    storage_driver TEXT NOT NULL DEFAULT '',
+    cgroup_driver TEXT NOT NULL DEFAULT '',
+    docker_root_dir TEXT NOT NULL DEFAULT '',
+    container_count INTEGER NOT NULL DEFAULT 0,
+    running_count INTEGER NOT NULL DEFAULT 0,
+    paused_count INTEGER NOT NULL DEFAULT 0,
+    stopped_count INTEGER NOT NULL DEFAULT 0,
+    unhealthy_count INTEGER NOT NULL DEFAULT 0,
+    image_count INTEGER NOT NULL DEFAULT 0,
+    volume_count INTEGER NOT NULL DEFAULT 0,
+    network_count INTEGER NOT NULL DEFAULT 0,
+    inventory_hash TEXT NOT NULL DEFAULT '',
+    inventory_revision INTEGER NOT NULL DEFAULT 0,
+    inventory_at TEXT,
+    collected_at TEXT,
+    heartbeat_at TEXT,
+    last_error TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS docker_containers (
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    container_id TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    image TEXT NOT NULL DEFAULT '',
+    image_id TEXT NOT NULL DEFAULT '',
+    command TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    health TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL DEFAULT '',
+    finished_at TEXT NOT NULL DEFAULT '',
+    exit_code INTEGER,
+    restart_policy TEXT NOT NULL DEFAULT '',
+    ports TEXT NOT NULL DEFAULT '[]',
+    labels TEXT NOT NULL DEFAULT '{}',
+    mounts TEXT NOT NULL DEFAULT '[]',
+    networks TEXT NOT NULL DEFAULT '[]',
+    compose_project TEXT NOT NULL DEFAULT '',
+    compose_service TEXT NOT NULL DEFAULT '',
+    compose_config_hash TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, container_id)
+);
+
+CREATE TABLE IF NOT EXISTS docker_images (
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    image_id TEXT NOT NULL,
+    repo_tags TEXT NOT NULL DEFAULT '[]',
+    repo_digests TEXT NOT NULL DEFAULT '[]',
+    size INTEGER NOT NULL DEFAULT 0,
+    shared_size INTEGER NOT NULL DEFAULT 0,
+    container_count INTEGER NOT NULL DEFAULT 0,
+    dangling INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, image_id)
+);
+
+CREATE TABLE IF NOT EXISTS docker_volumes (
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    driver TEXT NOT NULL DEFAULT '',
+    scope TEXT NOT NULL DEFAULT '',
+    mountpoint TEXT NOT NULL DEFAULT '',
+    labels TEXT NOT NULL DEFAULT '{}',
+    in_use INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS docker_networks (
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    network_id TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    driver TEXT NOT NULL DEFAULT '',
+    scope TEXT NOT NULL DEFAULT '',
+    internal INTEGER NOT NULL DEFAULT 0,
+    attachable INTEGER NOT NULL DEFAULT 0,
+    labels TEXT NOT NULL DEFAULT '{}',
+    container_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, network_id)
+);
 """
 
 INDEXES = """
@@ -342,6 +436,11 @@ CREATE INDEX IF NOT EXISTS idx_package_inventory_agent ON package_inventory(agen
 CREATE INDEX IF NOT EXISTS idx_package_rules_agent ON package_rules(agent_id, manager);
 CREATE INDEX IF NOT EXISTS idx_agent_profiles_slug ON agent_profiles(slug);
 CREATE INDEX IF NOT EXISTS idx_saved_views_user ON saved_views(user_id);
+CREATE INDEX IF NOT EXISTS idx_docker_hosts_available ON docker_hosts(available, reason);
+CREATE INDEX IF NOT EXISTS idx_docker_containers_agent ON docker_containers(agent_id, state);
+CREATE INDEX IF NOT EXISTS idx_docker_images_agent ON docker_images(agent_id);
+CREATE INDEX IF NOT EXISTS idx_docker_volumes_agent ON docker_volumes(agent_id);
+CREATE INDEX IF NOT EXISTS idx_docker_networks_agent ON docker_networks(agent_id);
 """
 
 DEFAULT_PROFILES = [
@@ -364,17 +463,23 @@ DEFAULT_PROFILES = [
                 "service_control": True,
                 "package_management": True,
                 "self_update": True,
+                "docker": False,
             },
             "collection": {
                 "service_inventory_seconds": 21600,
                 "package_inventory_seconds": 86400,
                 "package_full_seconds": 604800,
+                "docker_inventory_seconds": 300,
             },
             "actions": {
                 "allow_shell": True,
                 "allow_power": True,
                 "allow_service": True,
                 "allow_packages": True,
+                "allow_docker": False,
+                "allow_docker_exec": False,
+                "allow_docker_compose": False,
+                "allow_docker_prune": False,
             },
             "update": {"allow_self_update": True, "channel": "stable"},
             "max_output_bytes": 200000,
@@ -399,17 +504,23 @@ DEFAULT_PROFILES = [
                 "service_control": True,
                 "package_management": True,
                 "self_update": True,
+                "docker": False,
             },
             "collection": {
                 "service_inventory_seconds": 3600,
                 "package_inventory_seconds": 21600,
                 "package_full_seconds": 604800,
+                "docker_inventory_seconds": 300,
             },
             "actions": {
                 "allow_shell": True,
                 "allow_power": True,
                 "allow_service": True,
                 "allow_packages": True,
+                "allow_docker": False,
+                "allow_docker_exec": False,
+                "allow_docker_compose": False,
+                "allow_docker_prune": False,
             },
             "update": {"allow_self_update": True, "channel": "stable"},
             "max_output_bytes": 200000,
@@ -497,8 +608,10 @@ class Database:
             self._seed_profiles(conn)
             if old_version < 6:
                 self._enable_profile_packages(conn)
+            if old_version < 7:
+                self._ensure_docker_profile_defaults(conn)
             conn.executescript(INDEXES)
-            conn.execute("PRAGMA user_version=6")
+            conn.execute("PRAGMA user_version=7")
             conn.execute("UPDATE agents SET profile_id = 'prof_workstation' WHERE profile_id = ''")
         try:
             self.path.chmod(0o600)
@@ -576,6 +689,46 @@ class Database:
                     now,
                 ),
             )
+
+    @staticmethod
+    def _ensure_docker_profile_defaults(conn: sqlite3.Connection) -> None:
+        """Add Docker-off defaults to profiles created before schema version 7."""
+        for row in conn.execute("SELECT id, settings, revision FROM agent_profiles").fetchall():
+            settings = loads(row["settings"], {})
+            if not isinstance(settings, dict):
+                continue
+            modules = settings.get("modules")
+            if not isinstance(modules, dict):
+                modules = {}
+                settings["modules"] = modules
+            collection = settings.get("collection")
+            if not isinstance(collection, dict):
+                collection = {}
+                settings["collection"] = collection
+            actions = settings.get("actions")
+            if not isinstance(actions, dict):
+                actions = {}
+                settings["actions"] = actions
+            changed = False
+            for key, value in (
+                ("docker", False),
+                ("allow_docker", False),
+                ("allow_docker_exec", False),
+                ("allow_docker_compose", False),
+                ("allow_docker_prune", False),
+            ):
+                target = modules if key == "docker" else actions
+                if key not in target:
+                    target[key] = value
+                    changed = True
+            if "docker_inventory_seconds" not in collection:
+                collection["docker_inventory_seconds"] = 300
+                changed = True
+            if changed:
+                conn.execute(
+                    "UPDATE agent_profiles SET settings = ?, revision = revision + 1 WHERE id = ?",
+                    (dumps(settings), row["id"]),
+                )
 
     @staticmethod
     def _enable_profile_packages(conn: sqlite3.Connection) -> None:
@@ -2168,6 +2321,348 @@ class Database:
                 (view_id, user_id),
             )
             return bool(cur.rowcount)
+
+    # ---- Docker inventory ----------------------------------------------
+
+    @staticmethod
+    def _docker_counts_from_rows(
+        containers: list[dict[str, Any]],
+        images: list[dict[str, Any]],
+        volumes: list[dict[str, Any]],
+        networks: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        running = sum(1 for item in containers if str(item.get("state", "")).lower() == "running")
+        paused = sum(1 for item in containers if str(item.get("state", "")).lower() == "paused")
+        unhealthy = sum(1 for item in containers if str(item.get("health", "")).lower() == "unhealthy")
+        return {
+            "containers": len(containers),
+            "running": running,
+            "paused": paused,
+            "stopped": max(0, len(containers) - running - paused),
+            "unhealthy": unhealthy,
+            "images": len(images),
+            "volumes": len(volumes),
+            "networks": len(networks),
+        }
+
+    def record_docker_summary(
+        self,
+        conn: sqlite3.Connection,
+        agent_id: str,
+        summary: dict[str, Any],
+        *,
+        at: str | None = None,
+    ) -> None:
+        """Apply the compact heartbeat summary without touching inventory rows."""
+        heartbeat_at = at or utcnow_iso()
+        reason = str(summary.get("reason") or "")
+        available = bool(summary.get("available"))
+        if reason in {"disabled", "unsupported_os"}:
+            conn.execute("DELETE FROM docker_hosts WHERE agent_id = ?", (agent_id,))
+            return
+        existing = conn.execute(
+            "SELECT agent_id FROM docker_hosts WHERE agent_id = ?", (agent_id,)
+        ).fetchone()
+        counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+        if existing is None:
+            if not available:
+                return
+            conn.execute(
+                """INSERT INTO docker_hosts
+                   (agent_id, available, reason, engine_version, api_version, compose_version,
+                    compose_available, rootless, storage_driver, cgroup_driver, docker_root_dir,
+                    container_count, running_count, paused_count, stopped_count, unhealthy_count,
+                    image_count, volume_count, network_count, inventory_hash, inventory_revision,
+                    collected_at, heartbeat_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    agent_id,
+                    int(available),
+                    reason[:64],
+                    str(summary.get("engine_version") or "")[:64],
+                    str(summary.get("api_version") or "")[:64],
+                    str(summary.get("compose_version") or "")[:64],
+                    int(bool(summary.get("compose_available"))),
+                    int(bool(summary.get("rootless"))),
+                    str(summary.get("storage_driver") or "")[:64],
+                    str(summary.get("cgroup_driver") or "")[:64],
+                    str(summary.get("docker_root_dir") or "")[:255],
+                    int(counts.get("containers") or 0),
+                    int(counts.get("running") or 0),
+                    int(counts.get("paused") or 0),
+                    int(counts.get("stopped") or 0),
+                    int(counts.get("unhealthy") or 0),
+                    int(counts.get("images") or 0),
+                    int(counts.get("volumes") or 0),
+                    int(counts.get("networks") or 0),
+                    str(summary.get("inventory_hash") or "")[:64],
+                    int(summary.get("inventory_revision") or 0),
+                    str(summary.get("collected_at") or "")[:64] or None,
+                    heartbeat_at,
+                ),
+            )
+            return
+        if available:
+            conn.execute(
+                """UPDATE docker_hosts SET
+                     available = 1, reason = ?, engine_version = ?, api_version = ?,
+                     compose_version = ?, compose_available = ?, rootless = ?,
+                     storage_driver = ?, cgroup_driver = ?, docker_root_dir = ?,
+                     container_count = ?, running_count = ?, paused_count = ?,
+                     stopped_count = ?, unhealthy_count = ?, image_count = ?,
+                     volume_count = ?, network_count = ?, inventory_hash = ?,
+                     inventory_revision = ?, collected_at = COALESCE(?, collected_at),
+                     heartbeat_at = ?, last_error = ''
+                   WHERE agent_id = ?""",
+                (
+                    reason[:64],
+                    str(summary.get("engine_version") or "")[:64],
+                    str(summary.get("api_version") or "")[:64],
+                    str(summary.get("compose_version") or "")[:64],
+                    int(bool(summary.get("compose_available"))),
+                    int(bool(summary.get("rootless"))),
+                    str(summary.get("storage_driver") or "")[:64],
+                    str(summary.get("cgroup_driver") or "")[:64],
+                    str(summary.get("docker_root_dir") or "")[:255],
+                    int(counts.get("containers") or 0),
+                    int(counts.get("running") or 0),
+                    int(counts.get("paused") or 0),
+                    int(counts.get("stopped") or 0),
+                    int(counts.get("unhealthy") or 0),
+                    int(counts.get("images") or 0),
+                    int(counts.get("volumes") or 0),
+                    int(counts.get("networks") or 0),
+                    str(summary.get("inventory_hash") or "")[:64],
+                    int(summary.get("inventory_revision") or 0),
+                    str(summary.get("collected_at") or "")[:64] or None,
+                    heartbeat_at,
+                    agent_id,
+                ),
+            )
+        else:
+            conn.execute(
+                """UPDATE docker_hosts
+                   SET available = 0, reason = ?, heartbeat_at = ?, last_error = ''
+                   WHERE agent_id = ?""",
+                (reason[:64], heartbeat_at, agent_id),
+            )
+
+    def replace_docker_inventory(
+        self,
+        conn: sqlite3.Connection,
+        agent_id: str,
+        summary: dict[str, Any],
+        containers: list[dict[str, Any]],
+        images: list[dict[str, Any]],
+        volumes: list[dict[str, Any]],
+        networks: list[dict[str, Any]],
+        *,
+        collected_at: str,
+        inventory_hash: str,
+        revision: int,
+        at: str | None = None,
+    ) -> None:
+        """Replace one host's current inventory atomically in the caller's transaction."""
+        now = at or utcnow_iso()
+        counts = self._docker_counts_from_rows(containers, images, volumes, networks)
+        summary = dict(summary)
+        summary.update(
+            {
+                "available": True,
+                "counts": counts,
+                "inventory_hash": inventory_hash,
+                "inventory_revision": revision,
+                "collected_at": collected_at,
+            }
+        )
+        self.record_docker_summary(conn, agent_id, summary, at=now)
+        conn.execute(
+            """UPDATE docker_hosts SET
+                 available = 1, container_count = ?, running_count = ?, paused_count = ?,
+                 stopped_count = ?, unhealthy_count = ?, image_count = ?, volume_count = ?,
+                 network_count = ?, inventory_hash = ?, inventory_revision = ?,
+                 inventory_at = ?, collected_at = ?, heartbeat_at = ?, last_error = ''
+               WHERE agent_id = ?""",
+            (
+                counts["containers"],
+                counts["running"],
+                counts["paused"],
+                counts["stopped"],
+                counts["unhealthy"],
+                counts["images"],
+                counts["volumes"],
+                counts["networks"],
+                inventory_hash[:64],
+                int(revision),
+                now,
+                collected_at[:64],
+                now,
+                agent_id,
+            ),
+        )
+        conn.execute("DELETE FROM docker_containers WHERE agent_id = ?", (agent_id,))
+        conn.execute("DELETE FROM docker_images WHERE agent_id = ?", (agent_id,))
+        conn.execute("DELETE FROM docker_volumes WHERE agent_id = ?", (agent_id,))
+        conn.execute("DELETE FROM docker_networks WHERE agent_id = ?", (agent_id,))
+        if containers:
+            conn.executemany(
+                """INSERT INTO docker_containers
+                   (agent_id, container_id, name, image, image_id, command, state, status,
+                    health, created_at, started_at, finished_at, exit_code, restart_policy,
+                    ports, labels, mounts, networks, compose_project, compose_service,
+                    compose_config_hash, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        agent_id,
+                        str(item.get("id", ""))[:64],
+                        str(item.get("name", ""))[:255],
+                        str(item.get("image", ""))[:512],
+                        str(item.get("image_id", ""))[:128],
+                        str(item.get("command", ""))[:2048],
+                        str(item.get("state", ""))[:32],
+                        str(item.get("status", ""))[:255],
+                        str(item.get("health", ""))[:32],
+                        str(item.get("created_at", ""))[:64],
+                        str(item.get("started_at", ""))[:64],
+                        str(item.get("finished_at", ""))[:64],
+                        item.get("exit_code"),
+                        str(item.get("restart_policy", ""))[:64],
+                        dumps(item.get("ports") or []),
+                        dumps(item.get("labels") or {}),
+                        dumps(item.get("mounts") or []),
+                        dumps(item.get("networks") or []),
+                        str(item.get("compose_project", ""))[:255],
+                        str(item.get("compose_service", ""))[:255],
+                        str(item.get("compose_config_hash", ""))[:128],
+                        now,
+                    )
+                    for item in containers
+                ],
+            )
+        if images:
+            conn.executemany(
+                """INSERT INTO docker_images
+                   (agent_id, image_id, repo_tags, repo_digests, size, shared_size,
+                    container_count, dangling, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        agent_id,
+                        str(item.get("id", ""))[:128],
+                        dumps(item.get("repo_tags") or []),
+                        dumps(item.get("repo_digests") or []),
+                        int(item.get("size") or 0),
+                        int(item.get("shared_size") or 0),
+                        int(item.get("containers") or 0),
+                        int(bool(item.get("dangling"))),
+                        str(item.get("created_at", ""))[:64],
+                        now,
+                    )
+                    for item in images
+                ],
+            )
+        if volumes:
+            conn.executemany(
+                """INSERT INTO docker_volumes
+                   (agent_id, name, driver, scope, mountpoint, labels, in_use, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        agent_id,
+                        str(item.get("name", ""))[:255],
+                        str(item.get("driver", ""))[:64],
+                        str(item.get("scope", ""))[:32],
+                        str(item.get("mountpoint", ""))[:1024],
+                        dumps(item.get("labels") or {}),
+                        int(bool(item.get("in_use"))),
+                        now,
+                    )
+                    for item in volumes
+                ],
+            )
+        if networks:
+            conn.executemany(
+                """INSERT INTO docker_networks
+                   (agent_id, network_id, name, driver, scope, internal, attachable,
+                    labels, container_count, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        agent_id,
+                        str(item.get("id", ""))[:128],
+                        str(item.get("name", ""))[:255],
+                        str(item.get("driver", ""))[:64],
+                        str(item.get("scope", ""))[:32],
+                        int(bool(item.get("internal"))),
+                        int(bool(item.get("attachable"))),
+                        dumps(item.get("labels") or {}),
+                        int(item.get("container_count") or 0),
+                        now,
+                    )
+                    for item in networks
+                ],
+            )
+
+    @staticmethod
+    def _docker_host_select() -> str:
+        return """SELECT d.*, a.name AS agent_name, a.hostname AS agent_hostname,
+                         a.os AS agent_os, a.last_seen AS agent_last_seen
+                  FROM docker_hosts d
+                  JOIN agents a ON a.id = d.agent_id
+                  WHERE d.reason NOT IN ('disabled', 'unsupported_os')
+                    AND (d.available = 1 OR d.inventory_at IS NOT NULL)"""
+
+    def list_docker_hosts(self) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    self._docker_host_select() + " ORDER BY a.name COLLATE NOCASE"
+                ).fetchall()
+            )
+
+    def get_docker_host(self, agent_id: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                self._docker_host_select() + " AND d.agent_id = ?",
+                (agent_id,),
+            ).fetchone()
+
+    def list_docker_containers(self, agent_id: str) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    "SELECT * FROM docker_containers WHERE agent_id = ? ORDER BY name COLLATE NOCASE",
+                    (agent_id,),
+                ).fetchall()
+            )
+
+    def list_docker_images(self, agent_id: str) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    "SELECT * FROM docker_images WHERE agent_id = ? ORDER BY image_id",
+                    (agent_id,),
+                ).fetchall()
+            )
+
+    def list_docker_volumes(self, agent_id: str) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    "SELECT * FROM docker_volumes WHERE agent_id = ? ORDER BY name COLLATE NOCASE",
+                    (agent_id,),
+                ).fetchall()
+            )
+
+    def list_docker_networks(self, agent_id: str) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    "SELECT * FROM docker_networks WHERE agent_id = ? ORDER BY name COLLATE NOCASE",
+                    (agent_id,),
+                ).fetchall()
+            )
 
     def audit(
         self,

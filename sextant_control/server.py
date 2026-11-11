@@ -42,6 +42,7 @@ from .models import (
     CommandIn,
     CommandOutputIn,
     CommandResultIn,
+    DockerInventoryIn,
     EnrollmentTokenIn,
     HeartbeatIn,
     LoginIn,
@@ -77,6 +78,11 @@ from .views import (
     agent_to_dict,
     bounded_json,
     command_to_dict,
+    docker_container_to_dict,
+    docker_host_to_dict,
+    docker_image_to_dict,
+    docker_network_to_dict,
+    docker_volume_to_dict,
     role_at_least,
     session_to_dict,
     store_package_to_dict,
@@ -183,6 +189,8 @@ def _command_csv_description(row: sqlite3.Row) -> str:
         return f"service: {args.get('action', '?')} {args.get('name', '')}".strip()
     if kind == "refresh":
         return "refresh telemetry"
+    if kind == "docker":
+        return f"docker: {args.get('action', '?')}"
     return kind
 
 
@@ -347,6 +355,11 @@ def _public_settings(settings: Settings) -> dict[str, Any]:
             "telegram_min_severity": settings.telegram_min_severity,
             "telegram_recovery": settings.telegram_recovery,
             "interval_seconds": settings.notify_interval_seconds,
+        },
+        "docker": {
+            "enabled": settings.docker_enabled,
+            "inventory_stale_seconds": settings.docker_inventory_stale_seconds,
+            "inventory_max_bytes": settings.docker_inventory_max_bytes,
         },
     }
 
@@ -672,6 +685,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body_limit = settings.max_body_bytes
             if path.startswith("/api/store/") and request.method in {"PUT", "POST"}:
                 body_limit = max(body_limit, settings.store_max_blob_mb * 1024 * 1024)
+            if (
+                settings.docker_enabled
+                and path.startswith("/api/agent/")
+                and path.endswith("/docker/inventory")
+                and request.method == "POST"
+            ):
+                body_limit = max(body_limit, settings.docker_inventory_max_bytes)
             if length:
                 try:
                     if int(length) > body_limit:
@@ -854,7 +874,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc))
         with database.transaction() as conn:
             agent = conn.execute(
-                "SELECT id, name, last_seen, policy, profile_id FROM agents WHERE id = ?",
+                "SELECT id, name, last_seen, policy, profile_id, os FROM agents WHERE id = ?",
                 (agent_id,),
             ).fetchone()
             if agent is None:
@@ -879,6 +899,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(
                     status_code=409,
                     detail=f"{kind.capitalize()} commands are blocked by this agent's profile or server policy.",
+                )
+            if kind == "docker" and (
+                str(agent["os"]).lower() != "linux"
+                or not _docker_module_enabled(profile_row)
+                or agent_policy.get("allow_docker", True) is False
+                or not profile_actions.get("allow_docker", False)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Docker commands are blocked by this agent's profile or server policy.",
                 )
             last_seen = parse_iso(agent["last_seen"])
             online = bool(
@@ -1509,6 +1539,96 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         del user
         return dashboard_payload(database, config)
 
+    @app.get("/api/docker/hosts")
+    def list_docker_hosts(
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        del user
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        rows = database.list_docker_hosts()
+        now = utcnow()
+        return {
+            "server_time": utcnow_iso(),
+            "stale_seconds": config.docker_inventory_stale_seconds,
+            "hosts": [docker_host_to_dict(row, config, now) for row in rows],
+        }
+
+    @app.get("/api/docker/hosts/{agent_id}")
+    def get_docker_host(
+        agent_id: str,
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        del user
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        row = database.get_docker_host(agent_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Docker host not found.")
+        return {
+            "server_time": utcnow_iso(),
+            "stale_seconds": config.docker_inventory_stale_seconds,
+            "host": docker_host_to_dict(row, config),
+            "containers": [
+                docker_container_to_dict(item)
+                for item in database.list_docker_containers(agent_id)
+            ],
+            "images": [
+                docker_image_to_dict(item) for item in database.list_docker_images(agent_id)
+            ],
+            "volumes": [
+                docker_volume_to_dict(item) for item in database.list_docker_volumes(agent_id)
+            ],
+            "networks": [
+                docker_network_to_dict(item) for item in database.list_docker_networks(agent_id)
+            ],
+        }
+
+    @app.post("/api/docker/hosts/{agent_id}/refresh")
+    def refresh_docker_host(
+        agent_id: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        host_row = database.get_docker_host(agent_id)
+        if host_row is None:
+            raise HTTPException(status_code=404, detail="Docker host not found.")
+        with database.connection() as conn:
+            agent_row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        if agent_row is None:
+            raise HTTPException(status_code=404, detail="Agent not found.")
+        profile_row = database.get_profile_by_id(
+            agent_row["profile_id"]
+        ) or database.get_profile_by_slug("workstation")
+        if not _docker_effective_allowed(agent_row, profile_row, config):
+            raise HTTPException(
+                status_code=409,
+                detail="Docker is disabled by the agent profile or server policy.",
+            )
+        if not host_row["available"]:
+            raise HTTPException(status_code=409, detail="Docker is not currently reachable on this host.")
+        command = queue_command(
+            agent_id,
+            "docker",
+            {"action": "inventory.refresh"},
+            user,
+            request,
+            database,
+            config,
+            audit_action="docker.inventory_refresh",
+            extra_detail={"host": host_row["agent_name"]},
+        )
+        command["queued"] = True
+        return command
+
     @app.get("/api/events")
     async def dashboard_events(
         request: Request,
@@ -2039,6 +2159,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 payload.allow_power,
                 payload.allow_service,
                 payload.allow_packages,
+                payload.allow_docker,
+                payload.allow_docker_exec,
+                payload.allow_docker_compose,
+                payload.allow_docker_prune,
             )
         ):
             raise HTTPException(status_code=400, detail="No agent changes supplied.")
@@ -2076,7 +2200,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 tag_profile_id = database.profile_for_tags(tags)
                 if tag_profile_id:
                     profile_id = tag_profile_id
-            for flag in ("allow_shell", "allow_power", "allow_service", "allow_packages"):
+            for flag in (
+                "allow_shell",
+                "allow_power",
+                "allow_service",
+                "allow_packages",
+                "allow_docker",
+                "allow_docker_exec",
+                "allow_docker_compose",
+                "allow_docker_prune",
+            ):
                 value = getattr(payload, flag)
                 if value is not None:
                     policy[flag] = bool(value)
@@ -2095,6 +2228,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "allow_power": bool(policy.get("allow_power", True)),
                             "allow_service": bool(policy.get("allow_service", True)),
                             "allow_packages": bool(policy.get("allow_packages", True)),
+                            "allow_docker": bool(policy.get("allow_docker", False)),
+                            "allow_docker_exec": bool(policy.get("allow_docker_exec", False)),
+                            "allow_docker_compose": bool(policy.get("allow_docker_compose", False)),
+                            "allow_docker_prune": bool(policy.get("allow_docker_prune", False)),
                         }
                     ),
                     agent_id,
@@ -2113,6 +2250,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "allow_power": bool(policy.get("allow_power", True)),
                     "allow_service": bool(policy.get("allow_service", True)),
                     "allow_packages": bool(policy.get("allow_packages", True)),
+                    "allow_docker": bool(policy.get("allow_docker", False)),
+                    "allow_docker_exec": bool(policy.get("allow_docker_exec", False)),
+                    "allow_docker_compose": bool(policy.get("allow_docker_compose", False)),
+                    "allow_docker_prune": bool(policy.get("allow_docker_prune", False)),
                 },
                 ip=client_ip(request, config.trust_proxy),
                 conn=conn,
@@ -2947,6 +3088,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             old_last_seen
             and (now - old_last_seen).total_seconds() <= config.offline_after_seconds
         )
+        profile_row_for_docker = database.get_profile_by_id(
+            agent["profile_id"]
+        ) or database.get_profile_by_slug("workstation")
+        docker_allowed = _docker_effective_allowed(agent, profile_row_for_docker, config)
 
         with database.transaction() as conn:
             conn.execute(
@@ -2979,6 +3124,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     agent_id,
                 ),
             )
+            if payload.docker is not None:
+                if docker_allowed:
+                    database.record_docker_summary(
+                        conn,
+                        agent_id,
+                        payload.docker.model_dump(),
+                        at=stamp,
+                    )
+                else:
+                    conn.execute("DELETE FROM docker_hosts WHERE agent_id = ?", (agent_id,))
             if config.telemetry_history:
                 database.insert_telemetry_sample(
                     conn,
@@ -3106,7 +3261,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         policy = loads(agent["policy"], {})
         if not isinstance(policy, dict):
             policy = {}
-        profile_row = database.get_profile_by_id(agent["profile_id"]) or database.get_profile_by_slug("workstation")
+        profile_row = profile_row_for_docker
         profile_settings = _profile_settings(profile_row)
         profile_actions = _policy_from_settings(profile_settings)
         watch_services = loads(agent["watch_services"], [])
@@ -3117,8 +3272,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "allow_power": bool(policy.get("allow_power", True)) and profile_actions["allow_power"],
             "allow_service": bool(policy.get("allow_service", True)) and profile_actions["allow_service"],
             "allow_packages": bool(policy.get("allow_packages", True)) and profile_actions["allow_packages"],
+            "allow_docker": bool(policy.get("allow_docker", True)) and profile_actions["allow_docker"],
+            "allow_docker_exec": bool(policy.get("allow_docker_exec", True))
+            and profile_actions["allow_docker_exec"],
+            "allow_docker_compose": bool(policy.get("allow_docker_compose", True))
+            and profile_actions["allow_docker_compose"],
+            "allow_docker_prune": bool(policy.get("allow_docker_prune", True))
+            and profile_actions["allow_docker_prune"],
             "watch_services": watch_services,
         }
+        request_docker_inventory = ""
+        if docker_allowed and payload.docker is not None and payload.docker.available:
+            docker_row = database.get_docker_host(agent_id)
+            if (
+                docker_row is None
+                or not docker_row["inventory_at"]
+                or (
+                    payload.docker.inventory_hash
+                    and docker_row["inventory_hash"] != payload.docker.inventory_hash
+                )
+            ):
+                request_docker_inventory = "full"
         agent_update_info: dict[str, Any] = {"available": False, "current_version": current_version}
         release = _latest_agent_release(database)
         if release is not None:
@@ -3143,8 +3317,67 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "profile": _profile_payload(profile_row),
             "request_package_inventory": request_inventory_full,
             "package_inventory_revision": new_revision,
+            "request_docker_inventory": request_docker_inventory,
             "commands": dispatch,
             "agent_update": agent_update_info,
+        }
+
+    @app.post("/api/agent/{agent_id}/docker/inventory")
+    def agent_docker_inventory(
+        agent_id: str,
+        payload: DockerInventoryIn,
+        request: Request,
+        agent: dict[str, Any] = Depends(agent_auth),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if not config.docker_enabled:
+            raise HTTPException(status_code=404, detail="Docker management is disabled.")
+        if str(agent.get("os", "")).lower() != "linux":
+            raise HTTPException(status_code=409, detail="Docker inventory is Linux-only.")
+        profile_row = database.get_profile_by_id(
+            agent["profile_id"]
+        ) or database.get_profile_by_slug("workstation")
+        if not _docker_effective_allowed(agent, profile_row, config):
+            raise HTTPException(
+                status_code=409,
+                detail="Docker inventory is disabled by the agent profile or server policy.",
+            )
+        if not payload.summary.available:
+            raise HTTPException(status_code=409, detail="The agent did not report a usable Docker engine.")
+        if payload.hash != payload.summary.inventory_hash:
+            raise HTTPException(status_code=400, detail="Docker inventory hash does not match the summary.")
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > config.docker_inventory_max_bytes:
+                    raise HTTPException(status_code=413, detail="Docker inventory payload is too large.")
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid Content-Length.")
+        if len(payload.model_dump_json().encode("utf-8")) > config.docker_inventory_max_bytes:
+            raise HTTPException(status_code=413, detail="Docker inventory payload is too large.")
+
+        summary = payload.summary.model_dump()
+        with database.transaction() as conn:
+            database.replace_docker_inventory(
+                conn,
+                agent_id,
+                summary,
+                [item.model_dump() for item in payload.containers],
+                [item.model_dump() for item in payload.images],
+                [item.model_dump() for item in payload.volumes],
+                [item.model_dump() for item in payload.networks],
+                collected_at=payload.collected_at,
+                inventory_hash=payload.hash,
+                revision=payload.revision,
+            )
+        notify_dashboard()
+        return {
+            "revision": payload.revision,
+            "containers": len(payload.containers),
+            "images": len(payload.images),
+            "volumes": len(payload.volumes),
+            "networks": len(payload.networks),
         }
 
     @app.post("/api/agent/{agent_id}/commands/{command_id}/output")
@@ -4230,7 +4463,31 @@ def _policy_from_settings(settings: dict[str, Any]) -> dict[str, bool]:
         "allow_power": bool(actions.get("allow_power", True)),
         "allow_service": bool(actions.get("allow_service", True)),
         "allow_packages": bool(actions.get("allow_packages", True)),
+        "allow_docker": bool(actions.get("allow_docker", False)),
+        "allow_docker_exec": bool(actions.get("allow_docker_exec", False)),
+        "allow_docker_compose": bool(actions.get("allow_docker_compose", False)),
+        "allow_docker_prune": bool(actions.get("allow_docker_prune", False)),
     }
+
+
+def _docker_module_enabled(profile_row: Any) -> bool:
+    settings = _profile_settings(profile_row)
+    modules = settings.get("modules") if isinstance(settings.get("modules"), dict) else {}
+    return bool(modules.get("docker", False))
+
+
+def _docker_effective_allowed(agent_row: Any, profile_row: Any, config: Settings) -> bool:
+    if not config.docker_enabled:
+        return False
+    if str(agent_row["os"] if "os" in agent_row.keys() else agent_row.get("os", "")).lower() != "linux":
+        return False
+    if not _docker_module_enabled(profile_row):
+        return False
+    actions = _policy_from_settings(_profile_settings(profile_row))
+    policy = loads(agent_row["policy"] if "policy" in agent_row.keys() else agent_row.get("policy"), {})
+    if not isinstance(policy, dict):
+        policy = {}
+    return bool(policy.get("allow_docker", True)) and actions["allow_docker"]
 
 
 def _profile_settings(row: Any) -> dict[str, Any]:

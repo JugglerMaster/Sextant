@@ -11,6 +11,7 @@ from typing import Any
 from .client import AgentClient, AgentHTTPError
 from .collectors import MetricsCollector
 from .config import AgentConfig
+from .docker import DockerCollector
 from .executor import execute_command
 
 logger = logging.getLogger("sextant_agent")
@@ -99,6 +100,7 @@ class AgentRunner:
         self.config = config
         self.client = AgentClient(config)
         self.collector = MetricsCollector(config)
+        self.docker = DockerCollector(config)
         self.remote_policy: dict[str, Any] = {}
         self.stop_event = threading.Event()
         self._installed_signals = False
@@ -135,6 +137,7 @@ class AgentRunner:
         while not self.stop_event.is_set():
             try:
                 snapshot = self.collector.snapshot()
+                snapshot["docker"] = self.docker.summary()
                 response = self.client.heartbeat(snapshot)
                 self.collector.ack_package_payload(response.get("package_inventory_revision"))
                 failures = 0
@@ -142,12 +145,15 @@ class AgentRunner:
                 self._apply_profile(response.get("profile"))
                 if response.get("request_package_inventory") == "full":
                     self.collector.request_package_full()
+                if response.get("request_docker_inventory"):
+                    self.docker.request_inventory()
                 self._note_update(response.get("agent_update"))
                 commands = response.get("commands") or []
                 for command in commands:
                     if self.stop_event.is_set():
                         break
                     self._execute(command)
+                self._upload_docker_inventory()
                 if once:
                     return 0
                 if commands:
@@ -181,8 +187,12 @@ class AgentRunner:
         command_id = str(command.get("id", ""))
         kind = str(command.get("kind", ""))
         logger.info("Executing command %s (%s)", command_id, kind)
+        if kind == "docker":
+            self._execute_docker(command)
+            return
         if kind == "refresh":
             self.collector.request_inventory_refresh()
+            self.docker.request_inventory()
         uploader = _OutputUploader(self.client, command_id) if command_id else None
 
         def on_chunk(stream: str, text: str) -> None:
@@ -217,6 +227,70 @@ class AgentRunner:
             time.time() - started,
         )
 
+        self._post_result(command_id, result)
+
+    def _execute_docker(self, command: dict[str, Any]) -> None:
+        command_id = str(command.get("id", ""))
+        args = command.get("args") if isinstance(command.get("args"), dict) else {}
+        action = str(args.get("action", "")).lower()
+        started = time.time()
+        if action != "inventory.refresh":
+            result = {
+                "status": "failed",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "error": "Unsupported Docker action in this phase.",
+            }
+        elif not self.docker.enabled():
+            result = {
+                "status": "failed",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "error": "Docker collection is disabled by local config, profile, or server policy.",
+            }
+        elif self._upload_docker_inventory(force=True):
+            result = {
+                "status": "succeeded",
+                "exit_code": 0,
+                "stdout": "Docker inventory refreshed.",
+                "stderr": "",
+                "error": "",
+            }
+        else:
+            result = {
+                "status": "failed",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "error": "Docker inventory could not be collected or uploaded.",
+            }
+        result["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started))
+        result["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self._post_result(command_id, result)
+
+    def _upload_docker_inventory(self, force: bool = False) -> bool:
+        payload = self.docker.collect_inventory(force=force)
+        if payload is None:
+            return False
+        try:
+            self.client.upload_docker_inventory(payload)
+            logger.info(
+                "Uploaded Docker inventory revision %s (%s containers, %s images)",
+                payload.get("revision"),
+                len(payload.get("containers") or []),
+                len(payload.get("images") or []),
+            )
+            return True
+        except Exception as exc:
+            logger.warning("Could not upload Docker inventory: %s", exc)
+            self.docker.request_inventory()
+            return False
+
+    def _post_result(self, command_id: str, result: dict[str, Any]) -> None:
+        if not command_id:
+            return
         last_error: Exception | None = None
         for attempt in range(1, 4):
             try:
@@ -279,7 +353,21 @@ class AgentRunner:
         self.remote_policy["allow_packages"] = bool(self.remote_policy.get("allow_packages", False)) and bool(
             modules.get("package_management", False)
         )
+        self.remote_policy["allow_docker"] = bool(self.remote_policy.get("allow_docker", False)) and bool(
+            modules.get("docker", False)
+        )
+        self.remote_policy["allow_docker_exec"] = bool(
+            self.remote_policy.get("allow_docker_exec", False)
+        ) and bool(modules.get("docker", False))
+        self.remote_policy["allow_docker_compose"] = bool(
+            self.remote_policy.get("allow_docker_compose", False)
+        ) and bool(modules.get("docker", False))
+        self.remote_policy["allow_docker_prune"] = bool(
+            self.remote_policy.get("allow_docker_prune", False)
+        ) and bool(modules.get("docker", False))
         self.collector.set_profile(profile)
+        self.docker.set_profile(profile)
+        self.docker.set_policy(self.remote_policy)
 
     def _apply_policy(self, policy: Any) -> None:
         if not isinstance(policy, dict):
@@ -292,7 +380,12 @@ class AgentRunner:
             "allow_power": bool(policy.get("allow_power", True)),
             "allow_service": bool(policy.get("allow_service", True)),
             "allow_packages": bool(policy.get("allow_packages", False)),
+            "allow_docker": bool(policy.get("allow_docker", False)),
+            "allow_docker_exec": bool(policy.get("allow_docker_exec", False)),
+            "allow_docker_compose": bool(policy.get("allow_docker_compose", False)),
+            "allow_docker_prune": bool(policy.get("allow_docker_prune", False)),
         }
+        self.docker.set_policy(self.remote_policy)
 
     def health(self) -> dict[str, Any]:
         return self.client.health()

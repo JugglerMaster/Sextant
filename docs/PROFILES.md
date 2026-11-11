@@ -17,6 +17,8 @@ Agent profiles are named sets of **agent behavior settings**. They are created a
 | Telemetry | every heartbeat | every heartbeat |
 | Shell / power / service | enabled | enabled |
 | Package management | enabled (optional) | enabled (optional) |
+| Docker inventory | **off** | **off** |
+| Docker inventory cadence | 300s when enabled | 300s when enabled |
 | Self-update | enabled | enabled |
 | Max command output | 200,000 chars | 200,000 chars |
 
@@ -51,18 +53,24 @@ The selected profile is stored on the agent at enrollment. Its settings live on 
     "power": true,
     "service_control": true,
     "package_management": true,
-    "self_update": true
+    "self_update": true,
+    "docker": false
   },
   "collection": {
     "service_inventory_seconds": 21600,
     "package_inventory_seconds": 86400,
-    "package_full_seconds": 604800
+    "package_full_seconds": 604800,
+    "docker_inventory_seconds": 300
   },
   "actions": {
     "allow_shell": true,
     "allow_power": true,
     "allow_service": true,
-    "allow_packages": true
+    "allow_packages": true,
+    "allow_docker": false,
+    "allow_docker_exec": false,
+    "allow_docker_compose": false,
+    "allow_docker_prune": false
   },
   "update": {
     "allow_self_update": true,
@@ -80,9 +88,10 @@ Ranges:
 | `service_inventory_seconds` | 60–86400 |
 | `package_inventory_seconds` | 300–604800 |
 | `package_full_seconds` | 3600–2592000, ≥ package inventory |
+| `docker_inventory_seconds` | 60–86400 |
 | `max_output_bytes` | 1,024–1,000,000 |
 
-Modules disable collection or action paths. Disabling telemetry still leaves the heartbeat/liveness channel working but sends empty metrics. Disabling `package_management` forces package actions off even if `allow_packages` is true. Local agent config remains a hard ceiling.
+Modules disable collection or action paths. Disabling telemetry still leaves the heartbeat/liveness channel working but sends empty metrics. Disabling `package_management` forces package actions off even if `allow_packages` is true. Docker is off by default in both built-in profiles: enable `modules.docker` **and** `actions.allow_docker`, then install/enroll the Linux agent with `ALLOW_DOCKER=1`. Local agent config remains a hard ceiling. The exec/compose/prune action gates are stored for future phases but are inactive in D1.
 
 ---
 
@@ -90,7 +99,7 @@ Modules disable collection or action paths. Disabling telemetry still leaves the
 
 1. At enrollment, the server resolves the requested profile slug and stores `profile_id` on the agent. The enrollment response includes the profile slug and heartbeat interval, and the agent's per-agent policy is initialized from the profile's action gates.
 2. Every heartbeat response includes the full `profile` object and its revision.
-3. The agent applies heartbeat interval, collection cadences, module flags, max output, and self-update policy immediately. No reinstall is needed.
+3. The agent applies heartbeat interval, collection cadences, module flags (including `docker`), Docker inventory cadence, max output, and self-update policy immediately. No reinstall is needed.
 4. Profile edits bump the revision; agents apply the new settings on their next heartbeat. The per-agent policy remains a **narrowing** override only — it can restrict an action further but cannot widen the profile.
 5. If an agent is offline, it keeps its last profile until the next heartbeat.
 
@@ -176,7 +185,7 @@ Run these as the service user with `SEXTANT_DATA_DIR` set, or use the API from t
 **Profiles** page (admin):
 
 - list built-in and custom profiles, assigned agent counts, revision, and a cadence summary;
-- create/edit name, description, heartbeat, service/package/full cadences, max output, modules, action gates, and update policy;
+- create/edit name, description, heartbeat, service/package/full Docker cadences, max output, modules, action gates, and update policy;
 - reset built-in profiles to defaults;
 - delete unassigned custom profiles;
 - manage tag → profile assignments.

@@ -10,6 +10,7 @@ The dashboard is a vanilla HTML/CSS/JS single page backed by the FastAPI API. Th
 - **Saved views** — per-user server-side views (`GET`/`POST`/`DELETE /api/saved-views`) with a localStorage import/fallback only.
 - **Bulk actions** — one `POST /api/agents/bulk` request with a per-agent queued/sent/updated/failed summary, including failed machine names and messages.
 - **Device drawer** — Overview (with 24h sparklines), Disks, GPU, Services, Startup, Packages, Remote, History, Trends.
+- **Docker Hosts** (D1, read-only) — host list of agents reporting Docker, selected-host Overview, Containers, Images, Volumes, and Networks tabs from cached inventory, freshness badge, unavailable reasons, and **Refresh now** (queues a read-only inventory refresh). No mutations, exec, cleanup, or Compose UI yet.
 - **Packages** — inventory with interactive table, **desired-state rule editor** (admin), drift summary, Sync now.
 - **Profiles** — create/edit/reset/delete profiles, modules, action gates, cadences, tag assignments.
 - **Remote install** — Linux SSH install jobs with test/install/log.
@@ -28,6 +29,7 @@ Use these consistently in the UI and API:
 | **Telemetry updated** | Last fast metrics sample (CPU, memory, disks, GPU). Normally the heartbeat. | heartbeat / `telemetry_samples.at` |
 | **Inventory updated** | Last service/startup/GPU-process inventory snapshot. | `agents.service_inventory_at` |
 | **Package inventory updated** | Last package snapshot or delta acknowledgement. | `package_inventory.last_seen` / `package_inventory_state.updated_at` |
+| **Docker inventory updated** | Last uploaded Docker inventory snapshot. | `docker_hosts.inventory_at` / `collected_at` |
 
 Recommended display:
 
@@ -42,7 +44,7 @@ Do not label an old inventory as “stale” solely because the heartbeat is rec
 - **Inventory stale** when `now - inventory_updated > 1.5 × profile package_inventory_seconds` (or service cadence for services).
 - Show the cadence next to the age so an old timestamp is understandable.
 
-Current state: the Packages tab, agent cards, and drawer Overview show **Heartbeat** and **Inventory updated**. The service-inventory timestamp is stored in `agents.service_inventory_at`. A cadence-aware stale badge is still pending.
+Current state: the Packages tab, agent cards, and drawer Overview show **Heartbeat** and **Inventory updated**. The service-inventory timestamp is stored in `agents.service_inventory_at`. The Docker Hosts page shows Docker inventory age and a stale badge using `docker_hosts.inventory_at` and `SEXTANT_DOCKER_INVENTORY_STALE_SECONDS`.
 
 ---
 
@@ -73,6 +75,7 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 - Trends tab with gap-aware 24h/7d detail charts, a persistent state-change timeline, and a What changed summary.
 - Light/dark theme toggle and a Ctrl/Cmd+K command palette.
 - Live dashboard updates over change-driven SSE with polling fallback.
+- Docker Hosts page with host selection, cached read-only container/image/volume/network tables, empty/unavailable/stale states, and an `aria-live` refresh status.
 
 ---
 
