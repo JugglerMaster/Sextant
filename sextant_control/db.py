@@ -165,6 +165,31 @@ CREATE TABLE IF NOT EXISTS agent_events (
     detail TEXT NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS notification_availability (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    offline_incident_id TEXT NOT NULL DEFAULT '',
+    offline_since TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notification_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    event_key TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    agent_id TEXT,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'sent', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    sent_at TEXT,
+    error TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS store_packages (
     id TEXT PRIMARY KEY,
     slug TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -305,6 +330,9 @@ CREATE INDEX IF NOT EXISTS idx_telemetry_agent_at ON telemetry_samples(agent_id,
 CREATE INDEX IF NOT EXISTS idx_telemetry_at ON telemetry_samples(at);
 CREATE INDEX IF NOT EXISTS idx_agent_events_agent_at ON agent_events(agent_id, at);
 CREATE INDEX IF NOT EXISTS idx_agent_events_at ON agent_events(at);
+CREATE INDEX IF NOT EXISTS idx_notification_log_at ON notification_log(at);
+CREATE INDEX IF NOT EXISTS idx_notification_log_status ON notification_log(status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_notification_log_agent ON notification_log(agent_id, at);
 CREATE INDEX IF NOT EXISTS idx_commands_status_dispatched ON commands(status, dispatched_at);
 CREATE INDEX IF NOT EXISTS idx_commands_status_created ON commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_command_output_command ON command_output(command_id, id);
@@ -1333,6 +1361,160 @@ class Database:
             return conn.execute(sql, params).rowcount == 1
         with self.connection() as own:
             return own.execute(sql, params).rowcount == 1
+
+    # ---- Notification outbox and offline availability ------------------
+
+    def get_availability(self, agent_id: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM notification_availability WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+
+    def set_offline_availability(self, agent_id: str, incident_id: str, since: str) -> None:
+        now = utcnow_iso()
+        sql = """INSERT INTO notification_availability
+                   (agent_id, offline_incident_id, offline_since, updated_at)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(agent_id) DO UPDATE SET
+                   offline_incident_id = excluded.offline_incident_id,
+                   offline_since = excluded.offline_since,
+                   updated_at = excluded.updated_at"""
+        with self.connection() as conn:
+            conn.execute(sql, (agent_id, incident_id, since, now))
+
+    def clear_offline_availability(self, agent_id: str) -> None:
+        with self.connection() as conn:
+            conn.execute("DELETE FROM notification_availability WHERE agent_id = ?", (agent_id,))
+
+    def notification_exists(self, event_key: str) -> bool:
+        with self.connection() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM notification_log WHERE event_key = ? LIMIT 1", (event_key,)
+                ).fetchone()
+                is not None
+            )
+
+    def get_notification(self, event_key: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM notification_log WHERE event_key = ?", (event_key,)
+            ).fetchone()
+
+    def enqueue_notification(
+        self,
+        event_key: str,
+        kind: str,
+        severity: str,
+        agent_id: str | None,
+        title: str,
+        body: str = "",
+        url: str = "",
+    ) -> bool:
+        """Insert one outbox row. Returns False when the event is already queued."""
+        now = utcnow_iso()
+        sql = """INSERT OR IGNORE INTO notification_log
+                   (at, event_key, kind, severity, agent_id, title, body, url,
+                    status, attempts, next_attempt_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)"""
+        with self.connection() as conn:
+            cur = conn.execute(
+                sql,
+                (
+                    now,
+                    event_key,
+                    str(kind)[:32],
+                    str(severity)[:16],
+                    agent_id,
+                    str(title)[:500],
+                    str(body)[:4000],
+                    str(url)[:1000],
+                    now,
+                ),
+            )
+            return cur.rowcount == 1
+
+    def due_notifications(self, now: str, limit: int = 20) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """SELECT * FROM notification_log
+                       WHERE status = 'pending'
+                         AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                       ORDER BY CASE severity
+                                  WHEN 'critical' THEN 0
+                                  WHEN 'warning' THEN 1
+                                  ELSE 2
+                                END,
+                                id ASC
+                       LIMIT ?""",
+                    (now, max(1, int(limit))),
+                ).fetchall()
+            )
+
+    def mark_notification_sent(self, notification_id: int) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE notification_log SET
+                     status = 'sent', attempts = attempts + 1, sent_at = ?,
+                     next_attempt_at = NULL, error = ''
+                   WHERE id = ?""",
+                (utcnow_iso(), notification_id),
+            )
+
+    def mark_notification_failed(
+        self,
+        notification_id: int,
+        error: str,
+        next_attempt_at: str | None,
+    ) -> None:
+        status = "pending" if next_attempt_at else "failed"
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE notification_log SET
+                     status = ?, attempts = attempts + 1,
+                     next_attempt_at = ?, error = ?
+                   WHERE id = ?""",
+                (status, next_attempt_at, str(error)[:1000], notification_id),
+            )
+
+    def list_notifications(self, limit: int = 50) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    "SELECT * FROM notification_log ORDER BY id DESC LIMIT ?",
+                    (max(1, min(200, int(limit))),),
+                ).fetchall()
+            )
+
+    def notification_counts(self) -> dict[str, int]:
+        counts = {"pending": 0, "sent": 0, "failed": 0}
+        with self.connection() as conn:
+            for row in conn.execute(
+                "SELECT status, COUNT(*) AS n FROM notification_log GROUP BY status"
+            ).fetchall():
+                counts[str(row["status"])] = int(row["n"])
+        return counts
+
+    def retry_failed_notifications(self) -> int:
+        with self.connection() as conn:
+            cur = conn.execute(
+                """UPDATE notification_log SET
+                     status = 'pending', attempts = 0, next_attempt_at = ?, error = ''
+                   WHERE status = 'failed'""",
+                (utcnow_iso(),),
+            )
+            return int(cur.rowcount or 0)
+
+    def prune_notifications(self, retention_days: int = 90) -> int:
+        days = max(1, min(3650, int(retention_days)))
+        cutoff = (utcnow() - timedelta(days=days)).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self.connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM notification_log WHERE at < ? AND status IN ('sent', 'failed')",
+                (cutoff,),
+            )
+            return int(cur.rowcount or 0)
 
 
     # ---- Agent / command housekeeping ----------------------------------

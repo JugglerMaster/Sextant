@@ -18,6 +18,7 @@ There is no agent listener and no third-party relay.
 | LDAP client | `sextant_control/ldap_auth.py` | Service bind, user search, user credential bind, group→role mapping. |
 | Package store | `sextant_control/store.py` | Content-addressed artifact blobs, SHA-256 integrity, quotas, GC. |
 | Update checker | `sextant_control/updates.py` | Read-only server release check (GitHub or static JSON). |
+| Notifications | `sextant_control/notifications.py` | Background condition evaluator, Telegram delivery, persisted outbox, retry/backoff. |
 | Remote install | `sextant_control/remote_install.py` | Key-based SSH install for Linux, job log, one-time enrollment. |
 | Agent | `sextant_agent/` | Heartbeat, telemetry collectors, package inventory/actions, self-update, queued command execution, result posting. |
 | Deployment assets | `deploy/` | systemd units, nginx config, Linux/Windows installers, env template. |
@@ -190,6 +191,10 @@ The computed conditions are reconciled into `alert_states` on every heartbeat an
 - if the same key reappears after being cleared, it starts a new incident with a new id and fresh first-seen time, so the old acknowledgement cannot mute it.
 
 Acknowledgements are also bounded by `SEXTANT_ALERT_ACK_TTL_HOURS` (default 168, range 1–8760) from `acknowledged_at`; an expired acknowledgement is cleared so a persistent alert eventually becomes active again. Snoozes keep their explicit `snoozed_until` expiry. `alert_count` counts only current, unacknowledged, unexpired alerts. Raise/clear/acknowledge/re-acknowledge/snooze/expiry transitions are written to `agent_events`; steady heartbeats do not create events.
+
+### Notifications
+
+When Telegram is configured (`SEXTANT_TELEGRAM_BOT_TOKEN` and `SEXTANT_TELEGRAM_CHAT_ID`), `NotificationService` runs in the FastAPI lifespan on `SEXTANT_NOTIFY_INTERVAL_SECONDS` (default 20). Each tick reconciles alert conditions for all agents, detects offline/online transitions, writes one `notification_log` outbox row per incident (unique `event_key`), and delivers due rows with a 10-second timeout, 1 message/second pacing, and exponential backoff. Acknowledgements and snoozes suppress new health notifications. A recovery message is sent only when the corresponding raise was delivered. The token is never persisted in logs or returned by the API. This is single-worker state; there is no cross-process lease yet.
 
 ## Package store and application management
 

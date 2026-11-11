@@ -4,6 +4,16 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [Unreleased]
+
+### Added
+
+- Telegram notifications for offline/online, disk, memory, GPU-temperature, and
+  watched-service incidents, with per-incident deduplication, acknowledgement
+  and snooze suppression, recovery messages, a persisted outbox with retry and
+  backoff, admin status/log/test/retry API endpoints, and `sextant notify-test`,
+  `notify-log`, and `notify-retry` CLI commands.
+
 ## [0.3.1] - 2026-11-11
 
 ### Added

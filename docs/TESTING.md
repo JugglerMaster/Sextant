@@ -46,6 +46,7 @@ Run the whole suite:
 | `tests/test_history.py` | Heartbeat-derived telemetry samples, gap-aware bucket series with explicit nulls and timestamps, point caps, viewer access, retention, disabled history, legacy schema migration |
 | `tests/test_agent_events.py` | Transition-based event recording without heartbeat duplicates, service/package/version/profile/alert lifecycle events, event API hours/limit/RBAC, and event retention |
 | `tests/test_alert_lifecycle.py` | Alert incident reconciliation: acknowledgement then clear, recurrence as a new incident, last-seen updates preserving acknowledgement, acknowledgement TTL expiry, idempotent/concurrent dashboard reads, lifecycle events, and alert-action RBAC |
+| `tests/test_notifications.py` | Telegram payload/URL encoding and error redaction, offline/online transitions with no browser, health-alert raise/recovery deduplication, acknowledgement and minimum-severity suppression, watched-service alerts, outbox retry/backoff, persistence across service restarts, and notification API RBAC |
 | `tests/test_command_output.py` | Agent output chunk upload auth/ownership, ordering/idempotency, per-command cap, terminal-state rejection, retention pruning, and SSE live/replay output |
 | `tests/test_events.py` | Change-driven dashboard SSE payload/content type, prompt heartbeat/mutation delivery, shared per-revision cache, 401/403 auth, session revocation/expiry stream close, command terminal payload and stream close |
 | `tests/test_bulk_saved_views.py` | Batch fleet actions (RBAC, validation, partial failures, per-agent results, audit) and per-user saved-view CRUD, isolation, duplicate names, and filter validation |
@@ -57,6 +58,8 @@ Run the whole suite:
 | `tests/test_db.py` | Schema initialization and migration of legacy schemas, including alert incident lifecycle columns |
 
 Fixtures live in `tests/conftest.py`. `settings` points at a fresh `tmp_path`, `app` builds the FastAPI application, `client` wraps it in a `TestClient`, and `admin` signs in the bootstrap administrator. Helpers in `tests/helpers.py` create enrollment tokens, enroll agents, send heartbeats, and build headers.
+
+Notification tests never contact Telegram. They construct `NotificationService` with a fake client and call `tick(now=...)` directly, so offline transitions and retry backoff are deterministic and the background loop is not started in the normal app fixture. `tests/test_notifications.py` also verifies that the bot token is never returned by the status endpoint or embedded in delivery errors.
 
 The contract tests also exercise the request body guard. They set an explicit `Content-Length` header where needed, because the `TestClient` normally recomputes a correct length for a request body.
 

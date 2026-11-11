@@ -13,6 +13,7 @@ import uvicorn
 from .config import Settings
 from .db import DEFAULT_PROFILES, Database, utcnow
 from .models import ProfileSettings
+from .notifications import NotificationError, NotificationService
 from .security import hash_password, hash_token, new_token, validate_password
 from .server import _ensure_bootstrap_admin, create_app
 from .store import ArtifactStore
@@ -138,6 +139,54 @@ def cmd_issue_enrollment(args: argparse.Namespace, settings: Settings) -> int:
     print(f"Enrollment token (shown once): {token}")
     print(f"Expires: {expires.isoformat(timespec='seconds')}")
     print(f"Agent command: sextant-agent enroll --server {base} --token {token}")
+    return 0
+
+
+def cmd_notify_test(args: argparse.Namespace, settings: Settings) -> int:
+    del args
+    db = _db(settings)
+    service = NotificationService(db, settings)
+    if not service.configured:
+        print(
+            "Telegram is not configured. Set SEXTANT_TELEGRAM_BOT_TOKEN and "
+            "SEXTANT_TELEGRAM_CHAT_ID.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        service.send_test()
+    except NotificationError as exc:
+        print(f"Telegram delivery failed: {exc}", file=sys.stderr)
+        return 1
+    db.audit("cli", "notification.test", "telegram", {})
+    print("Telegram test notification sent.")
+    return 0
+
+
+def cmd_notify_log(args: argparse.Namespace, settings: Settings) -> int:
+    db = _db(settings)
+    rows = db.list_notifications(args.limit)
+    if not rows:
+        print("No notifications.")
+        return 0
+    for row in rows:
+        print(
+            f"{row['at']}  {str(row['status']):<8} {str(row['severity']):<8} "
+            f"{row['kind']:<10} {row['title']}"
+        )
+        if row["attempts"]:
+            print(f"    attempts: {row['attempts']}  next: {row['next_attempt_at'] or '-'}")
+        if row["error"]:
+            print(f"    error: {row['error']}")
+    return 0
+
+
+def cmd_notify_retry(args: argparse.Namespace, settings: Settings) -> int:
+    del args
+    db = _db(settings)
+    count = db.retry_failed_notifications()
+    db.audit("cli", "notification.retry", "telegram", {"count": count})
+    print(f"Queued {count} failed notification(s) for retry.")
     return 0
 
 
@@ -430,6 +479,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     agents = sub.add_parser("list-agents", help="List enrolled agents")
     agents.set_defaults(func=cmd_list_agents)
+
+    notify_test = sub.add_parser("notify-test", help="Send a Telegram test notification")
+    notify_test.set_defaults(func=cmd_notify_test)
+
+    notify_log = sub.add_parser("notify-log", help="Show the notification outbox")
+    notify_log.add_argument("--limit", type=int, default=20)
+    notify_log.set_defaults(func=cmd_notify_log)
+
+    notify_retry = sub.add_parser("notify-retry", help="Retry failed Telegram notifications")
+    notify_retry.set_defaults(func=cmd_notify_retry)
     return parser
 
 

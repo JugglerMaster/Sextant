@@ -61,6 +61,18 @@ class Settings:
     cookie_secure: bool = False
     offline_after_seconds: int = 90
     alert_ack_ttl_hours: int = 168
+    notify_enabled: bool = True
+    notify_interval_seconds: int = 20
+    notification_retention_days: int = 90
+    telegram_enabled: bool = True
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_thread_id: str = ""
+    telegram_events: tuple[str, ...] = ("offline", "disk", "memory", "gpu", "service")
+    telegram_min_severity: str = "warning"
+    telegram_recovery: bool = True
+    telegram_api_base: str = "https://api.telegram.org"
+    telegram_timeout_seconds: int = 10
     enrollment_ttl_minutes: int = 30
     max_body_bytes: int = 2_000_000
     command_output_limit: int = 200_000
@@ -122,6 +134,27 @@ class Settings:
             host = urlsplit(public_url).hostname
             if host:
                 allowed_hosts = (host,)
+        notify_events = _split_csv(
+            env.get(
+                "SEXTANT_TELEGRAM_EVENTS",
+                "offline,disk,memory,gpu,service",
+            )
+        )
+        notify_events = tuple(
+            event
+            for event in (item.strip().lower() for item in notify_events)
+            if event in {"offline", "disk", "memory", "gpu", "service"}
+        )
+        min_severity = env.get("SEXTANT_TELEGRAM_MIN_SEVERITY", "warning").strip().lower()
+        if min_severity not in {"info", "warning", "critical"}:
+            min_severity = "warning"
+        telegram_api_base = env.get("SEXTANT_TELEGRAM_API_BASE", "https://api.telegram.org").strip().rstrip("/")
+        if not telegram_api_base.startswith(("https://", "http://")):
+            telegram_api_base = "https://api.telegram.org"
+        api_parts = urlsplit(telegram_api_base)
+        if api_parts.scheme != "https" and api_parts.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            # Never send a bot token over cleartext to a remote host.
+            telegram_api_base = "https://api.telegram.org"
 
         return cls(
             data_dir=data_dir,
@@ -132,6 +165,18 @@ class Settings:
             cookie_secure=_bool(env.get("SEXTANT_COOKIE_SECURE"), False),
             offline_after_seconds=_int(env.get("SEXTANT_OFFLINE_AFTER_SECONDS"), 90, 15),
             alert_ack_ttl_hours=min(8760, _int(env.get("SEXTANT_ALERT_ACK_TTL_HOURS"), 168, 1)),
+            notify_enabled=_bool(env.get("SEXTANT_NOTIFY_ENABLED"), True),
+            notify_interval_seconds=min(3600, _int(env.get("SEXTANT_NOTIFY_INTERVAL_SECONDS"), 20, 5)),
+            notification_retention_days=min(3650, _int(env.get("SEXTANT_NOTIFICATION_RETENTION_DAYS"), 90, 1)),
+            telegram_enabled=_bool(env.get("SEXTANT_TELEGRAM_ENABLED"), True),
+            telegram_bot_token=env.get("SEXTANT_TELEGRAM_BOT_TOKEN", "").strip(),
+            telegram_chat_id=env.get("SEXTANT_TELEGRAM_CHAT_ID", "").strip(),
+            telegram_thread_id=env.get("SEXTANT_TELEGRAM_THREAD_ID", "").strip(),
+            telegram_events=notify_events,
+            telegram_min_severity=min_severity,
+            telegram_recovery=_bool(env.get("SEXTANT_TELEGRAM_RECOVERY"), True),
+            telegram_api_base=telegram_api_base,
+            telegram_timeout_seconds=min(60, _int(env.get("SEXTANT_TELEGRAM_TIMEOUT_SECONDS"), 10, 2)),
             enrollment_ttl_minutes=_int(env.get("SEXTANT_ENROLLMENT_TTL_MINUTES"), 30),
             max_body_bytes=_int(env.get("SEXTANT_MAX_BODY_BYTES"), 2_000_000, 1024),
             command_output_limit=_int(env.get("SEXTANT_COMMAND_OUTPUT_LIMIT"), 200_000, 1024),

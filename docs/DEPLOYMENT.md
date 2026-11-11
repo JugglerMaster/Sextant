@@ -91,9 +91,28 @@ SEXTANT_STORE_MAX_TOTAL_GB=20
 # Server update check (notify-only). github:owner/repo or an HTTPS JSON URL.
 # SEXTANT_UPDATE_FEED=github:owner/repo
 # SEXTANT_UPDATE_CHECK_HOURS=6
+
+# Telegram notifications. Create a bot with @BotFather, start a chat with it,
+# and set the bot token and chat id. Set SEXTANT_PUBLIC_URL above to get a
+# tap-through button in the message.
+# SEXTANT_NOTIFY_ENABLED=1
+# SEXTANT_TELEGRAM_BOT_TOKEN=123456789:AA...
+# SEXTANT_TELEGRAM_CHAT_ID=123456789
+# SEXTANT_TELEGRAM_EVENTS=offline,disk,memory,gpu,service
+# SEXTANT_TELEGRAM_MIN_SEVERITY=warning
 ```
 
 The package store lives in `SEXTANT_DATA_DIR/store`. Back it up with the database. The update check only reads release metadata; it does not apply server updates automatically.
+
+Telegram notifications are evaluated by the server process every 20 seconds by default. The server must be able to reach `api.telegram.org`; no inbound port is required. Test after editing the environment file:
+
+```bash
+sudo systemctl restart sextant
+sudo -u sextant SEXTANT_DATA_DIR=/var/lib/sextant \
+  /opt/sextant/.venv/bin/sextant notify-test
+sudo -u sextant SEXTANT_DATA_DIR=/var/lib/sextant \
+  /opt/sextant/.venv/bin/sextant notify-log --limit 20
+```
 
 `SEXTANT_OFFLINE_COMMAND_POLICY=queue` is the default. Use `reject` if you do not want an operator to accidentally schedule a shutdown or shell command for a machine that is currently offline.
 

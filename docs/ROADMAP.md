@@ -2,7 +2,7 @@
 
 This document tracks work beyond the initial build and the first hardening pass. It is intentionally separate from the implementation docs so future changes can be prioritized without rewriting the deployment/security guidance.
 
-Related plans: [Discovery](DISCOVERY.md) (proposed, not implemented), [Package management](PACKAGE_MANAGEMENT.md), [Package store](PACKAGE_STORE.md), [Agent self-update](SELF_UPDATE.md), [Server update](SERVER_UPDATE.md), [Agent profiles](PROFILES.md), [UI status](UI.md), and [Code review](CODE_REVIEW.md) (remediation status).
+Related plans: [Discovery](DISCOVERY.md) (proposed, not implemented), [Docker management](DOCKER_MANAGEMENT.md) (proposed, Linux-only), [Notifications](NOTIFICATIONS.md) (proposed, not implemented), [Package management](PACKAGE_MANAGEMENT.md), [Package store](PACKAGE_STORE.md), [Agent self-update](SELF_UPDATE.md), [Server update](SERVER_UPDATE.md), [Agent profiles](PROFILES.md), [UI status](UI.md), and [Code review](CODE_REVIEW.md) (remediation status).
 
 ## Current state
 
@@ -70,12 +70,14 @@ Effort: medium. Depends on the command lifecycle already implemented.
 
 **Why:** Monitoring is passive; nobody knows a disk filled or an agent went offline unless they open the dashboard.
 
-Scope:
+Implemented: a background evaluator with Telegram delivery for offline/online, disk, memory, GPU-temperature, and watched-service incidents; per-incident deduplication; acknowledgement/snooze suppression; recovery messages; a persisted outbox with retry/backoff; admin status/log/test/retry endpoints; and `sextant notify-test` / `notify-log` / `notify-retry` CLI commands.
+
+Remaining scope:
 
 - Generic webhook (JSON), ntfy, Discord/Slack-compatible webhook, email/SMTP.
-- Events: agent offline > threshold, disk/memory threshold, GPU temperature, monitored service stopped, command failed, enrollment/agent token change.
-- Per-channel severity filter and cooldown/deduplication.
-- Test-notification button in the UI.
+- Editable rules and thresholds, per-tag/agent scoping, quiet hours.
+- Docker container down/unhealthy and command/security events.
+- Test-notification button in the UI and an admin Notifications page.
 
 Acceptance criteria:
 
@@ -85,6 +87,8 @@ Acceptance criteria:
 - No secrets in webhook payloads.
 
 Effort: small–medium. No new datastore required if deduplication state is in SQLite.
+
+See [Notifications plan](NOTIFICATIONS.md) for the full event catalog, configurable monitor rules/channels, background evaluator, Docker integration, and phased delivery.
 
 ### 3. Metrics history and charts (implemented)
 
@@ -240,6 +244,48 @@ Effort: small–medium.
 - Migration tests from the previous schema version.
 
 The current automated coverage and the remaining gaps are listed in [TESTING.md](TESTING.md).
+
+### 17. Docker host and Compose management (proposed)
+
+See [Docker management](DOCKER_MANAGEMENT.md) for the full plan.
+
+**Why:** Docker is now the deployment unit for many services, but the console
+cannot discover engines, inspect containers, clean up stale resources, or deploy
+Compose stacks. Operators currently fall back to shell commands or a separate
+Portainer instance.
+
+Scope (Linux only; Windows Docker is explicitly unsupported):
+
+- Agents detect a local Docker engine and upload bounded container/image/volume/
+  network inventory, gated by local config, profile, and per-agent policy.
+- A separate **Docker Hosts** view lists every agent that reports Docker.
+  Selecting one machine shows its environment from cached inventory, with an
+  on-demand refresh.
+- Container inspect, logs, lifecycle/update/rename actions, and confirmed
+  cleanup for stopped containers, dangling/unused images, unused volumes/
+  networks, and build cache.
+- One-shot exec commands and an interactive PTY console (exec, not `docker
+  attach`), with stdin, resize, idle timeout, session caps, and audit.
+- A server-side **Compose Files** library on disk with a configurable storage
+  path, immutable revisions, and deploy/update/down/rollback to one selected
+  host.
+- Audit, retention, path containment, secret redaction, and no raw Docker API
+  proxy.
+
+Acceptance criteria:
+
+- A Docker-enabled Linux agent appears in Docker Hosts with fresh inventory;
+  disabled and Windows agents do not.
+- Actions, exec, console, and cleanup respect local/profile/policy denials and
+  are audited.
+- The interactive console keeps heartbeating, closes on idle/disconnect, and
+  does not persist keystrokes or terminal output by default.
+- Compose files live in the configured directory, revisions are immutable, and
+  bundle/path attacks are rejected.
+- The server never connects to a remote Docker socket or opens an inbound port.
+
+Effort: medium–large across five phases (read-only visibility, actions/cleanup
+and one-shot exec, Compose deployment, interactive console, recreate/live polish).
 
 ## Suggested milestones
 

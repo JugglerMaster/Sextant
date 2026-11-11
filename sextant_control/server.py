@@ -12,6 +12,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from . import updates
 from .config import Settings
 from .db import Database, DEFAULT_PROFILES, dumps, loads, parse_iso, utcnow, utcnow_iso
 from .ldap_auth import authenticate_ldap
+from .notifications import NotificationError, NotificationService
 from .models import (
     AdminPasswordResetIn,
     AgentEnrollIn,
@@ -337,6 +339,15 @@ def _public_settings(settings: Settings) -> dict[str, Any]:
         "max_queued_commands_per_agent": settings.max_queued_commands_per_agent,
         "version": __version__,
         "public_url": settings.public_url,
+        "notifications": {
+            "enabled": settings.notify_enabled,
+            "telegram_enabled": settings.telegram_enabled,
+            "telegram_configured": bool(settings.telegram_bot_token and settings.telegram_chat_id),
+            "telegram_events": list(settings.telegram_events),
+            "telegram_min_severity": settings.telegram_min_severity,
+            "telegram_recovery": settings.telegram_recovery,
+            "interval_seconds": settings.notify_interval_seconds,
+        },
     }
 
 
@@ -581,15 +592,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings.telemetry_history:
         db.prune_telemetry(settings.telemetry_retention_days)
 
+    notification_service = NotificationService(db, settings)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> Any:
+        await notification_service.start()
+        try:
+            yield
+        finally:
+            await notification_service.stop()
+
     app = FastAPI(
         title="Sextant",
         version=__version__,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
     app.state.settings = settings
     app.state.db = db
+    app.state.notifications = notification_service
     app.state.limiter = LoginRateLimiter()
     artifact_store = ArtifactStore(
         settings.store_dir,
@@ -680,6 +703,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def get_store(request: Request) -> ArtifactStore:
         return request.app.state.store
+
+    def get_notifications(request: Request) -> NotificationService:
+        return request.app.state.notifications
 
     def issue_session(
         user_row: sqlite3.Row,
@@ -1184,6 +1210,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "server_time": utcnow_iso(),
             "permissions": _permissions(user),
         }
+
+    @app.get("/api/notifications/status")
+    def notification_status(
+        user: dict[str, Any] = Depends(require_admin),
+        notifications: NotificationService = Depends(get_notifications),
+    ) -> dict[str, Any]:
+        del user
+        return notifications.status()
+
+    @app.get("/api/notifications/log")
+    def notification_log(
+        limit: int = Query(default=50, ge=1, le=200),
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        del user
+        rows = database.list_notifications(limit)
+        return {"notifications": [_notification_to_dict(row) for row in rows]}
+
+    @app.post("/api/notifications/test")
+    def notification_test(
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        notifications: NotificationService = Depends(get_notifications),
+    ) -> dict[str, Any]:
+        if not notifications.configured:
+            raise HTTPException(status_code=400, detail="Telegram notifications are not configured.")
+        try:
+            notifications.send_test()
+        except NotificationError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        database.audit(
+            actor=user["username"],
+            action="notification.test",
+            target="telegram",
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return {"sent": True, "at": utcnow_iso()}
+
+    @app.post("/api/notifications/retry")
+    def notification_retry(
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        retried = database.retry_failed_notifications()
+        database.audit(
+            actor=user["username"],
+            action="notification.retry",
+            target="telegram",
+            detail={"count": retried},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return {"retried": retried}
 
     @app.get("/api/saved-views")
     def list_saved_views(
@@ -4065,6 +4148,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     return app
 
+
+
+def _notification_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "at": row["at"],
+        "event_key": row["event_key"],
+        "kind": row["kind"],
+        "severity": row["severity"],
+        "agent_id": row["agent_id"],
+        "title": row["title"],
+        "body": row["body"],
+        "url": row["url"],
+        "status": row["status"],
+        "attempts": int(row["attempts"] or 0),
+        "next_attempt_at": row["next_attempt_at"],
+        "sent_at": row["sent_at"],
+        "error": row["error"],
+    }
 
 
 def _saved_view_to_dict(row: sqlite3.Row) -> dict[str, Any]:

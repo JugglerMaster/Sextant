@@ -186,7 +186,28 @@ Dashboard agent fields include `online`, `last_seen`, `cpu_pct`, `mem_pct`, `mem
 }
 ```
 
-Alert conditions are computed from the latest heartbeat telemetry and reconciled into `alert_states` whenever the dashboard or agent detail is built. A new condition receives a fresh `incident_id`, `first_seen_at`, and `last_seen_at`. A still-present condition only advances `last_seen_at`, preserving an acknowledgement. A condition that disappears is marked cleared and loses its acknowledgement and snooze. If the same key later reappears it starts a new incident with a new id and fresh first-seen time, so a resolved-then-recurring alert is never silently muted. Acknowledgements also expire after `SEXTANT_ALERT_ACK_TTL_HOURS` (default 168, 1–8760), at which point the alert becomes active again and must be re-acknowledged. Snoozes keep their explicit `snoozed_until` expiry. `alert_count` counts only current alerts that are unacknowledged and not snoozed.
+Alert conditions are computed from the latest heartbeat telemetry and reconciled into `alert_states` whenever the dashboard or agent detail is built and on each notification evaluation tick. A new condition receives a fresh `incident_id`, `first_seen_at`, and `last_seen_at`. A still-present condition only advances `last_seen_at`, preserving an acknowledgement. A condition that disappears is marked cleared and loses its acknowledgement and snooze. If the same key later reappears it starts a new incident with a new id and fresh first-seen time, so a resolved-then-recurring alert is never silently muted. Acknowledgements also expire after `SEXTANT_ALERT_ACK_TTL_HOURS` (default 168, 1–8760), at which point the alert becomes active again and must be re-acknowledged. Snoozes keep their explicit `snoozed_until` expiry. `alert_count` counts only current alerts that are unacknowledged and not snoozed.
+
+### Notifications (Telegram MVP)
+
+Configured by `SEXTANT_TELEGRAM_*` environment variables. The background evaluator runs when `SEXTANT_NOTIFY_ENABLED=1` and both a bot token and chat id are set. It reconciles health conditions and offline/online transitions every `SEXTANT_NOTIFY_INTERVAL_SECONDS`, writes an outbox row per incident, and delivers with retry/backoff. The bot token is never returned by the API.
+
+| Method | Path | Role | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/notifications/status` | admin | Channel configuration summary, last tick/send, last error, outbox counts |
+| `GET` | `/api/notifications/log?limit=50` | admin | Recent outbox rows (1–200, newest first) |
+| `POST` | `/api/notifications/test` | admin | Send a Telegram test message |
+| `POST` | `/api/notifications/retry` | admin | Requeue all failed deliveries |
+
+A notification row includes `event_key`, `kind`, `severity`, `agent_id`, `title`, `body`, `url`, `status` (`pending`, `sent`, `failed`), `attempts`, `next_attempt_at`, `sent_at`, and a redacted `error`. Deduplication is by `event_key` (`alert.raised:<agent>:<incident>`, `agent.offline:<agent>:<incident>`, and their recovery keys).
+
+CLI equivalents:
+
+```bash
+sextant notify-test
+sextant notify-log --limit 20
+sextant notify-retry
+```
 
 ### Live updates (Server-Sent Events)
 

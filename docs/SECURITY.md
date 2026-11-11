@@ -159,9 +159,10 @@ There is no pixel-level remote desktop or input injection in this version. “Re
 | Agent token hashes | SQLite | hash only |
 | Enrollment tokens | SQLite | hash only; shown once at creation |
 | LDAP bind password | `/etc/sextant.env` | 0640 root:service group |
+| Telegram bot token | `/etc/sextant.env` | 0640 root:service group; never returned by the API; revoke in BotFather if leaked |
 | Command output | SQLite | may contain secrets; protect/backup accordingly |
 
-The server does not encrypt the SQLite database at rest. Use full-disk encryption or an encrypted volume if required.
+Notification titles/bodies are sent to the Telegram Bot API and therefore leave the host. Do not enable Telegram for a deployment whose alert content is itself sensitive; use a self-hosted channel (planned) in that case. The server does not encrypt the SQLite database at rest. Use full-disk encryption or an encrypted volume if required.
 
 ## Audit log
 
