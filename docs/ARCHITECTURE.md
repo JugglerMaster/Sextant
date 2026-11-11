@@ -200,7 +200,7 @@ Acknowledgements are also bounded by `SEXTANT_ALERT_ACK_TTL_HOURS` (default 168,
 - The server update checker is read-only: it reads `SEXTANT_UPDATE_FEED` metadata and shows an admin banner. Applying a server update is not automated in this version.
 - `POST /api/agents/{id}/packages/sync` queues one batched `package` command (at most 25 install/remove/upgrade actions). Actions execute with argv (no shell) and require both the local and server `allow_packages` flags.
 - Remote install is an admin SSH job for Linux: fixed install script, one server key, host-key verification disabled for rebuilt hosts, one job at a time, job log in SQLite.
-- Agent self-update verifies the wheel hash/size, stages a versioned venv, health-checks it, switches the `current` symlink, and keeps previous releases. Windows currently stages and requires a manual task switch.
+- Agent self-update verifies the wheel hash/size, stages a versioned venv, health-checks it, switches the `current` link/junction, and keeps previous releases. Windows updates the `SextantAgent` task action to the stable `current` path, switches the junction, and restarts the task.
 
 ## Wake-on-LAN
 

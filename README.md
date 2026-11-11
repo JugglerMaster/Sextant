@@ -75,7 +75,7 @@ way.
 - **Telemetry history** — bounded per-heartbeat samples with configurable retention and a downsampled history API for trend queries.
 - **Package store (Tier 0)** — self-hosted, content-addressed artifacts with SHA-256 integrity; hosts agent wheels and internal app packages.
 - **Package inventory and desired state** — read-only apt/winget inventory, per-device install/remove/upgrade sync, and a device Packages tab.
-- **Agent self-update** — pulls the agent wheel from the store, verifies SHA-256, stages, health-checks, and switches on Linux.
+- **Agent self-update** — pulls the agent wheel from the store, verifies SHA-256, stages, health-checks, and switches on Linux and Windows.
 - **Server update check** — read-only GitHub/static-feed check with an admin login banner (notify only).
 - **Disk and GPU alerts** — thresholds for disk, memory, GPU temperature, and monitored services.
 - **Service management** — start, stop, restart, enable, or disable systemd units and Windows services.
@@ -167,7 +167,7 @@ npx playwright install chromium
 npm run test:visual
 ```
 
-The Python suite has **192 tests**. It covers password/session/CSRF security, the API RBAC and authentication contract, local and AD login, session revocation, user disable/reset, failed-login audit, enrollment, heartbeat, command dispatch/idempotency/cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication, WoL, audit logging, agent parsers, executor behavior, config handling, the Tier 0 package store, server update checks, agent self-update, package inventory/desired-state sync, agent profiles, revisioned inventory, and key-based SSH remote install.
+The Python suite has **194 tests**. It covers password/session/CSRF security, the API RBAC and authentication contract, local and AD login, session revocation, user disable/reset, failed-login audit, enrollment, heartbeat, command dispatch/idempotency/cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication, WoL, audit logging, agent parsers, executor behavior, config handling, the Tier 0 package store, server update checks, agent self-update on Linux and Windows, package inventory/desired-state sync, agent profiles, revisioned inventory, and key-based SSH remote install.
 
 The jsdom smoke test loads the real dashboard and verifies the fleet, live SSE fallback, drawer, paginated history, trends, timeline, alert lifecycle, bulk actions, saved views, policy/user/session dialogs, GPU process list, and remote terminal. The **10 Playwright + axe-core tests** cover dark/light themes at desktop and mobile widths, login, dashboard, drawer tabs, command-palette keyboard flow, focus trap/return, and serious/critical accessibility violations.
 
@@ -245,7 +245,7 @@ See [deploy/sextant.env.example](deploy/sextant.env.example) for a deployment te
 - **Profile assignment is enrollment, admin, or tag.** Profiles are selected at enrollment, reassigned from the device drawer/API, or inherited from a tag. AD/LDAP group sync is future work.
 - **Remote install is Linux-only and one-at-a-time.** It uses a single server SSH key and disables host-key verification for rebuilt hosts; use it on a trusted admin network.
 - **Windows remote install is not implemented.** Windows agents use the manual installer or OpenSSH/PowerShell tooling until a remote path is added.
-- **Windows self-update stages only.** The new version is verified and staged; scheduled-task switching remains manual.
+- **Windows self-update switches in place.** The updater verifies and stages the new wheel, health-checks it, updates the stable `current` junction, migrates a legacy scheduled-task action if needed, and restarts the `SextantAgent` task with `--restart`. Without `--restart`, it reports `restart_required`. The flow is unit-tested with mocked `schtasks`/junction calls; a live Windows runner test is still pending.
 - **Server updates are notify-only.** The console checks for a release and shows an admin banner; it does not apply server updates.
 - **No MFA yet.** It is deferred in the roadmap; use a VPN/SSO proxy if you need a second factor now.
 - **No command approval workflow yet.** Operators execute immediately; command queue limits and expiry reduce stale-work risk but are not a four-eyes control.

@@ -373,13 +373,14 @@ py -3 --version
 
 ### 4.2 Copy the source
 
-Copy the source tree (or a built wheel) to the host, for example:
+Copy the source tree or a built wheel to the host, for example:
 
 ```text
 C:\packages\sextant
+C:\packages\sextant-0.3.1-py3-none-any.whl
 ```
 
-It must contain `pyproject.toml` when installing from source.
+A source tree must contain `pyproject.toml`; pass a wheel path directly to `-SourcePath` for a wheel install.
 
 ### 4.3 Run the installer
 
@@ -427,17 +428,18 @@ The installer:
 
 1. creates `C:\ProgramData\SextantAgent\venv`;
 2. installs the package with `--no-deps`;
-3. enrolls and writes `C:\ProgramData\SextantAgent\config.json`;
-4. restricts the config ACL to SYSTEM and Administrators;
-5. registers the **SextantAgent** scheduled task at startup, running as SYSTEM;
-6. starts the task.
+3. creates the stable `C:\ProgramData\SextantAgent\current` junction;
+4. enrolls and writes `C:\ProgramData\SextantAgent\config.json`;
+5. restricts the config ACL to SYSTEM and Administrators;
+6. registers the **SextantAgent** scheduled task at startup against `current`, running as SYSTEM;
+7. starts the task.
 
 ### 4.4 Verify
 
 ```powershell
 Get-ScheduledTask SextantAgent | Format-List
 Get-Content C:\ProgramData\SextantAgent\agent.log -Tail 50
-C:\ProgramData\SextantAgent\venv\Scripts\sextant-agent.exe check --config C:\ProgramData\SextantAgent\config.json
+C:\ProgramData\SextantAgent\current\Scripts\sextant-agent.exe check --config C:\ProgramData\SextantAgent\config.json
 ```
 
 The machine should appear in the dashboard within one heartbeat interval.
@@ -446,20 +448,14 @@ If Python was installed after the script started, open a new elevated PowerShell
 
 ### 4.5 Update or uninstall
 
-Preferred: publish an `agent-wheel` release under the `sextant-agent` slug, then:
+Preferred: publish an `agent-wheel` release under the `sextant-agent` slug, then run an **elevated PowerShell**:
 
 ```powershell
-C:\ProgramData\SextantAgent\venv\Scripts\sextant-agent.exe update --config C:\ProgramData\SextantAgent\config.json
-C:\ProgramData\SextantAgent\venv\Scripts\sextant-agent.exe update --config C:\ProgramData\SextantAgent\config.json --apply
+C:\ProgramData\SextantAgent\current\Scripts\sextant-agent.exe update --config C:\ProgramData\SextantAgent\config.json
+C:\ProgramData\SextantAgent\current\Scripts\sextant-agent.exe update --config C:\ProgramData\SextantAgent\config.json --apply --restart
 ```
 
-Windows currently **stages** the verified version under `%ProgramData%\SextantAgent\releases\` and reports `restart_required`; automatic scheduled-task switching is not enabled yet. Use the manual path to switch:
-
-```powershell
-C:\ProgramData\SextantAgent\venv\Scripts\pip.exe install --no-deps --upgrade C:\packages\sextant
-Stop-ScheduledTask SextantAgent
-Start-ScheduledTask SextantAgent
-```
+Windows verifies the wheel hash/size, stages the new version under `%ProgramData%\SextantAgent\releases\`, health-checks it, updates a legacy `SextantAgent` task action to the stable `current` junction if needed, repoints `current`, and restarts the scheduled task. Without `--restart`, it reports `restart_required` and leaves the new version selected for the next task start.
 
 Uninstall:
 

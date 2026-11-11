@@ -98,7 +98,7 @@ sudo systemctl enable --now sextant-agent
 
 ### Install
 
-Copy the source tree to the Windows host, then run an elevated PowerShell. The Windows installer checks for `pyproject.toml`, so `-SourcePath` must be the package source directory, not a built wheel file:
+Copy the source tree or a built wheel to the Windows host, then run an elevated PowerShell. `-SourcePath` may point at the package source directory or a wheel file:
 
 ```powershell
 Set-Location C:\path\to\ccdadisman
@@ -123,17 +123,18 @@ The installer:
 
 1. creates `C:\ProgramData\SextantAgent\venv`;
 2. installs the package;
-3. enrolls and writes `C:\ProgramData\SextantAgent\config.json`;
-4. restricts the config ACL to SYSTEM and Administrators;
-5. registers the **SextantAgent** scheduled task at startup, running as SYSTEM;
-6. starts the task immediately.
+3. creates the stable `C:\ProgramData\SextantAgent\current` junction;
+4. enrolls and writes `C:\ProgramData\SextantAgent\config.json`;
+5. restricts the config ACL to SYSTEM and Administrators;
+6. registers the **SextantAgent** scheduled task at startup against `current`, running as SYSTEM;
+7. starts the task immediately.
 
 Check it:
 
 ```powershell
 Get-ScheduledTask SextantAgent | Format-List
 Get-Content C:\ProgramData\SextantAgent\agent.log -Tail 50
-C:\ProgramData\SextantAgent\venv\Scripts\sextant-agent.exe check --config C:\ProgramData\SextantAgent\config.json
+C:\ProgramData\SextantAgent\current\Scripts\sextant-agent.exe check --config C:\ProgramData\SextantAgent\config.json
 ```
 
 If Python was installed after the script started, open a new elevated PowerShell so `py` is on `PATH`.
@@ -292,15 +293,14 @@ sudo /opt/sextant-agent/current/bin/sextant-agent update \
 
 The service unit runs `/opt/sextant-agent/current/bin/sextant-agent`; the installer creates `current -> .venv`. The updater keeps versioned releases under `/opt/sextant-agent/releases/` and prunes to the last three. If the staged health check fails, the current version is left untouched.
 
-Windows stages the new version under `%ProgramData%\SextantAgent\releases\` and reports `staged`; automatic scheduled-task switching is not enabled yet. Use the manual path:
+Windows uses the same release layout under `%ProgramData%\SextantAgent\releases\` and a stable `current` directory junction. The installer registers the `SextantAgent` scheduled task against `current\Scripts\sextant-agent.exe`. Run the updater from an **elevated PowerShell**; it stages and health-checks the new wheel, updates a legacy task action to `current` if necessary, repoints the junction, and, with `--restart`, restarts the scheduled task:
 
 ```powershell
-C:\ProgramData\SextantAgent\venv\Scripts\pip.exe install --no-deps --upgrade C:\packages\sextant
-Stop-ScheduledTask SextantAgent
-Start-ScheduledTask SextantAgent
+C:\ProgramData\SextantAgent\current\Scripts\sextant-agent.exe update --config C:\ProgramData\SextantAgent\config.json
+C:\ProgramData\SextantAgent\current\Scripts\sextant-agent.exe update --config C:\ProgramData\SextantAgent\config.json --apply --restart
 ```
 
-Config and agent identity survive updates unless you re-enroll.
+The running agent keeps using the old release until Task Scheduler starts the new one, so executable file locks do not block the switch. Config and agent identity survive updates unless you re-enroll.
 
 ## Diagnose
 

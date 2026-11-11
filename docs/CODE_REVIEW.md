@@ -81,7 +81,7 @@
 - Dashboard is XSS-resistant by construction (`textContent`, no `innerHTML`) and has a strict CSP.
 - Server unit is genuinely hardened; agent execution is bounded at the server (length/timeout/policy/queue caps).
 - The agent is stdlib-only.
-- 192 tests, clean `pyflakes`/`compileall`/`node --check`, clean `npm audit`; 10 Chromium Playwright/axe tests pass.
+- 194 tests, clean `pyflakes`/`compileall`/`node --check`, clean `npm audit`; 10 Chromium Playwright/axe tests pass.
 
 ---
 
@@ -111,9 +111,9 @@ Deferred / accepted:
 
 ## 6. Verification
 
-- `pytest`: **192 passed** (98 baseline + 14 remediation regressions + 21 feature tests + 10 profile/inventory/tag/delta tests + 6 remote-install tests + 1 freshness test + 2 export tests + 1 alert-state test + 3 SSE tests + 7 command-output tests + 5 change-driven SSE tests + 7 command-history tests + 5 gap/agent-event tests + 3 bulk/saved-view tests + 7 alert-lifecycle tests + 1 streaming regression + 1 static-asset CSP test).
+- `pytest`: **194 passed** (98 baseline + 14 remediation regressions + 21 feature tests + 10 profile/inventory/tag/delta tests + 6 remote-install tests + 1 freshness test + 2 export tests + 1 alert-state test + 3 SSE tests + 7 command-output tests + 5 change-driven SSE tests + 7 command-history tests + 5 gap/agent-event tests + 3 bulk/saved-view tests + 7 alert-lifecycle tests + 1 streaming regression + 1 static-asset CSP test + 2 Windows self-update tests).
 - `pip check`: no broken requirements.
 - `pip-audit`: no known vulnerabilities.
 - `npm audit`: 0 vulnerabilities.
-- `pip install --require-hashes -r requirements-dev.lock` + `pip install --no-deps -e .` in a fresh venv: **192 passed**.
+- `pip install --require-hashes -r requirements-dev.lock` + `pip install --no-deps -e .` in a fresh venv: **194 passed**.
 - `pyflakes`, `compileall`, `node --check`, and the jsdom smoke test pass.

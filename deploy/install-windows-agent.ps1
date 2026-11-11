@@ -52,13 +52,15 @@ Assert-Administrator
 if ($Server.StartsWith('http://')) {
     Write-Warning "This agent will use plain HTTP. Use HTTPS for any non-lab network."
 }
-if (-not (Test-Path (Join-Path $SourcePath 'pyproject.toml'))) {
+if (-not (Test-Path $SourcePath)) {
+    throw "SourcePath must point at the sextant source tree or a built wheel. Current: $SourcePath"
+}
+if ((Get-Item $SourcePath).PSIsContainer -and -not (Test-Path (Join-Path $SourcePath 'pyproject.toml'))) {
     throw "SourcePath must point at the sextant source tree or a built wheel. Current: $SourcePath"
 }
 
 $venvDir = Join-Path $InstallDir 'venv'
 $venvPython = Join-Path $venvDir 'Scripts\python.exe'
-$agentExe = Join-Path $venvDir 'Scripts\sextant-agent.exe'
 $configPath = Join-Path $InstallDir 'config.json'
 $logPath = Join-Path $InstallDir 'agent.log'
 
@@ -79,6 +81,15 @@ Write-Host "Installing sextant from $SourcePath"
 if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed." }
 & (Join-Path $venvDir 'Scripts\pip.exe') install --no-deps --upgrade $SourcePath
 if ($LASTEXITCODE -ne 0) { throw "Package installation failed." }
+
+# Keep a stable current junction so future self-updates only need to repoint it.
+$currentDir = Join-Path $InstallDir 'current'
+cmd /c rmdir "$currentDir" 2>$null | Out-Null
+cmd /c mklink /J "$currentDir" "$venvDir" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not create the current junction. Remove any existing current directory under $InstallDir."
+}
+$agentExe = Join-Path $currentDir 'Scripts\sextant-agent.exe'
 
 $enrollArgs = @(
     'enroll',

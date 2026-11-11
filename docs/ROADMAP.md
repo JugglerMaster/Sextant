@@ -27,7 +27,7 @@ Related plans: [Discovery](DISCOVERY.md) (proposed, not implemented), [Package m
 - [x] Security hardening: bounded login limiter, stricter session/password validation, validated proxy IPs, explicit LDAPS certificate validation.
 - [x] Tier 0 package store: content-addressed blobs, SHA-256 integrity, admin upload/download/yank, CLI.
 - [x] Read-only server update check with admin login banner.
-- [x] Agent self-update (Linux switch/rollback; Windows staged) from the store.
+- [x] Agent self-update (Linux and Windows switch/restart; Windows uses a stable `current` junction) from the store.
 - [x] Read-only package inventory and per-device apt/dnf/winget/choco desired-state sync (API + device Packages tab; rule editor pending).
 - [x] Server-managed agent profiles (`workstation`/`server`/custom) with installer selection, heartbeat sync, module flags, cadence, dashboard editor, admin reassignment, tag assignment, true package inventory delta, and weekly full reconciliation.
 - [x] Linux remote install over key-based SSH with prerequisite checks, one-time enrollment, job log, and one-at-a-time jobs.

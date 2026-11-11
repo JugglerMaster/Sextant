@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +17,17 @@ from .config import AgentConfig
 
 DEFAULT_LINUX_INSTALL_DIR = Path("/opt/sextant-agent")
 DEFAULT_WINDOWS_INSTALL_DIR = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "SextantAgent"
+WINDOWS_TASK_NAME = "SextantAgent"
 
 
 def default_install_dir() -> Path:
-    if os.name == "nt":
+    if _is_windows():
         return DEFAULT_WINDOWS_INSTALL_DIR
     return DEFAULT_LINUX_INSTALL_DIR
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
 
 
 def check(config: AgentConfig) -> dict[str, Any]:
@@ -39,16 +46,31 @@ def _sha256(path: Path) -> str:
 
 
 def _run(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    completed = subprocess.run(
         args,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         timeout=timeout,
         check=False,
     )
+    return subprocess.CompletedProcess(
+        args,
+        completed.returncode,
+        _decode_output(completed.stdout),
+        _decode_output(completed.stderr),
+    )
+
+
+def _decode_output(data: bytes) -> str:
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16", errors="replace")
+    if data.startswith(b"\xef\xbb\xbf"):
+        return data.decode("utf-8-sig", errors="replace")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        encoding = "mbcs" if _is_windows() else "utf-8"
+        return data.decode(encoding, errors="replace")
 
 
 def _stage_venv(version: str, wheel: Path, install_dir: Path) -> Path:
@@ -60,7 +82,7 @@ def _stage_venv(version: str, wheel: Path, install_dir: Path) -> Path:
     created = _run([sys.executable, "-m", "venv", str(venv_dir)])
     if created.returncode != 0:
         raise RuntimeError(f"Could not create the staging venv: {created.stderr[-500:]}")
-    pip = venv_dir / ("Scripts/pip.exe" if os.name == "nt" else "bin/pip")
+    pip = venv_dir / ("Scripts/pip.exe" if _is_windows() else "bin/pip")
     installed = _run([str(pip), "install", "--no-deps", str(wheel)])
     if installed.returncode != 0:
         raise RuntimeError(f"Could not install the staged wheel: {installed.stderr[-800:]}")
@@ -68,14 +90,141 @@ def _stage_venv(version: str, wheel: Path, install_dir: Path) -> Path:
 
 
 def _health_check(venv_dir: Path, config_path: Path) -> bool:
-    exe = venv_dir / ("Scripts/sextant-agent.exe" if os.name == "nt" else "bin/sextant-agent")
+    exe = venv_dir / ("Scripts/sextant-agent.exe" if _is_windows() else "bin/sextant-agent")
     if not exe.exists():
         return False
     checked = _run([str(exe), "show", "--config", str(config_path)], timeout=60)
     return checked.returncode == 0
 
 
+def _link_target(path: Path) -> Path | None:
+    try:
+        raw = os.readlink(path)
+    except OSError:
+        try:
+            return path.resolve()
+        except OSError:
+            return None
+    target = Path(raw)
+    if not target.is_absolute():
+        target = path.parent / target
+    try:
+        return target.resolve()
+    except OSError:
+        return target
+
+
+def _create_windows_junction(link: Path, target: Path) -> None:
+    result = _run(["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)], timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "mklink failed")[-500:])
+
+
+def _remove_windows_junction(path: Path) -> None:
+    if not os.path.lexists(path):
+        return
+    result = _run(["cmd.exe", "/d", "/c", "rmdir", str(path)], timeout=30)
+    if result.returncode == 0:
+        return
+    try:
+        os.rmdir(path)
+    except OSError:
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise RuntimeError(f"Could not remove {path}: {exc}") from exc
+
+
+def _ensure_windows_current(install_dir: Path) -> Path:
+    current = install_dir / "current"
+    if os.path.lexists(current):
+        return current
+    legacy = install_dir / "venv"
+    if not legacy.exists():
+        raise RuntimeError(
+            f"Neither {current} nor the legacy {legacy} exists; reinstall the agent."
+        )
+    _create_windows_junction(current, legacy.resolve())
+    return current
+
+
+def _switch_windows_current(install_dir: Path, version: str) -> Path | None:
+    current = install_dir / "current"
+    target = install_dir / "releases" / version / "venv"
+    if not target.exists():
+        raise RuntimeError(f"Staged release is missing: {target}")
+    _ensure_windows_current(install_dir)
+    previous = _link_target(current) if os.path.lexists(current) else None
+    _remove_windows_junction(current)
+    try:
+        _create_windows_junction(current, target.resolve())
+    except Exception:
+        if previous is not None:
+            _create_windows_junction(current, previous)
+        raise
+    return previous
+
+
+def _query_windows_task() -> tuple[str, str, str] | None:
+    """Return (command, arguments, working_directory) for the agent task."""
+    result = _run(["schtasks.exe", "/Query", "/TN", WINDOWS_TASK_NAME, "/XML"], timeout=30)
+    if result.returncode != 0:
+        return None
+    if not result.stdout.strip():
+        raise RuntimeError("schtasks returned no XML for the SextantAgent task.")
+    try:
+        root = ET.fromstring(result.stdout)
+    except ET.ParseError as exc:
+        raise RuntimeError(f"Could not parse the SextantAgent task XML: {exc}") from exc
+    exec_element = next(
+        (element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "Exec"),
+        None,
+    )
+    if exec_element is None:
+        return None
+    values: dict[str, str] = {}
+    for child in exec_element:
+        values[child.tag.rsplit("}", 1)[-1]] = (child.text or "").strip()
+    command = values.get("Command", "")
+    if not command:
+        return None
+    return command, values.get("Arguments", ""), values.get("WorkingDirectory", "")
+
+
+def _update_windows_task_action(install_dir: Path) -> tuple[bool, str]:
+    try:
+        task = _query_windows_task()
+    except RuntimeError as exc:
+        return False, str(exc)
+    if task is None:
+        return True, "Scheduled task SextantAgent was not found; switch completed, restart manually."
+    command, arguments, _working_directory = task
+    desired = install_dir / "current" / "Scripts" / "sextant-agent.exe"
+    if command.strip('"').casefold() == str(desired).casefold():
+        return True, "Scheduled task already uses current."
+    run = f'"{desired}"{(" " + arguments) if arguments else ""}'
+    result = _run(
+        ["schtasks.exe", "/Change", "/TN", WINDOWS_TASK_NAME, "/TR", run],
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout or "schtasks /Change failed")[-500:]
+    return True, "Scheduled task action updated."
+
+
+def _restart_windows_task() -> tuple[bool, str]:
+    _run(["schtasks.exe", "/End", "/TN", WINDOWS_TASK_NAME], timeout=30)
+    time.sleep(1)
+    result = _run(["schtasks.exe", "/Run", "/TN", WINDOWS_TASK_NAME], timeout=30)
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout or "schtasks /Run failed")[-500:]
+    return True, ""
+
+
 def _switch_current(install_dir: Path, version: str) -> None:
+    if _is_windows():
+        _switch_windows_current(install_dir, version)
+        return
     current = install_dir / "current"
     legacy = install_dir / ".venv"
     if not current.exists() and legacy.exists():
@@ -92,12 +241,19 @@ def _prune_releases(install_dir: Path, keep: int = 3) -> None:
     releases = install_dir / "releases"
     if not releases.exists():
         return
+    current_target = _link_target(install_dir / "current")
     items = sorted(
         [path for path in releases.iterdir() if path.is_dir()],
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
     for stale in items[keep:]:
+        if current_target is not None:
+            try:
+                if (stale / "venv").resolve() == current_target:
+                    continue
+            except OSError:
+                pass
         shutil.rmtree(stale, ignore_errors=True)
 
 
@@ -141,17 +297,34 @@ def apply_update(
             shutil.rmtree(venv_dir.parent, ignore_errors=True)
             return {"status": "failed", "error": "Staged agent failed its health check; current version left unchanged."}
 
-    if os.name == "nt":
-        return {
-            "status": "staged",
+    if _is_windows():
+        try:
+            _ensure_windows_current(install_dir)
+        except Exception as exc:
+            return {"status": "failed", "error": str(exc)}
+        task_ok, task_message = _update_windows_task_action(install_dir)
+        if not task_ok:
+            return {"status": "failed", "error": task_message}
+        try:
+            _switch_current(install_dir, version)
+        except Exception as exc:
+            return {"status": "failed", "error": str(exc)}
+        _prune_releases(install_dir)
+        result: dict[str, Any] = {
+            "status": "switched",
             "version": version,
+            "install_dir": str(install_dir),
             "restart_required": True,
-            "instructions": (
-                "The new version is staged under the install directory. "
-                "Update the SextantAgent scheduled task to point at the new release and restart it. "
-                "Automatic Windows switching is not enabled yet."
-            ),
+            "task": task_message,
         }
+        if restart:
+            restarted, restart_error = _restart_windows_task()
+            result["restart_required"] = not restarted
+            if not restarted:
+                result["restart_error"] = restart_error
+        else:
+            result["instructions"] = "Restart the SextantAgent scheduled task to start the new version."
+        return result
 
     _switch_current(install_dir, version)
     _prune_releases(install_dir)

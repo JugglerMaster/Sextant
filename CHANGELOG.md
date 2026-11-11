@@ -4,6 +4,24 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.3.1] - 2026-11-11
+
+### Added
+
+- Windows self-update now switches the active release instead of staging only.
+  The installer creates a stable `current` directory junction, the scheduled task
+  points at `current\Scripts\sextant-agent.exe`, and `sextant-agent update
+  --apply --restart` migrates a legacy task action, repoints the junction, and
+  restarts the `SextantAgent` task.
+- Windows installer accepts a built wheel as `SourcePath` as well as a source
+  tree.
+
+### Fixed
+
+- Windows update preserves the previous junction target if the new junction
+  cannot be created.
+- Release pruning never removes the active release.
+
 ## [0.3.0] - 2026-11-11
 
 ### Added
@@ -44,5 +62,6 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.3.1]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.3.1
 [0.3.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.3.0
 [0.2.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.2.0

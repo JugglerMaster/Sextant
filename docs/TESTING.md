@@ -36,7 +36,7 @@ Run the whole suite:
 | `tests/test_remediation.py` | Regression coverage for the code-review fixes: Host-header/CSRF, trusted hosts, chunked bodies, session/UID binding, weak secrets and bootstrap passwords, service-name option injection, enrollment TTL, one-command dispatch, late results, bounded agent output, redirect refusal |
 | `tests/test_store.py` | Tier 0 package store: publish/upload SHA-256, duplicate/bad-hash rejection, yank, agent download, RBAC, per-file quota |
 | `tests/test_updates.py` | Version comparison, GitHub/static update check, endpoint cache/force, admin-only access |
-| `tests/test_selfupdate.py` | Agent update endpoint/heartbeat directive, check/apply flow, hash mismatch, local disable, staging switch |
+| `tests/test_selfupdate.py` | Agent update endpoint/heartbeat directive, check/apply flow, hash mismatch, local disable, Linux switch, Windows task-action migration, and Windows switch/restart flow |
 | `tests/test_packages.py` | Package command builders, inventory parsers, policy intersection, executor routing, inventory API, desired-state sync |
 | `tests/test_inventory.py` | Revisioned package inventory (full/delta, hash, stale-base fallback), agent payload cache, profile cadence application |
 | `tests/test_profiles.py` | Built-in/custom profiles, RBAC, create/update/reset/delete, enrollment profile selection, admin reassignment, tag assignment, heartbeat sync |
@@ -142,7 +142,7 @@ The live run found and fixed two defects the unit/jsdom suites missed: small std
 
 The following are explicitly not exercised by the automated suite today:
 
-- **Real Windows CI.** Parser and command-builder unit tests run on Linux. There is no Windows runner that executes the real PowerShell metrics/inventory scripts, service or power commands, scheduled task, config ACLs, or the Windows installer. See the roadmap item for a `windows-latest` runner.
+- **Real Windows CI.** Parser and command-builder unit tests run on Linux. There is no Windows runner that executes the real PowerShell metrics/inventory scripts, service or power commands, scheduled task, config ACLs, Windows installer, or the Windows self-update junction/task switch. The Windows update flow is unit-tested with mocked `schtasks`/`cmd` calls. See the roadmap item for a `windows-latest` runner.
 - **Real Active Directory / Samba AD.** LDAP tests use a fake `ldap3` module and a monkeypatched `authenticate_ldap`; there is no live domain controller, LDAPS certificate/CA validation, group provisioning, or lockout test. A Samba AD container integration test remains on the roadmap.
 - **Cross-browser and visual regression.** Playwright covers Chromium at desktop and one narrow mobile viewport. It does not run Firefox or WebKit, compare screenshots against committed pixel baselines, or exercise browser zoom/reflow and a high-contrast theme. The dashboard browser tests intercept the API and mock SSE, so a live server, real SSE reconnects, and streamed terminal output remain outside the browser suite.
 - **Load and concurrency.** There is no load test for 100–500 agents, no sustained heartbeat/command throughput test, and no SQLite multi-writer stress test beyond normal request coverage.

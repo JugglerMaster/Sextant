@@ -1,6 +1,6 @@
 # Built-in agent self-update — plan
 
-**Status:** U1–U2 implemented (server advertises a store agent wheel; Linux `sextant-agent update` verifies/stages/switches; Windows stages only). U3 is notify-on-check-in; auto-apply is not enabled.
+**Status:** U1–U2 implemented, plus the Windows switch/restart path. The server advertises a store agent wheel; Linux and Windows `sextant-agent update` verify, stage, health-check, and switch, and `--restart` restarts the local service/task. Check-in notices remain notify-only; automatic background apply and a watchdog rollback helper are not enabled.
 **Scope:** update enrolled Linux and Windows agents from artifacts published by the Sextant server, with **Tier 0 integrity** (TLS + agent auth + SHA-256 + size), staged rollout, health checks, and rollback. Signatures are deferred; the manifest fields remain reserved.
 
 Related: [Installation](INSTALL.md), [Agents](AGENTS.md), [Architecture](ARCHITECTURE.md), [Server update orchestration](SERVER_UPDATE.md), [Package store](PACKAGE_STORE.md), [Roadmap](ROADMAP.md).
@@ -236,16 +236,16 @@ The agent advertises `update_capable: 1` and its current version in the heartbea
 ### Windows (scheduled task)
 
 - Release root: `C:\ProgramData\SextantAgent\releases\<version>\`.
-- The scheduled task action points at `C:\ProgramData\SextantAgent\current\Scripts\sextant-agent.exe`; `current` is a directory junction/symlink (SYSTEM can create it) or the task action is updated to the new path.
-- A detached updater PowerShell process runs as SYSTEM:
-  1. stops `SextantAgent`;
-  2. installs the new wheel into the new release venv;
-  3. health-checks;
-  4. updates the junction or task action;
-  5. starts the task;
-  6. reports to a local result file consumed by the next agent start.
-- Keep the previous release; task restart is handled by Task Scheduler settings.
-- File locks on the running `.exe` are avoided because the running process lives in the old release directory.
+- The installer creates `C:\ProgramData\SextantAgent\current` as a directory junction to the active release and registers the `SextantAgent` task against `current\Scripts\sextant-agent.exe`.
+- The updater:
+  1. creates `current` from the legacy `venv` layout if it does not exist;
+  2. migrates a legacy task action that points at `venv\Scripts\sextant-agent.exe` to the stable `current` path;
+  3. installs the new wheel into `releases\<version>\venv` and health-checks it;
+  4. removes and recreates the `current` junction, restoring the previous target if creation fails;
+  5. prunes old releases while keeping the active one;
+  6. with `--restart`, ends and starts the `SextantAgent` scheduled task and reports `restart_required` if the restart fails.
+- File locks on the running `.exe` are avoided because the running process lives in the old release directory; the junction only affects the next task start.
+- Keep the previous release; rollback is a junction repoint to the prior release if needed.
 
 ### Agent-local flags
 
@@ -347,11 +347,11 @@ The installer should:
 |---|---|---|---|
 | U1 | Release registry, hash-pinned manifest format, upload/list/yank API, download endpoint; validation tests | M | low |
 | U2 | Agent staging/verification/health check; manual `sextant-agent update` / `update --apply`; per-agent manual trigger | M | medium |
-| U3 | Atomic switch + restart + result reporting on Linux and Windows; rollback helper; audit | M–L | high |
+| U3 | Atomic switch + restart + result reporting on Linux and Windows; watchdog rollback; audit | M–L | high (switch/restart done; watchdog and local result reporting pending) |
 | U4 | Policies (tag/percentage/window), auto-update, pause/yank, UI panels | M | medium |
 | U5 | Windows single-file/MSI packaging; canary automation; server self-update (separate); optional Tier 1 signing | L | high |
 
-Start with U1–U3 on Linux; add Windows once the task/junction switch is proven on a real runner.
+Start with U1–U3 on Linux and Windows; the Windows task/junction switch is implemented but still needs a disposable Windows runner for live proof.
 
 ---
 
@@ -362,7 +362,7 @@ Start with U1–U3 on Linux; add Windows once the task/junction switch is proven
 3. Auto-update default: off (manual approve) vs on for `stable` with maintenance windows?
 4. Tier 1 signing: deferred. When revisited, choose minisign/Ed25519 vs a stdlib RSA verifier; the manifest fields are already reserved.
 5. Restart mechanism on Linux: transient `systemd-run` helper vs a dedicated `sextant-agent-updater` unit.
-6. Windows layout: directory junction under `current` vs rewriting the scheduled-task action. Junction is simpler but needs testing.
+6. Windows layout: the stable `current` directory junction is implemented; a disposable Windows runner is still needed to prove the scheduled-task switch and file-lock behavior.
 7. How long to retain old releases (disk vs rollback safety)?
 8. Should `mandatory` releases bypass maintenance windows? (Recommend: only with explicit admin action until approval exists.)
 
