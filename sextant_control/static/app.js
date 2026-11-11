@@ -1426,7 +1426,7 @@ function agentCard(agent) {
       "div",
       { class: "agent-foot" },
       h("div", { class: "tag-row" }, ...(agent.tags || []).slice(0, 3).map((tag) => h("span", { class: "tag" }, tag))),
-      h("small", {}, agent.mac || agent.id),
+      h("small", {}, `agent v${agent.agent_version || "unknown"} · ${agent.mac || agent.id}`),
     ),
   );
   return card;

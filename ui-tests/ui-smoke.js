@@ -853,6 +853,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const cards = window.document.querySelectorAll("#agent-grid .agent-card");
   if (cards.length !== 1) throw new Error(`expected one agent card, got ${cards.length}`);
   if (!cards[0].textContent.includes("Studio PC")) throw new Error("agent name missing from card");
+  if (!cards[0].textContent.includes("agent v0.3.0")) throw new Error("agent version missing from card");
 
   cards[0].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(40);
