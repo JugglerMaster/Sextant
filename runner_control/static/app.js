@@ -15,6 +15,7 @@ const state = {
   resetUser: null,
   sessionsUser: null,
   pollTimer: null,
+  eventSource: null,
   loadingDashboard: false,
   search: "",
   profiles: [],
@@ -500,6 +501,7 @@ async function copyText(text) {
 }
 
 function showLogin(message = "") {
+  stopLiveUpdates();
   state.user = null;
   state.csrf = null;
   state.detailId = null;
@@ -569,11 +571,68 @@ function enterApp(me) {
   loadDashboard();
   loadProfiles(true);
   void checkForUpdates();
-  if (!state.pollTimer) {
-    state.pollTimer = setInterval(() => {
-      if (!document.hidden && state.user) loadDashboard(true);
-    }, 10000);
+  startLiveUpdates();
+}
+
+function stopPolling() {
+  if (state.pollTimer) {
+    clearInterval(state.pollTimer);
+    state.pollTimer = null;
   }
+}
+
+function startPolling() {
+  if (state.pollTimer || !state.user) return;
+  state.pollTimer = setInterval(() => {
+    if (!document.hidden && state.user) loadDashboard(true);
+  }, 10000);
+}
+
+function stopLiveUpdates() {
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+  }
+  stopPolling();
+}
+
+function startLiveUpdates() {
+  if (!state.user) return;
+  stopPolling();
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+  }
+  if (typeof EventSource === "function") {
+    try {
+      const source = new EventSource("/api/events");
+      state.eventSource = source;
+      source.addEventListener("dashboard", (event) => {
+        let data;
+        try {
+          data = JSON.parse(event.data);
+        } catch (_error) {
+          return;
+        }
+        applyDashboard(data);
+      });
+      source.addEventListener("open", () => {
+        if (state.eventSource === source) stopPolling();
+      });
+      source.addEventListener("error", () => {
+        if (state.eventSource !== source) return;
+        // EventSource retries by itself, but a failed stream may stay broken
+        // (for example behind a proxy). Drop to the proven polling fallback.
+        source.close();
+        state.eventSource = null;
+        startPolling();
+      });
+      return;
+    } catch (_error) {
+      state.eventSource = null;
+    }
+  }
+  startPolling();
 }
 
 async function checkForUpdates() {
@@ -636,22 +695,27 @@ async function loadDashboard(silent = false) {
   state.loadingDashboard = true;
   try {
     const data = await api("/api/dashboard");
-    state.dashboard = data;
-    renderStats();
-    renderAgentGrid();
-    if (state.detailId) {
-      const agent = data.agents.find((item) => item.id === state.detailId);
-      if (!agent) closeDrawer();
-      else {
-        state.detailAgent = agent;
-        updateDrawerChrome();
-        if (!["remote", "history"].includes(state.detailTab)) renderTab();
-      }
-    }
+    applyDashboard(data);
   } catch (error) {
     if (!silent) toast(error.message, "error");
   } finally {
     state.loadingDashboard = false;
+  }
+}
+
+function applyDashboard(data) {
+  if (!data || !data.stats || !Array.isArray(data.agents)) return;
+  state.dashboard = data;
+  renderStats();
+  renderAgentGrid();
+  if (state.detailId) {
+    const agent = data.agents.find((item) => item.id === state.detailId);
+    if (!agent) closeDrawer();
+    else {
+      state.detailAgent = agent;
+      updateDrawerChrome();
+      if (!["remote", "history"].includes(state.detailTab)) renderTab();
+    }
   }
 }
 
@@ -2266,7 +2330,97 @@ async function runRemoteCommand(agent, shell, command) {
   }
 }
 
+function commandIsTerminal(command) {
+  return ["succeeded", "failed", "cancelled"].includes(command.status);
+}
+
+function applyCommandUpdate(agentId, commandId, command) {
+  const term = terminalState(agentId);
+  if (term.pending !== commandId || !command) return;
+  if (commandIsTerminal(command)) {
+    if (command.stdout) term.lines.push({ type: "out", text: command.stdout });
+    if (command.stderr) term.lines.push({ type: "err", text: command.stderr });
+    if (command.error) term.lines.push({ type: "err", text: command.error });
+    if (!command.stdout && !command.stderr && !command.error) term.lines.push({ type: "note", text: "(no output)" });
+    term.lines.push({ type: "note", text: `${command.status} · exit ${command.exit_code ?? "n/a"}` });
+    term.pending = null;
+    term.status = "Ready";
+    if (state.detailAgent?.id === agentId && state.detailTab === "remote") renderTerminalDom(state.detailAgent);
+    loadDashboard(true);
+    loadAgentDetail(agentId);
+    return;
+  }
+  term.status = command.status === "dispatched" ? "Running on agent" : "Queued for heartbeat";
+  if (state.detailAgent?.id === agentId && state.detailTab === "remote") renderTerminalDom(state.detailAgent);
+}
+
+function streamCommand(agentId, commandId) {
+  // The agent posts one final result, so this stream updates the status/result
+  // row only; it does not receive incremental stdout.
+  return new Promise((resolve) => {
+    const term = terminalState(agentId);
+    let source = null;
+    let settled = false;
+    let timeout = null;
+    const finish = (streamed) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      if (source) source.close();
+      resolve(streamed);
+    };
+    if (term.pending !== commandId) {
+      resolve(true);
+      return;
+    }
+    try {
+      source = new EventSource(`/api/commands/${encodeURIComponent(commandId)}/events`);
+    } catch (_error) {
+      resolve(false);
+      return;
+    }
+    source.addEventListener("command", (event) => {
+      if (term.pending !== commandId) {
+        finish(true);
+        return;
+      }
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (_error) {
+        finish(false);
+        return;
+      }
+      if (!data?.command) {
+        finish(false);
+        return;
+      }
+      applyCommandUpdate(agentId, commandId, data.command);
+      if (commandIsTerminal(data.command)) finish(true);
+    });
+    source.addEventListener("error", () => finish(false));
+    timeout = setTimeout(() => {
+      if (term.pending === commandId) {
+        term.lines.push({ type: "err", text: "Timed out waiting for a command result. Check the History tab." });
+        term.pending = null;
+        if (state.detailAgent?.id === agentId) renderTerminalDom(state.detailAgent);
+      }
+      finish(true);
+    }, 8 * 60 * 1000);
+  });
+}
+
 async function pollCommand(agentId, commandId) {
+  if (typeof EventSource === "function") {
+    const streamed = await streamCommand(agentId, commandId);
+    if (streamed) return;
+    const term = terminalState(agentId);
+    if (term.pending !== commandId) return;
+  }
+  await pollCommandFallback(agentId, commandId);
+}
+
+async function pollCommandFallback(agentId, commandId) {
   const term = terminalState(agentId);
   for (let attempt = 0; attempt < 320; attempt += 1) {
     await sleep(1500);
@@ -2280,22 +2434,8 @@ async function pollCommand(agentId, commandId) {
       if (state.detailAgent?.id === agentId) renderTerminalDom(state.detailAgent);
       return;
     }
-    const command = data.command;
-    if (["succeeded", "failed", "cancelled"].includes(command.status)) {
-      if (command.stdout) term.lines.push({ type: "out", text: command.stdout });
-      if (command.stderr) term.lines.push({ type: "err", text: command.stderr });
-      if (command.error) term.lines.push({ type: "err", text: command.error });
-      if (!command.stdout && !command.stderr && !command.error) term.lines.push({ type: "note", text: "(no output)" });
-      term.lines.push({ type: "note", text: `${command.status} · exit ${command.exit_code ?? "n/a"}` });
-      term.pending = null;
-      term.status = "Ready";
-      if (state.detailAgent?.id === agentId && state.detailTab === "remote") renderTerminalDom(state.detailAgent);
-      loadDashboard(true);
-      loadAgentDetail(agentId);
-      return;
-    }
-    term.status = command.status === "dispatched" ? "Running on agent" : "Queued for heartbeat";
-    if (state.detailAgent?.id === agentId && state.detailTab === "remote") renderTerminalDom(state.detailAgent);
+    applyCommandUpdate(agentId, commandId, data.command);
+    if (commandIsTerminal(data.command)) return;
   }
   term.lines.push({ type: "err", text: "Timed out waiting for a command result. Check the History tab." });
   term.pending = null;
@@ -3783,7 +3923,13 @@ function wireEvents() {
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && state.user) loadDashboard(true);
+    if (!state.user) return;
+    if (document.hidden) {
+      stopLiveUpdates();
+      return;
+    }
+    loadDashboard(true);
+    startLiveUpdates();
   });
 }
 

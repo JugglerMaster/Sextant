@@ -28,6 +28,29 @@ if (!window.HTMLDialogElement.prototype.showModal) {
     this.dispatchEvent(new window.Event("close"));
   };
 }
+
+const eventSources = [];
+class MockEventSource {
+  constructor(url) {
+    this.url = url;
+    this.closed = false;
+    this.listeners = {};
+    eventSources.push(this);
+  }
+  addEventListener(type, handler) {
+    this.listeners[type] = this.listeners[type] || [];
+    this.listeners[type].push(handler);
+  }
+  emit(type, data) {
+    const event = { type, data: JSON.stringify(data) };
+    for (const handler of this.listeners[type] || []) handler(event);
+  }
+  close() {
+    this.closed = true;
+  }
+}
+window.EventSource = MockEventSource;
+window.__eventSources = eventSources;
 const findButton = (root, text) =>
   [...root.querySelectorAll("button")].find((button) => button.textContent.trim() === text);
 
@@ -285,6 +308,24 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   if (window.document.getElementById("app-view").hidden) throw new Error("app shell should be visible after login");
   if (window.document.getElementById("stat-total").textContent !== "1") throw new Error("stats did not render");
+  const liveSource = window.__eventSources[0];
+  if (!liveSource || liveSource.url !== "/api/events") {
+    throw new Error("dashboard did not open the SSE stream");
+  }
+  const dashboardBody = responses["/api/dashboard"].body;
+  liveSource.emit("dashboard", {
+    ...dashboardBody,
+    stats: { ...dashboardBody.stats, total: 2, offline: 1 },
+  });
+  await sleep(20);
+  if (window.document.getElementById("stat-total").textContent !== "2") {
+    throw new Error("SSE dashboard event did not update the stats");
+  }
+  liveSource.emit("dashboard", dashboardBody);
+  await sleep(100);
+  if (window.document.getElementById("stat-total").textContent !== "1") {
+    throw new Error("SSE dashboard event did not restore the stats");
+  }
   const fleetStatus = window.document.getElementById("fleet-status");
   if (!fleetStatus || fleetStatus.getAttribute("aria-live") !== "polite" || fleetStatus.getAttribute("role") !== "status") {
     throw new Error("fleet status live region missing");
@@ -707,8 +748,21 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   await sleep(10);
   if (!palette.hidden) throw new Error("Escape did not close the command palette");
 
+  liveSource.emit("error", {});
+  await sleep(20);
+  if (!liveSource.closed) throw new Error("SSE failure did not close the stream and fall back");
+  window.document.dispatchEvent(new window.Event("visibilitychange"));
+  await sleep(60);
+  const reconnectedSource = window.__eventSources[window.__eventSources.length - 1];
+  if (!reconnectedSource || reconnectedSource === liveSource || reconnectedSource.closed) {
+    throw new Error("SSE did not reconnect when the document became visible");
+  }
+  window.document.getElementById("logout-button").click();
+  await sleep(80);
+  if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
+
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, dashboard, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, history actions, trends charts, timeline, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, history actions, trends charts, timeline, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

@@ -108,12 +108,14 @@ The path agent ID and token must belong together. Enrollment uses a one-time enr
 | Method | Path | Role | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/api/dashboard` | any | Stats + all agents with latest telemetry |
+| `GET` | `/api/events` | any | SSE stream: initial dashboard snapshot, then one every 5 seconds |
 | `GET` | `/api/agents/{id}` | any | One agent + latest 50 commands |
 | `GET` | `/api/agents/{id}/history?hours=24&points=200` | any | Downsampled telemetry history (1–720 hours, 10–1000 points) |
 | `PATCH` | `/api/agents/{id}` | admin | Edit tags, notes, watched services, action policy |
 | `POST` | `/api/agents/{id}/commands` | operator | Queue a command |
 | `GET` | `/api/agents/{id}/commands?limit=50` | any | Command history preview (1–200) |
 | `GET` | `/api/commands/{id}` | any | One command with full output |
+| `GET` | `/api/commands/{id}/events` | operator | SSE stream: command status/result changes until terminal |
 | `POST` | `/api/commands/{id}/cancel` | operator | Cancel a still-queued command |
 | `POST` | `/api/commands/{id}/retry` | operator | Retry a failed/cancelled command as a new row |
 | `POST` | `/api/agents/{id}/wake` | operator | Send WoL to the agent's MAC |
@@ -121,6 +123,42 @@ The path agent ID and token must belong together. Enrollment uses a one-time enr
 | `DELETE` | `/api/agents/{id}` | admin | Delete agent and command history |
 
 Dashboard agent fields include `online`, `last_seen`, `cpu_pct`, `mem_pct`, `mem_total`, `mem_used`, `uptime_seconds`, `disks`, `gpus`, `services`, `startup`, `alerts`, `alert_count`, tags, IP/MAC, machine ID, OS, agent version, watched services, and the server policy. `alerts` are computed at read time.
+
+### Live updates (Server-Sent Events)
+
+Both streams use the normal session cookie (`rc_session`) and return
+`Content-Type: text/event-stream`. They are same-origin; the CSP already allows
+`connect-src 'self'`. Heartbeat comment lines are sent every 15 seconds.
+
+`GET /api/events` sends the complete dashboard payload (identical to
+`GET /api/dashboard`) as the first `dashboard` event, then repeats it every 5
+seconds. The browser dashboard uses `EventSource` and falls back to the previous
+10-second polling if the stream fails or is unavailable. The stream is paused
+when the tab is hidden and reconnected when it becomes visible.
+
+```text
+event: dashboard
+data: {"server_time":"…","stats":{…},"agents":[…]}
+
+: keep-alive
+```
+
+`GET /api/commands/{id}/events` requires operator access. It emits a `command`
+event with the same `{"command": {...}}` shape as `GET /api/commands/{id}`
+whenever the row changes, polls once per second, and closes after a terminal
+status (`succeeded`, `failed`, or `cancelled`).
+
+```text
+event: command
+data: {"command":{"id":"cmd_123","status":"dispatched",…}}
+
+event: command
+data: {"command":{"id":"cmd_123","status":"succeeded","stdout":"…",…}}
+```
+
+**Limitation:** agents post one final result, so neither endpoint streams raw
+stdout/stderr incrementally. Output appears when the agent uploads the terminal
+result. The command stream provides live status and final-result delivery only.
 
 ### Queue a command
 

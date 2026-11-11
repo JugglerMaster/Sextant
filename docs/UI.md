@@ -109,7 +109,9 @@ Priority: History export next.
 
 ### 6. Live behavior
 
-- Remaining: replace 10-second full-dashboard polling with SSE/WebSocket updates, stream command output, and virtualize very large tables for 100+ agents.
+- The dashboard streams `GET /api/events` over `EventSource` and falls back to the previous 10-second dashboard polling if SSE is unavailable or fails. The stream closes while the document is hidden and reconnects on visibility.
+- Command result waits use `GET /api/commands/{id}/events` when available, with the existing poll as fallback.
+- Remaining: incremental command stdout (agents still upload one final result) and virtualization for very large tables (100+ agents).
 
 ---
 

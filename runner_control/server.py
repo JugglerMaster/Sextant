@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import hashlib
 import hmac
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -80,6 +81,20 @@ from .views import (
 from .wol import normalize_mac, send_magic_packet
 
 logger = logging.getLogger("runner_control")
+
+SSE_HEARTBEAT_SECONDS = 15
+DASHBOARD_STREAM_SECONDS = 5
+COMMAND_STREAM_SECONDS = 1
+COMMAND_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+
+
+def _sse_event(event: str, payload: Any) -> str:
+    """Format one Server-Sent Event. JSON never contains a raw newline."""
+    return f"event: {event}\ndata: {dumps(payload)}\n\n"
+
+
+def _sse_comment(text: str = "keep-alive") -> str:
+    return f": {text}\n\n"
 
 
 def _ensure_bootstrap_admin(settings: Settings, db: Database) -> None:
@@ -379,6 +394,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             dispatched_grace_seconds=config.dispatched_grace_seconds,
             queued_ttl_hours=config.queued_command_ttl_hours,
         )
+
+    def dashboard_payload(database: Database, config: Settings) -> dict[str, Any]:
+        """Single source of truth for GET /api/dashboard and the SSE stream."""
+        sweep_commands(database, config)
+        now = datetime.now(timezone.utc)
+        with database.connection() as conn:
+            rows = conn.execute("SELECT * FROM agents ORDER BY name COLLATE NOCASE").fetchall()
+            queued = conn.execute(
+                "SELECT COUNT(*) AS n FROM commands WHERE status IN ('queued', 'dispatched', 'running')"
+            ).fetchone()
+        alert_states = database.get_all_alert_states()
+        agents = [
+            agent_to_dict(row, config, now, alert_states.get(row["id"], {}))
+            for row in rows
+        ]
+        agents.sort(key=lambda item: (not item["online"], item["name"].casefold()))
+        online = sum(1 for item in agents if item["online"])
+        return {
+            "server_time": utcnow_iso(),
+            "stats": {
+                "total": len(agents),
+                "online": online,
+                "offline": len(agents) - online,
+                "alerts": sum(item["alert_count"] for item in agents),
+                "active_commands": int(queued["n"]),
+            },
+            "agents": agents,
+        }
 
     def queue_command(
         agent_id: str,
@@ -837,29 +880,54 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         config: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         del user
-        sweep_commands(database, config)
-        now = datetime.now(timezone.utc)
-        with database.connection() as conn:
-            rows = conn.execute("SELECT * FROM agents ORDER BY name COLLATE NOCASE").fetchall()
-            queued = conn.execute("SELECT COUNT(*) AS n FROM commands WHERE status IN ('queued', 'dispatched', 'running')").fetchone()
-        alert_states = database.get_all_alert_states()
-        agents = [
-            agent_to_dict(row, config, now, alert_states.get(row["id"], {}))
-            for row in rows
-        ]
-        agents.sort(key=lambda item: (not item["online"], item["name"].casefold()))
-        online = sum(1 for item in agents if item["online"])
-        return {
-            "server_time": utcnow_iso(),
-            "stats": {
-                "total": len(agents),
-                "online": online,
-                "offline": len(agents) - online,
-                "alerts": sum(item["alert_count"] for item in agents),
-                "active_commands": int(queued["n"]),
+        return dashboard_payload(database, config)
+
+    @app.get("/api/events")
+    async def dashboard_events(
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> StreamingResponse:
+        """Authenticated SSE stream of dashboard payloads.
+
+        The first event is sent immediately, then every five seconds. Comment
+        heartbeats keep proxies from idling out the connection. Closing the
+        browser or navigating away cancels the request; Starlette then closes
+        the generator.
+        """
+        del user
+
+        async def stream() -> Any:
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            next_dashboard = 0.0
+            next_heartbeat = SSE_HEARTBEAT_SECONDS
+            while True:
+                elapsed = loop.time() - started
+                if elapsed >= next_dashboard:
+                    try:
+                        payload = await asyncio.to_thread(dashboard_payload, database, config)
+                    except Exception:  # keep the stream alive across transient DB errors
+                        logger.exception("Dashboard SSE refresh failed")
+                    else:
+                        yield _sse_event("dashboard", payload)
+                    next_dashboard = elapsed + DASHBOARD_STREAM_SECONDS
+                elapsed = loop.time() - started
+                if elapsed >= next_heartbeat:
+                    yield _sse_comment()
+                    next_heartbeat += SSE_HEARTBEAT_SECONDS
+                elapsed = loop.time() - started
+                await asyncio.sleep(max(0.25, min(1.0, next_dashboard - elapsed, next_heartbeat - elapsed)))
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
             },
-            "agents": agents,
-        }
+        )
 
     @app.get("/api/agents/{agent_id}")
     def agent_detail(
@@ -1212,6 +1280,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if row is None:
             raise HTTPException(status_code=404, detail="Command not found.")
         return {"command": command_to_dict(row)}
+
+    @app.get("/api/commands/{command_id}/events")
+    async def command_events(
+        command_id: str,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+    ) -> StreamingResponse:
+        """Live status/result delivery for one command.
+
+        The agent still uploads a single final result, so stdout/stderr are not
+        streamed incrementally: this endpoint polls the command row once per
+        second and emits it whenever its status or output changes. It closes
+        after the command reaches a terminal state. Operators only, matching the
+        command-execution workflow in the UI.
+        """
+        del user
+        with database.connection() as conn:
+            if conn.execute("SELECT id FROM commands WHERE id = ?", (command_id,)).fetchone() is None:
+                raise HTTPException(status_code=404, detail="Command not found.")
+
+        async def stream() -> Any:
+            loop = asyncio.get_running_loop()
+            last_heartbeat = loop.time()
+            last_signature: str | None = None
+            while True:
+                with database.connection() as conn:
+                    row = conn.execute("SELECT * FROM commands WHERE id = ?", (command_id,)).fetchone()
+                if row is None:
+                    return
+                payload = {"command": command_to_dict(row)}
+                signature = dumps(payload)
+                if signature != last_signature:
+                    yield _sse_event("command", payload)
+                    last_signature = signature
+                    if payload["command"]["status"] in COMMAND_TERMINAL_STATUSES:
+                        return
+                if loop.time() - last_heartbeat >= SSE_HEARTBEAT_SECONDS:
+                    yield _sse_comment()
+                    last_heartbeat = loop.time()
+                await asyncio.sleep(COMMAND_STREAM_SECONDS)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.post("/api/agents/{agent_id}/wake")
     def wake_agent(
