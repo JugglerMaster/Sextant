@@ -68,7 +68,7 @@ jobs:
           cache: npm
           cache-dependency-path: ui-tests/package-lock.json
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install chromium
       - run: npm run test:visual
 
   windows:
