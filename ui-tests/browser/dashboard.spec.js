@@ -48,7 +48,7 @@ for (const theme of THEMES) {
 
   test(`Settings profile, server, domain, and SSH tabs render in the ${theme} theme`, async ({ page }) => {
     await login(page, { theme });
-    await page.locator('[data-page="settings"]').click();
+    await page.locator('.nav-item[data-page="settings"]').click();
     await expect(page.locator("#page-settings")).toBeVisible();
     await expect(page.locator("#user-profile-form")).toBeVisible();
 
