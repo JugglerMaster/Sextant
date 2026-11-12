@@ -197,6 +197,23 @@ Discovery is a network-scanning capability and is therefore **off by default**.
   [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md).
 - Promotion does not email, notify, or log the generated install command. The UI
   clears the command from the promotion dialog when it closes.
+- D6 imports are admin-only, audited, size/device-capped, and use bounded XML
+  (no DTD/ENTITY), JSON, ARP, and lease parsers. Unsafe/non-private addresses are
+  skipped. Imported rows merge through the same conflict rules and emit
+  deduplicated events.
+- SNMP uses a bounded stdlib v2c GET implementation with private-target,
+  timeout, retry, and max-target caps. Community strings are write-only and
+  memory-only; they are never stored in SQLite, returned by any API, or logged.
+  SNMP v2c is unencrypted on the wire, so use it only on trusted management
+  networks and prefer a read-only community.
+- Vendor connectors are read-only HTTPS JSON fetchers with TLS verification by
+  default, no redirects, short timeouts, and response-size caps. Tokens,
+  passwords, and API secrets are memory-only and write-only. UniFi/RouterOS/
+  OPNsense/Proxmox live endpoints are marked unverified; ESXi is fixture-only.
+  Errors and `last_error` redact known secret values. Inventory pages are
+  rendered without HTML injection.
+- Integration secrets are lost on restart by design and must be re-entered.
+  SMB, PsExec, WMI process creation, and impacket are not used.
 
 ## Docker inventory and actions (D1–D5)
 

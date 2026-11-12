@@ -488,6 +488,17 @@ CREATE TABLE IF NOT EXISTS discovery_settings (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS discovery_integrations (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    config TEXT NOT NULL DEFAULT '{}',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_checked_at TEXT,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS discovered_devices (
     id TEXT PRIMARY KEY,
     first_seen TEXT NOT NULL,
@@ -601,6 +612,7 @@ CREATE INDEX IF NOT EXISTS idx_discovery_scans_command ON discovery_scans(comman
 CREATE INDEX IF NOT EXISTS idx_discovery_events_at ON discovery_events(at);
 CREATE INDEX IF NOT EXISTS idx_discovery_events_device_at ON discovery_events(device_id, at);
 CREATE INDEX IF NOT EXISTS idx_discovery_events_kind ON discovery_events(kind, at);
+CREATE INDEX IF NOT EXISTS idx_discovery_integrations_kind ON discovery_integrations(kind);
 """
 
 DEFAULT_PROFILES = [
@@ -775,7 +787,7 @@ class Database:
             if old_version < 13:
                 self._ensure_discovery_profile_defaults(conn)
             conn.executescript(INDEXES)
-            conn.execute("PRAGMA user_version=14")
+            conn.execute("PRAGMA user_version=15")
             conn.execute("UPDATE agents SET profile_id = 'prof_workstation' WHERE profile_id = ''")
         try:
             self.path.chmod(0o600)
@@ -3484,6 +3496,92 @@ class Database:
             return conn.execute(
                 "SELECT * FROM discovery_settings WHERE id = 'discovery'"
             ).fetchone()
+
+    def list_discovery_integrations(self) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    "SELECT * FROM discovery_integrations ORDER BY kind COLLATE NOCASE"
+                ).fetchall()
+            )
+
+    def get_discovery_integration(self, kind: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM discovery_integrations WHERE kind = ? COLLATE NOCASE",
+                (kind,),
+            ).fetchone()
+
+    def upsert_discovery_integration(
+        self,
+        kind: str,
+        *,
+        enabled: bool,
+        config: Any,
+        actor: str,
+        last_error: str = "",
+        last_checked_at: str | None = None,
+    ) -> sqlite3.Row:
+        now = utcnow_iso()
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM discovery_integrations WHERE kind = ? COLLATE NOCASE",
+                (kind,),
+            ).fetchone()
+            if row is None:
+                integration_id = "int_" + secrets.token_hex(8)
+                conn.execute(
+                    """INSERT INTO discovery_integrations
+                       (id, kind, enabled, config, last_error, last_checked_at,
+                        updated_at, updated_by)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        integration_id,
+                        kind[:32],
+                        int(bool(enabled)),
+                        dumps(config or {}),
+                        last_error[:2000],
+                        last_checked_at,
+                        now,
+                        actor[:255],
+                    ),
+                )
+            else:
+                integration_id = str(row["id"])
+                conn.execute(
+                    """UPDATE discovery_integrations SET
+                         enabled = ?, config = ?, last_error = ?,
+                         last_checked_at = COALESCE(?, last_checked_at),
+                         updated_at = ?, updated_by = ?
+                       WHERE kind = ? COLLATE NOCASE""",
+                    (
+                        int(bool(enabled)),
+                        dumps(config or {}),
+                        last_error[:2000],
+                        last_checked_at,
+                        now,
+                        actor[:255],
+                        kind,
+                    ),
+                )
+            return conn.execute(
+                "SELECT * FROM discovery_integrations WHERE id = ?", (integration_id,)
+            ).fetchone()
+
+    def set_discovery_integration_result(
+        self,
+        kind: str,
+        *,
+        last_error: str = "",
+        last_checked_at: str | None = None,
+    ) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE discovery_integrations
+                   SET last_error = ?, last_checked_at = COALESCE(?, last_checked_at)
+                   WHERE kind = ? COLLATE NOCASE""",
+                (last_error[:2000], last_checked_at or utcnow_iso(), kind),
+            )
 
     def set_discovery_acknowledgement(
         self,

@@ -90,6 +90,8 @@ const state = {
     methods: [],
     conflicts: [],
     conflictIds: new Set(),
+    integrations: [],
+    importPreview: null,
     promotion: null,
     promoteTrigger: null,
     loading: false,
@@ -6301,6 +6303,10 @@ function renderDiscovery() {
     const node = $(id);
     if (node) node.hidden = !ready;
   }
+  for (const id of ["discovery-import-panel", "discovery-integrations-panel"]) {
+    const node = $(id);
+    if (node) node.hidden = !ready || !state.permissions.admin;
+  }
   if (!ready) {
     setText("discovery-count", "");
     return;
@@ -6310,7 +6316,9 @@ function renderDiscovery() {
   renderDiscoveryMethods();
   renderDiscoverySources();
   renderDiscoveryScanHistory();
+  renderDiscoveryImportHistory();
   renderDiscoveryTable();
+  if (state.permissions.admin) loadDiscoveryIntegrations(true);
 }
 
 function renderDiscoverySummary() {
@@ -6438,6 +6446,364 @@ function renderDiscoveryFilters() {
   if (exposure) exposure.checked = Boolean(filters.exposure);
   const conflict = $("discovery-filter-conflict");
   if (conflict) conflict.checked = Boolean(filters.conflict);
+}
+
+function renderDiscoveryImportHistory() {
+  const container = $("discovery-import-history");
+  if (!container) return;
+  const imports = (state.discovery.scans || []).filter((scan) =>
+    String(scan.source || "").startsWith("import:"),
+  );
+  clear(container);
+  if (!imports.length) {
+    container.append(h("div", { class: "empty-inline" }, "No imports yet."));
+    return;
+  }
+  for (const scan of imports.slice(0, 10)) {
+    container.append(
+      h(
+        "div",
+        { class: "list-row" },
+        h(
+          "div",
+          { class: "list-row-main" },
+          h("strong", {}, String(scan.source || "import").replace("import:", "")),
+          h(
+            "small",
+            {},
+            `${localTime(scan.started_at)} · ${scan.hosts_found} devices · ${scan.status}`,
+          ),
+          scan.error ? h("small", {}, scan.error) : null,
+        ),
+        statusPill(
+          scan.status,
+          scan.status === "succeeded"
+            ? "online"
+            : scan.status === "failed"
+              ? "critical"
+              : "warning",
+        ),
+      ),
+    );
+  }
+}
+
+function discoveryImportContent() {
+  return String($("discovery-import-content")?.value || "");
+}
+
+function renderDiscoveryImportPreview(preview) {
+  const container = $("discovery-import-preview-result");
+  if (!container) return;
+  clear(container);
+  container.hidden = false;
+  container.append(
+    h("p", { class: "eyebrow" }, "Preview"),
+    h(
+      "p",
+      {},
+      `${preview.devices} parsed · ${preview.new} new · ${preview.existing} existing · ${preview.skipped} skipped${preview.truncated ? " · truncated" : ""}`,
+    ),
+    h(
+      "div",
+      { class: "list-stack" },
+      ...(preview.sample || []).map((device) =>
+        h(
+          "div",
+          { class: "list-row" },
+          h(
+            "div",
+            { class: "list-row-main" },
+            h("strong", {}, device.hostname || device.ip),
+            h("small", {}, `${device.ip} · ${device.mac || "no MAC"} · ${device.vendor || "unknown vendor"}`),
+          ),
+          h("span", { class: "form-hint" }, (device.open_ports || []).join(", ") || "no ports"),
+        ),
+      ),
+    ),
+  );
+}
+
+function clearDiscoveryImport() {
+  const content = $("discovery-import-content");
+  if (content) content.value = "";
+  const file = $("discovery-import-file");
+  if (file) file.value = "";
+  const preview = $("discovery-import-preview-result");
+  if (preview) {
+    preview.hidden = true;
+    clear(preview);
+  }
+  setText("discovery-import-status", "");
+}
+
+async function previewDiscoveryImport() {
+  const content = discoveryImportContent();
+  setText("discovery-import-status", "");
+  if (!content.trim()) {
+    setText("discovery-import-status", "Paste or choose import content first.");
+    return;
+  }
+  try {
+    const preview = await api("/api/discovery/import", {
+      method: "POST",
+      body: {
+        format: $("discovery-import-format")?.value || "nmap-xml",
+        content,
+        filename: $("discovery-import-file")?.files?.[0]?.name || "",
+        dry_run: true,
+      },
+    });
+    renderDiscoveryImportPreview(preview);
+    setText("discovery-import-status", "Preview ready. Confirm to merge.");
+  } catch (error) {
+    setText("discovery-import-status", error.message);
+  }
+}
+
+async function submitDiscoveryImport(event) {
+  event.preventDefault();
+  const content = discoveryImportContent();
+  setText("discovery-import-status", "");
+  if (!content.trim()) {
+    setText("discovery-import-status", "Paste or choose import content first.");
+    return;
+  }
+  try {
+    const result = await api("/api/discovery/import", {
+      method: "POST",
+      body: {
+        format: $("discovery-import-format")?.value || "nmap-xml",
+        content,
+        filename: $("discovery-import-file")?.files?.[0]?.name || "",
+      },
+    });
+    setText(
+      "discovery-import-status",
+      `Imported ${result.devices_merged} devices (${result.skipped} skipped${result.truncated ? ", truncated" : ""}).`,
+    );
+    toast("Discovery import completed.");
+    await Promise.all([
+      loadDiscoveryDevices(),
+      loadDiscoveryScans(),
+      loadDiscoveryConflicts(),
+    ]);
+    renderDiscoveryImportHistory();
+  } catch (error) {
+    setText("discovery-import-status", error.message);
+  }
+}
+
+function integrationSecretInput(kind, field, configured) {
+  return h("input", {
+    type: "password",
+    name: `secret_${field}`,
+    dataset: { secret: field },
+    maxlength: "4096",
+    autocomplete: "new-password",
+    placeholder: configured ? "configured — enter to replace" : "not configured",
+  });
+}
+
+function integrationField(label, input) {
+  return h("label", { class: "field" }, h("span", {}, label), input);
+}
+
+function renderDiscoveryIntegrations() {
+  const container = $("discovery-integration-list");
+  if (!container) return;
+  clear(container);
+  const integrations = state.discovery.integrations || [];
+  if (!integrations.length) {
+    container.append(h("div", { class: "empty-inline" }, "Loading integrations…"));
+    return;
+  }
+  for (const integration of integrations) {
+    const kind = integration.kind;
+    const config = integration.config || {};
+    const secretConfigured = Boolean(integration.secret_configured);
+    const fields = [];
+    if (kind === "snmp") {
+      fields.push(
+        integrationField(
+          "Targets (private IP/CIDR, one per line)",
+          h("textarea", { name: "targets", rows: "3" }, (config.targets || []).join("\n")),
+        ),
+        h("label", { class: "checkbox-row" }, h("input", { type: "checkbox", name: "use_discovered", checked: config.use_discovered !== false }), h("span", {}, "Include discovered devices")),
+        h("div", { class: "form-grid" },
+          integrationField("Timeout ms", h("input", { name: "timeout_ms", type: "number", min: "100", max: "5000", value: String(config.timeout_ms || 600) })),
+          integrationField("Retries", h("input", { name: "retries", type: "number", min: "0", max: "3", value: String(config.retries ?? 1) })),
+          integrationField("Max targets", h("input", { name: "max_targets", type: "number", min: "1", max: "1024", value: String(config.max_targets || 256) })),
+        ),
+        integrationField("Community (write-only)", integrationSecretInput(kind, "community", secretConfigured)),
+      );
+    } else {
+      fields.push(
+        integrationField("Base URL", h("input", { name: "base_url", maxlength: "1024", value: config.base_url || "", placeholder: "https://vendor.example" })),
+      );
+      if (kind === "unifi") {
+        fields.push(
+          integrationField("Site", h("input", { name: "site", maxlength: "128", value: config.site || "default" })),
+          integrationField("Username (password auth)", h("input", { name: "username", maxlength: "128", value: config.username || "" })),
+          integrationField("API token (write-only)", integrationSecretInput(kind, "api_token", secretConfigured)),
+          integrationField("Password (write-only)", integrationSecretInput(kind, "password", secretConfigured)),
+        );
+      } else if (kind === "routeros") {
+        fields.push(
+          integrationField("Username", h("input", { name: "username", maxlength: "128", value: config.username || "" })),
+          integrationField("Password (write-only)", integrationSecretInput(kind, "password", secretConfigured)),
+        );
+      } else if (kind === "opnsense") {
+        fields.push(
+          integrationField("API key (write-only)", integrationSecretInput(kind, "api_key", secretConfigured)),
+          integrationField("API secret (write-only)", integrationSecretInput(kind, "api_secret", secretConfigured)),
+        );
+      } else if (kind === "proxmox") {
+        fields.push(
+          integrationField("Token name", h("input", { name: "token_name", maxlength: "128", value: config.token_name || "" })),
+          integrationField("Token secret (write-only)", integrationSecretInput(kind, "token_secret", secretConfigured)),
+          integrationField("Username (password auth)", h("input", { name: "username", maxlength: "128", value: config.username || "" })),
+          integrationField("Password (write-only)", integrationSecretInput(kind, "password", secretConfigured)),
+        );
+      } else {
+        fields.push(
+          integrationField("Username", h("input", { name: "username", maxlength: "128", value: config.username || "" })),
+          integrationField("Password (write-only)", integrationSecretInput(kind, "password", secretConfigured)),
+        );
+      }
+      fields.push(
+        h("div", { class: "form-grid" },
+          integrationField("Timeout ms", h("input", { name: "timeout_ms", type: "number", min: "100", max: "30000", value: String(config.timeout_ms || 5000) })),
+          integrationField("Max response bytes", h("input", { name: "max_response_bytes", type: "number", min: "1024", max: "4000000", value: String(config.max_response_bytes || 1000000) })),
+        ),
+        h("label", { class: "checkbox-row" }, h("input", { type: "checkbox", name: "verify_tls", checked: config.verify_tls !== false }), h("span", {}, "Verify TLS certificate")),
+      );
+    }
+    fields.push(
+      h("label", { class: "checkbox-row" }, h("input", { type: "checkbox", name: "clear_secrets" }), h("span", {}, "Clear stored secrets")),
+      h("p", { class: "form-error", role: "alert", dataset: { integrationError: kind } }),
+    );
+    const form = h(
+      "form",
+      { class: "form-stack", dataset: { integration: kind } },
+      h("label", { class: "checkbox-row" }, h("input", { type: "checkbox", name: "enabled", checked: Boolean(integration.enabled) }), h("span", {}, "Enabled")),
+      ...fields,
+    );
+    const actions = h(
+      "div",
+      { class: "section-toolbar" },
+      h("button", { class: "button button-primary button-small", type: "button", onClick: () => saveDiscoveryIntegration(kind, form, "") }, "Save"),
+      h("button", { class: "button button-secondary button-small", type: "button", onClick: () => saveDiscoveryIntegration(kind, form, "test"), disabled: !integration.live_supported }, "Test connection"),
+      h("button", { class: "button button-secondary button-small", type: "button", onClick: () => saveDiscoveryIntegration(kind, form, "poll"), disabled: !integration.live_supported || !integration.enabled }, "Poll now"),
+    );
+    const statusBits = [];
+    if (integration.fixture_only) statusBits.push(statusPill("fixture-only", "warning"));
+    if (!integration.verified) statusBits.push(statusPill("unverified live API", "warning"));
+    if (secretConfigured) statusBits.push(statusPill("secret configured", "online"));
+    const sectionNode = h(
+      "section",
+      { class: "callout" },
+      h(
+        "div",
+        { class: "section-head" },
+        h("div", {}, h("h3", {}, integration.label), h("p", { class: "form-hint" }, kind)),
+        h("div", { class: "tag-row" }, ...statusBits),
+      ),
+      integration.fixture_only
+        ? h("p", { class: "form-hint" }, "This connector is fixture/export-only; a live ESXi connector is unverified and disabled.")
+        : null,
+      integration.last_error ? h("p", { class: "form-hint" }, `Last error: ${integration.last_error}`) : null,
+      form,
+      actions,
+    );
+    container.append(sectionNode);
+  }
+}
+
+async function loadDiscoveryIntegrations(silent = false) {
+  if (!state.permissions.admin) return;
+  if (silent && state.discovery.integrations.length) {
+    renderDiscoveryIntegrations();
+    return;
+  }
+  try {
+    const data = await api("/api/discovery/integrations");
+    state.discovery.integrations = data.integrations || [];
+    renderDiscoveryIntegrations();
+    setText(
+      "discovery-integrations-status",
+      data.snmp?.backend ? `SNMP backend: ${data.snmp.backend}` : "",
+    );
+  } catch (error) {
+    if (!silent) setText("discovery-integrations-status", error.message);
+  }
+}
+
+function integrationConfigFromForm(kind, form) {
+  const values = new FormData(form);
+  if (kind === "snmp") {
+    return {
+      targets: String(values.get("targets") || "")
+        .split(/[\n,]+/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+      use_discovered: form.elements.use_discovered?.checked !== false,
+      timeout_ms: Number(values.get("timeout_ms") || 600),
+      retries: Number(values.get("retries") || 0),
+      max_targets: Number(values.get("max_targets") || 256),
+    };
+  }
+  const config = {
+    base_url: String(values.get("base_url") || "").trim(),
+    timeout_ms: Number(values.get("timeout_ms") || 5000),
+    max_response_bytes: Number(values.get("max_response_bytes") || 1000000),
+    verify_tls: form.elements.verify_tls?.checked !== false,
+  };
+  for (const field of ["site", "username", "token_name", "auth_method"]) {
+    if (values.get(field)) config[field] = String(values.get(field));
+  }
+  return config;
+}
+
+async function saveDiscoveryIntegration(kind, form, action) {
+  const errorNode = form.querySelector(`[data-integration-error="${kind}"]`);
+  if (errorNode) errorNode.textContent = "";
+  const secrets = {};
+  form.querySelectorAll("input[data-secret]").forEach((input) => {
+    if (input.value) secrets[input.dataset.secret] = input.value;
+  });
+  const payload = {
+    enabled: form.elements.enabled?.checked === true,
+    config: integrationConfigFromForm(kind, form),
+    secrets: Object.keys(secrets).length ? secrets : null,
+    clear_secrets: form.elements.clear_secrets?.checked === true,
+  };
+  try {
+    await api(`/api/discovery/integrations/${encodeURIComponent(kind)}`, {
+      method: "PATCH",
+      body: payload,
+    });
+    if (action === "test") {
+      const result = await api(`/api/discovery/integrations/${encodeURIComponent(kind)}/test`, {
+        method: "POST",
+        body: {},
+      });
+      toast(result.detail || "Integration test succeeded.");
+    } else if (action === "poll") {
+      const result = await api(`/api/discovery/integrations/${encodeURIComponent(kind)}/poll`, {
+        method: "POST",
+        body: {},
+      });
+      toast(`Integration poll merged ${result.devices_merged} devices.`);
+      await Promise.all([loadDiscoveryDevices(), loadDiscoveryScans(), loadDiscoveryConflicts()]);
+    } else {
+      toast("Integration settings saved.");
+    }
+    await loadDiscoveryIntegrations();
+  } catch (error) {
+    if (errorNode) errorNode.textContent = error.message;
+    else toast(error.message, "error");
+  }
 }
 
 function renderDiscoveryMethods() {
@@ -6696,6 +7062,7 @@ function renderDiscoveryScanHistory() {
       `Scanning ${(active.scope || []).join(", ")} · ${active.progress || 0}% · ${active.hosts_scanned || 0} hosts checked`,
     );
   }
+  renderDiscoveryImportHistory();
 }
 
 async function loadDiscovery() {
@@ -7707,6 +8074,25 @@ function wireEvents() {
   });
   $("discovery-export-csv")?.addEventListener("click", () => exportDiscovery("csv"));
   $("discovery-export-json")?.addEventListener("click", () => exportDiscovery("json"));
+  $("discovery-import-form")?.addEventListener("submit", submitDiscoveryImport);
+  $("discovery-import-preview")?.addEventListener("click", previewDiscoveryImport);
+  $("discovery-import-clear")?.addEventListener("click", clearDiscoveryImport);
+  $("discovery-import-file")?.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (file.size > 1_000_000) {
+      setText("discovery-import-status", "Import file exceeds the 1 MB limit.");
+      event.target.value = "";
+      return;
+    }
+    try {
+      $("discovery-import-content").value = await file.text();
+      setText("discovery-import-status", `${file.name} loaded (${file.size} bytes).`);
+    } catch (_error) {
+      setText("discovery-import-status", "Could not read the selected file.");
+    }
+  });
+  $("discovery-integrations-refresh")?.addEventListener("click", () => loadDiscoveryIntegrations());
   $("discovery-filter-clear")?.addEventListener("click", () => {
     state.discovery.filters = {
       state: "",

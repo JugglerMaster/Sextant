@@ -51,6 +51,32 @@ for (const theme of THEMES) {
     await page.locator("#discovery-filter-conflict").uncheck();
     await expect(page.locator("#discovery-table-body")).toContainText("esxi.lan");
 
+    await expect(page.locator("#discovery-import-panel")).toBeVisible();
+    await page.locator("#discovery-import-content").fill(
+      "192.168.1.77 aa:bb:cc:dd:ee:77 Imported Devices",
+    );
+    await page.locator("#discovery-import-form").getByRole("button", { name: "Preview" }).click();
+    await expect(page.locator("#discovery-import-preview-result")).toContainText("1 parsed");
+    await page.locator("#discovery-import-form").getByRole("button", { name: "Import", exact: true }).click();
+    await expect(page.locator("#discovery-import-status")).toContainText("Imported 1");
+    await expect(page.locator("#discovery-import-history")).toContainText("nmap-xml");
+
+    const integrationList = page.locator("#discovery-integration-list");
+    await expect(integrationList).toContainText("SNMP v2c");
+    await expect(integrationList).toContainText("fixture-only");
+    const snmpCard = integrationList.locator("section", { hasText: "SNMP v2c" });
+    const secretValue = "TOPSECRETCOMMUNITY";
+    await snmpCard.locator('input[data-secret="community"]').fill(secretValue);
+    await snmpCard.getByRole("button", { name: "Save" }).click();
+    await expect(integrationList).not.toContainText(secretValue);
+    const refreshedSnmp = integrationList.locator("section", { hasText: "SNMP v2c" });
+    await expect(refreshedSnmp.locator('input[data-secret="community"]')).toHaveAttribute(
+      "placeholder",
+      /configured/,
+    );
+    await refreshedSnmp.getByRole("button", { name: "Test connection" }).click();
+    await expect(page.locator("#toast-region")).toContainText("Connection succeeded");
+
     await page.locator("#discovery-table-body").getByRole("button", { name: /printer\.lan details/ }).click();
     await expect(page.locator("#discovery-drawer")).toBeVisible();
     await expect(page.locator("#discovery-drawer-body")).toContainText("Device record");

@@ -935,6 +935,7 @@ def merge_observation(
     ssdp = _json_safe(observation.ssdp or {})
     mdns = _json_safe(observation.mdns or {})
     random_mac = is_locally_administered(mac)
+    evidence = _json_safe(observation.evidence or {})
     device_type, os_guess, confidence = classify_device(
         hostname=hostname,
         vendor=vendor,
@@ -944,7 +945,24 @@ def merge_observation(
         mdns=mdns,
         mac_randomized=random_mac,
     )
-    evidence = _json_safe(observation.evidence or {})
+    imported_type = str(evidence.get("imported_device_type") or "")
+    if imported_type in {
+        "Windows",
+        "Linux/Unix",
+        "printer",
+        "router/switch",
+        "NAS",
+        "media/IoT",
+        "hypervisor",
+    }:
+        device_type = imported_type
+        confidence = max(confidence, 0.6)
+        if not os_guess:
+            os_guess = {
+                "Windows": "Windows",
+                "Linux/Unix": "Linux/Unix",
+                "hypervisor": "Hypervisor",
+            }.get(imported_type, "Embedded")
     tcp_scanned = "tcp" in (evidence.get("methods") or [])
     source = str(observation.source or "server")[:128]
     segment = str(observation.segment or "")[:128]

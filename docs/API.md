@@ -822,6 +822,64 @@ an otherwise unreachable device `sent`; reachable means `woke`. Every check is
 audited (`discovery.wake_verified`) and emits a deduplicated `wake_verified`
 event. No ICMP or raw sockets are used.
 
+## Discovery imports, SNMP, and vendor adapters (D6)
+
+### Import
+
+`POST /api/discovery/import` (admin, CSRF) accepts JSON:
+
+```json
+{
+  "format": "nmap-xml",
+  "filename": "lab.xml",
+  "content": "<nmaprun>…</nmaprun>",
+  "dry_run": false
+}
+```
+
+Formats are `nmap-xml`, `nmap-json`, `arp-scan`, `dnsmasq`, `isc-dhcpd`, and
+`json` (normalized devices). Content is capped at 1 MB and 2,000 devices;
+malformed XML/JSON/DOCTYPE/ENTITY input is rejected, and unsafe/non-private
+addresses are skipped and counted. `dry_run: true` returns parsed/new/existing/
+skipped/truncated counts and a small sample without writing data. A committed
+import creates a `discovery_scans` row with `source=import:<format>`, merges by
+MAC → IP → hostname, emits deduplicated events, and audits
+`discovery.imported`. Parse failures audit `discovery.import_failed`.
+
+### Integration settings
+
+`GET /api/discovery/integrations` (admin) returns all six kinds (`snmp`,
+`unifi`, `routeros`, `opnsense`, `proxmox`, `esxi`) with enabled/config,
+`secret_fields`, `secret_configured`, `live_supported`, `verified`,
+`fixture_only`, `last_error`, and `last_checked_at`. Secret values are never
+returned.
+
+`PATCH /api/discovery/integrations/{kind}` (admin, CSRF):
+
+```json
+{
+  "enabled": true,
+  "config": {"targets": ["192.168.1.0/24"], "timeout_ms": 600},
+  "secrets": {"community": "…"},
+  "clear_secrets": false
+}
+```
+
+Config is validated per kind. All integrations default off. Secrets are held in
+process memory only; they are not persisted in SQLite and are lost on restart.
+SNMP requires private IP/CIDR targets and a community. Vendor connectors require
+HTTPS (except localhost labs), validate TLS by default, and bound timeout and
+response size. UniFi/RouterOS/OPNsense/Proxmox use documented read-only JSON
+endpoints but are marked **unverified** against live vendor versions. ESXi is
+fixture/export-only and returns a clear error for live test/poll.
+
+`POST /api/discovery/integrations/{kind}/test` performs one bounded read-only
+check. `POST /api/discovery/integrations/{kind}/poll` requires the integration
+to be enabled, performs a bounded manual poll, merges devices with
+`source=snmp` or `source=adapter:<kind>`, and returns the scan/results. Both
+audit success/failure and store a redacted `last_error`; credentials are never
+included in audit detail or error responses.
+
 ## Docker Hosts (D1–D5)
 
 Docker is off by default. A host appears only when the Linux agent reports Docker,

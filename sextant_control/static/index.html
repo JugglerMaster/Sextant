@@ -272,6 +272,39 @@
           <div id="discovery-segment-list" class="list-stack"></div>
         </article>
 
+        <article class="panel nav-admin" id="discovery-import-panel" hidden>
+          <div class="panel-head">
+            <div><p class="eyebrow">External data</p><h2>Import scan or lease data</h2></div>
+          </div>
+          <form id="discovery-import-form" class="form-stack">
+            <div class="form-grid">
+              <label class="field"><span>Format</span><select id="discovery-import-format"><option value="nmap-xml">Nmap XML (-oX)</option><option value="nmap-json">Nmap JSON (-oJ)</option><option value="arp-scan">arp-scan text</option><option value="dnsmasq">dnsmasq leases</option><option value="isc-dhcpd">ISC dhcpd leases</option><option value="json">Normalized JSON</option></select></label>
+              <label class="field"><span>File</span><input id="discovery-import-file" type="file" accept=".xml,.json,.txt,.lease,.leases"></label>
+            </div>
+            <label class="field"><span>Or paste content</span><textarea id="discovery-import-content" rows="5" maxlength="1000000" placeholder="Paste Nmap, arp-scan, lease, or normalized JSON output"></textarea></label>
+            <p class="form-hint">Imports are bounded to 1 MB and 2,000 devices. Malformed input is rejected; unsafe addresses are skipped and counted.</p>
+            <div class="section-toolbar">
+              <button class="button button-secondary" id="discovery-import-preview" type="button">Preview</button>
+              <button class="button button-primary" id="discovery-import-submit" type="submit">Import</button>
+              <button class="button button-ghost" id="discovery-import-clear" type="button">Clear</button>
+            </div>
+            <p class="form-hint" id="discovery-import-status" aria-live="polite"></p>
+            <div id="discovery-import-preview-result" class="callout" hidden></div>
+          </form>
+          <div class="panel-head panel-head-spaced"><div><p class="eyebrow">History</p><h3>Import scans</h3></div></div>
+          <div id="discovery-import-history" class="list-stack"></div>
+        </article>
+
+        <article class="panel nav-admin" id="discovery-integrations-panel" hidden>
+          <div class="panel-head">
+            <div><p class="eyebrow">Read-only integrations</p><h2>SNMP and vendor connectors</h2></div>
+            <button class="button button-secondary button-small" id="discovery-integrations-refresh" type="button">Refresh</button>
+          </div>
+          <p class="form-hint">All integrations are off by default. Secrets are write-only and held in process memory; they are not returned, logged, or persisted by Sextant.</p>
+          <p class="form-hint" id="discovery-integrations-status" aria-live="polite"></p>
+          <div id="discovery-integration-list" class="list-stack"></div>
+        </article>
+
         <div class="panel-grid">
           <article class="panel" id="discovery-scan-panel" hidden>
             <div class="panel-head">

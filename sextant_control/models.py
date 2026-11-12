@@ -881,6 +881,34 @@ class DiscoveryReportDeviceIn(BaseModel):
         return value
 
 
+class DiscoveryImportIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    format: str = Field(min_length=2, max_length=32)
+    content: str = Field(min_length=1, max_length=1_000_000)
+    filename: str = Field(default="", max_length=255)
+    dry_run: bool = False
+
+
+class DiscoveryIntegrationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool | None = None
+    config: dict[str, Any] | None = None
+    secrets: dict[str, str] | None = Field(default=None, max_length=16)
+    clear_secrets: bool = False
+
+    @field_validator("secrets")
+    @classmethod
+    def _secrets(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        if value is None:
+            return None
+        cleaned: dict[str, str] = {}
+        for key, item in list(value.items())[:16]:
+            if len(str(key)) > 64 or len(str(item)) > 4096:
+                raise ValueError("secret fields are too large")
+            cleaned[str(key)] = str(item)
+        return cleaned
+
+
 class DiscoveryReportIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     scan_id: str = Field(pattern=r"^dsc_[A-Za-z0-9]+$")

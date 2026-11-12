@@ -669,6 +669,34 @@ const discoverySummary = {
   conflicts: 1,
   conflict_device_ids: ["dev_printer"],
 };
+const discoveryIntegrations = [
+  {
+    kind: "snmp",
+    label: "SNMP v2c",
+    enabled: false,
+    config: { targets: [], use_discovered: true, timeout_ms: 600, retries: 1, max_targets: 256, verify_tls: true },
+    secret_fields: ["community"],
+    secret_configured: false,
+    live_supported: true,
+    verified: false,
+    fixture_only: false,
+    last_error: "",
+    last_checked_at: null,
+  },
+  {
+    kind: "esxi",
+    label: "VMware ESXi",
+    enabled: false,
+    config: { base_url: "", timeout_ms: 5000, max_response_bytes: 1000000, verify_tls: true, fixture_only: true },
+    secret_fields: ["password"],
+    secret_configured: false,
+    live_supported: false,
+    verified: false,
+    fixture_only: true,
+    last_error: "",
+    last_checked_at: null,
+  },
+];
 const discoveryConflicts = [
   {
     type: "ip_multiple_macs",
@@ -773,6 +801,83 @@ function createApi(session) {
                 },
               ],
           local_flag_required: true,
+        },
+      };
+    }
+    if (key === "/api/discovery/integrations") {
+      return {
+        status: 200,
+        body: {
+          integrations: discoveryIntegrations,
+          snmp: { available: true, backend: "stdlib", optional_dependency: false },
+        },
+      };
+    }
+    if (method === "PATCH" && /^\/api\/discovery\/integrations\/[^/]+$/.test(key)) {
+      const kind = key.split("/").pop();
+      const integration = discoveryIntegrations.find((item) => item.kind === kind);
+      if (!integration) return { status: 404, body: { detail: "Unknown integration." } };
+      if (body?.enabled !== undefined) integration.enabled = Boolean(body.enabled);
+      if (body?.config) integration.config = { ...integration.config, ...body.config };
+      if (body?.secrets && Object.keys(body.secrets).length) integration.secret_configured = true;
+      if (body?.clear_secrets) integration.secret_configured = false;
+      return { status: 200, body: integration };
+    }
+    if (method === "POST" && /^\/api\/discovery\/integrations\/[^/]+\/(test|poll)$/.test(key)) {
+      const parts = key.split("/");
+      const kind = parts[4];
+      const action = parts[5];
+      const integration = discoveryIntegrations.find((item) => item.kind === kind);
+      if (integration && !integration.live_supported) {
+        return { status: 502, body: { detail: "Fixture-only connector." } };
+      }
+      if (action === "test") {
+        return { status: 200, body: { ok: true, kind, detail: "Connection succeeded." } };
+      }
+      return { status: 200, body: { scan: { id: "dsc_poll", source: `adapter:${kind}` }, devices_merged: 1, targets: 1, errors: [], detail: "fixture" } };
+    }
+    if (method === "POST" && key === "/api/discovery/import") {
+      if (body?.dry_run) {
+        return {
+          status: 200,
+          body: {
+            dry_run: true,
+            format: body?.format || "nmap-xml",
+            devices: 1,
+            new: 1,
+            existing: 0,
+            skipped: 0,
+            truncated: false,
+            metadata: {},
+            sample: [{ ip: "192.168.1.77", mac: "aa:bb:cc:dd:ee:77", hostname: "imported.lan", vendor: "Imported", open_ports: [22] }],
+          },
+        };
+      }
+      const importedScan = {
+        id: "dsc_import",
+        started_at: "2026-11-06T08:06:00Z",
+        finished_at: "2026-11-06T08:06:01Z",
+        scope: ["192.168.1.0/24"],
+        methods: ["import"],
+        initiated_by: "admin",
+        source: `import:${body?.format || "nmap-xml"}`,
+        status: "succeeded",
+        hosts_found: 1,
+        error: "",
+        progress: 100,
+        hosts_scanned: 1,
+        cancel_requested: false,
+      };
+      discoveryScans.unshift(importedScan);
+      return {
+        status: 200,
+        body: {
+          dry_run: false,
+          format: body?.format || "nmap-xml",
+          scan: importedScan,
+          devices_merged: 1,
+          skipped: 0,
+          truncated: false,
         },
       };
     }

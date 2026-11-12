@@ -1,12 +1,12 @@
 # Discovery — plan
 
-**Status:** D1–D5 implemented. D6 (DHCP/AP/hypervisor/SNMP integrations) remains proposed.
+**Status:** D1–D6 implemented. Live vendor connectors are marked unverified; ESXi is fixture/export-only.
 
 **Scope:** find, identify, and analyze devices on the networks this console is authorized to manage, then offer a path from "found" to "managed" (wake target or enrolled agent).
 
-**Implemented now:** CIDR-scoped server-side discovery with allowlists and excludes, neighbour-table/PTR/OUI/SSDP collection, opt-in TCP connect and banner/TLS fingerprinting, classification, MAC/IP/hostname merging, deduplicated change events, a bounded background scan worker with cancellation, a read/write API, a Discovery page, and opt-in agent-relayed scans for an enrolled Linux agent's local VLAN over the existing outbound command/heartbeat path. D4 adds exposure/conflict analysis, segment/topology summaries, bounded CSV/JSON export, wake verification, and onboarding promotion. D5 adds wake-target creation, one-time Linux/Windows install commands, existing-agent linking, and a promotion UI. See [Implementation notes](#implementation-notes-d1d5) at the end of this document for the exact route and data-model decisions.
+**Implemented now:** CIDR-scoped server-side discovery with allowlists and excludes, neighbour-table/PTR/OUI/SSDP collection, opt-in TCP connect and banner/TLS fingerprinting, classification, MAC/IP/hostname merging, deduplicated change events, a bounded background scan worker with cancellation, a read/write API, a Discovery page, and opt-in agent-relayed scans for an enrolled Linux agent's local VLAN over the existing outbound command/heartbeat path. D4 adds exposure/conflict analysis, segment/topology summaries, bounded CSV/JSON export, wake verification, and onboarding promotion. D5 adds wake-target creation, one-time Linux/Windows install commands, existing-agent linking, and a promotion UI. D6 adds Nmap/arp-scan/DHCP lease/JSON imports, bounded stdlib SNMP v2c polling, and read-only UniFi/RouterOS/OPNsense/Proxmox/ESXi adapters with write-only secrets. See [Implementation notes](#implementation-notes-d1d6) at the end of this document for the exact route and data-model decisions.
 
-**Not implemented yet:** DHCP/AP/hypervisor/SNMP and external-scanner integrations (D6), and the credential-based Windows remote installer plan in [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md).
+**Deferred:** the credential-based Windows remote installer plan in [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md). ESXi live polling is fixture/export-only, and the other vendor connectors are implemented against documented read-only endpoints but marked unverified until tested against real controllers.
 
 Discovery is a separate concern from remote control. It answers *what is on the network*; control remains the existing agent path (queued shell, service management, power actions, WoL). Discovery does not add RDP/VNC/SSH/PTY support.
 
@@ -208,6 +208,11 @@ Analysis layer (what makes the list useful):
 | GET | `/api/discovery/agents` | viewer+ | eligible agent sources and segments |
 | GET | `/api/discovery/export?format=csv|json` | admin | bounded, audited export |
 | GET | `/api/discovery/conflicts` | viewer+ | identity conflicts |
+| POST | `/api/discovery/import` | admin | import Nmap/arp-scan/lease/JSON data (dry-run supported) |
+| GET | `/api/discovery/integrations` | admin | redacted integration settings |
+| PATCH | `/api/discovery/integrations/{kind}` | admin | enable/config/write-only secrets |
+| POST | `/api/discovery/integrations/{kind}/test` | admin | bounded connection test |
+| POST | `/api/discovery/integrations/{kind}/poll` | admin | manual SNMP/vendor poll |
 | DELETE | `/api/discovery/devices/{id}` | admin | delete |
 
 Scans are asynchronous: start returns a scan ID; the UI polls until `finished`. SSE/WebSocket can replace polling later.
@@ -268,7 +273,7 @@ Non-negotiable:
 | **D3** ✅ | Agent-relayed discovery for other VLANs (`discovery.scan` over the existing outbound command/heartbeat path, `allow_discovery`) | M | medium | An agent scans its own subnet and reports; server policy can disable; local agent denial wins; no inbound port opened |
 | **D4** ✅ | Analysis: exposure report, identity conflicts, segment summary, wake verification, CSV/JSON export | S–M | low | False-positive rate acceptable on a test LAN; exports are bounded and audited |
 | **D5** ✅ | Onboarding: promote to wake target; enrollment token + install command; link to agent | S | low | Promoted device is marked and auditable; no duplicate wake targets |
-| **D6** | Integrations: DHCP leases, UniFi/RouterOS/OPNsense, Proxmox/ESXi, SNMP | L each | low–medium | Import/merge does not overwrite operator metadata; failures are visible |
+| **D6** ✅ | Integrations: DHCP lease and scanner imports, SNMP, UniFi/RouterOS/OPNsense/Proxmox/ESXi adapters | L each | low–medium | Import/merge does not overwrite operator metadata; failures are visible; live vendor connectors explicitly unverified |
 
 Recommended sequence: **D1 → D2 → D5 → D4 → D3 → D6**. Onboarding early makes D1 immediately useful; agent relay can wait until a second VLAN matters.
 
@@ -419,7 +424,7 @@ These are alternatives to the hybrid recommendation, not additions to it. Choose
 
 ---
 
-# Implementation notes (D1–D5)
+# Implementation notes (D1–D6)
 
 ## Configuration
 
@@ -518,6 +523,33 @@ agent's segment; selecting **This server** uses the server-side worker from D1�
 - **Windows:** the generated command is manual elevated PowerShell only. The
   credential-based remote installer remains a plan in
   [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md).
+
+## D6 — imports, SNMP, and vendor adapters
+
+- **Import API:** `POST /api/discovery/import` (admin) accepts `format`,
+  `content`, optional `filename`, and `dry_run`. Formats: `nmap-xml`,
+  `nmap-json`, `arp-scan`, `dnsmasq`, `isc-dhcpd`, and normalized `json`.
+  Content is capped at 1 MB and 2,000 devices; malformed input is rejected and
+  unsafe addresses are skipped/counted. Successful imports create a
+  `discovery_scans` row with `source=import:<format>`, merge by MAC → IP →
+  hostname, emit deduplicated events, and audit `discovery.imported`.
+- **Import history:** import scans appear in the normal scan history and a
+  dedicated admin import-history list.
+- **SNMP v2c:** bounded stdlib GET for sysDescr/sysName/sysObjectID/sysUptime;
+  no optional dependency is required. Targets are configured private IP/CIDR
+  values or discovered candidates, capped by `max_targets`, timeout, and retry
+  settings. Community strings are write-only and held in process memory only.
+  Polls merge with source `snmp` and audit success/failure.
+- **Vendor adapters:** read-only HTTPS JSON connectors for UniFi, RouterOS,
+  OPNsense, and Proxmox; ESXi accepts a fixture/normalized export only. All
+  credentials/tokens are write-only memory secrets. The live connectors use
+  documented read-only endpoints but are **unverified** against real vendor
+  versions and are marked as such in the UI/API. No connector opens an inbound
+  listener.
+- **Secrets:** no community string, password, API token, or API secret is stored
+  in SQLite, returned by settings/list APIs, written to audit/events, or logged.
+  Secrets are lost on server restart and must be re-entered. TLS verification is
+  on by default; non-local connectors require HTTPS.
 
 ## Data model
 

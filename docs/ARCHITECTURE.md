@@ -87,6 +87,7 @@ Key properties:
 | `discovery_scans` | Requested scope/methods, initiator, source (`server` or `agent:<id>`), agent/command binding, status, progress, host counts, cancellation flag, bounded error |
 | `discovery_events` | Deduplicated `new_device`, `new_port`, `service_changed`, `identity_conflict`, `went_dark`, `promoted`, and `wake_verified` events |
 | `discovery_settings` | Single-row audited acknowledgement of the network-scan authorization statement |
+| `discovery_integrations` | Per-connector enabled/config/last-error state; secrets are memory-only and never stored here |
 | `agent_profiles` | Server-managed behavior profiles (cadence, modules, action gates, update policy) |
 | `profile_tag_assignments` | Tag → profile assignments (applied to matching agents) |
 | `enrollment_tokens` | One-time token hashes with expiry and use metadata |
@@ -186,6 +187,17 @@ verification uses the neighbour reader and optional TCP prober, stores
 `wake_status`/`wake_verified_at`, and emits a `wake_verified` event; it never uses
 ICMP or raw sockets. Sending a linked wake target marks discovered devices
 `sent` immediately.
+
+D6 imports are parsed by `discovery_imports.py` (bounded XML/JSON/ARP/lease
+parsers) and merged through the same `merge_observations` pipeline with
+`source=import:<format>`; imports create regular `discovery_scans` history rows.
+SNMP uses a bounded stdlib v2c GET implementation in `snmp.py`; community
+strings are accepted per poll from an in-memory secret store. Vendor adapters in
+`discovery_integrations.py` are read-only HTTPS JSON fetchers with bounded
+responses; UniFi/RouterOS/OPNsense/Proxmox are implemented against documented
+endpoints but marked unverified, and ESXi is fixture/export-only. Integration
+configuration lives in `discovery_integrations`; secrets are never persisted.
+All imports/polls merge atomically and emit deduplicated events.
 
 D5 promotion uses the existing wake-target and enrollment-token tables. Wake
 targets are reused by MAC, install promotion generates a one-time token whose

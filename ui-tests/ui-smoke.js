@@ -453,6 +453,47 @@ const discoverySummary = {
   conflicts: 1,
   conflict_device_ids: ["dev_printer"],
 };
+const discoveryIntegrations = [
+  {
+    kind: "snmp",
+    label: "SNMP v2c",
+    enabled: false,
+    config: { targets: [], use_discovered: true, timeout_ms: 600, retries: 1, max_targets: 256, verify_tls: true },
+    secret_fields: ["community"],
+    secret_configured: false,
+    live_supported: true,
+    verified: false,
+    fixture_only: false,
+    last_error: "",
+    last_checked_at: null,
+  },
+  {
+    kind: "unifi",
+    label: "UniFi controller",
+    enabled: false,
+    config: { base_url: "", site: "default", timeout_ms: 5000, max_response_bytes: 1000000, verify_tls: true },
+    secret_fields: ["api_token", "password"],
+    secret_configured: false,
+    live_supported: true,
+    verified: false,
+    fixture_only: false,
+    last_error: "",
+    last_checked_at: null,
+  },
+  {
+    kind: "esxi",
+    label: "VMware ESXi",
+    enabled: false,
+    config: { base_url: "", timeout_ms: 5000, max_response_bytes: 1000000, verify_tls: true, fixture_only: true },
+    secret_fields: ["password"],
+    secret_configured: false,
+    live_supported: false,
+    verified: false,
+    fixture_only: true,
+    last_error: "",
+    last_checked_at: null,
+  },
+];
 const discoveryConflicts = [
   {
     type: "ip_multiple_macs",
@@ -645,6 +686,10 @@ const responses = {
   "/api/discovery/scans": {
     status: 200,
     body: { scans: discoveryScans, total: discoveryScans.length, limit: 50, offset: 0, active_scan_id: discoveryActiveScan?.id || null },
+  },
+  "/api/discovery/integrations": {
+    status: 200,
+    body: { integrations: discoveryIntegrations, snmp: { available: true, backend: "stdlib", optional_dependency: false } },
   },
   "/api/discovery/conflicts": {
     status: 200,
@@ -912,6 +957,82 @@ window.fetch = async (path, options = {}) => {
         active_scan_id: discoveryActiveScan?.status === "running" ? discoveryActiveScan.id : null,
       },
     };
+  } else if (method === "POST" && key === "/api/discovery/import") {
+    if (body?.dry_run) {
+      response = {
+        status: 200,
+        body: {
+          dry_run: true,
+          format: body?.format || "nmap-xml",
+          devices: 1,
+          new: 1,
+          existing: 0,
+          skipped: 0,
+          truncated: false,
+          metadata: {},
+          sample: [{ ip: "192.168.1.77", mac: "aa:bb:cc:dd:ee:77", hostname: "imported.lan", vendor: "Imported", open_ports: [22] }],
+        },
+      };
+    } else {
+      response = {
+        status: 200,
+        body: {
+          dry_run: false,
+          format: body?.format || "nmap-xml",
+          scan: {
+            id: "dsc_import",
+            started_at: "2026-11-06T08:06:00Z",
+            finished_at: "2026-11-06T08:06:01Z",
+            scope: ["192.168.1.0/24"],
+            methods: ["import"],
+            initiated_by: "admin",
+            source: `import:${body?.format || "nmap-xml"}`,
+            status: "succeeded",
+            hosts_found: 1,
+            error: "",
+            progress: 100,
+            hosts_scanned: 1,
+            cancel_requested: false,
+          },
+          devices_merged: 1,
+          skipped: 0,
+          truncated: false,
+        },
+      };
+      discoveryScans.unshift({
+        ...response.body.scan,
+        id: `dsc_import_${discoveryScans.length + 1}`,
+      });
+    }
+  } else if (method === "GET" && key === "/api/discovery/integrations") {
+    response = {
+      status: 200,
+      body: { integrations: discoveryIntegrations, snmp: { available: true, backend: "stdlib", optional_dependency: false } },
+    };
+  } else if (method === "PATCH" && /^\/api\/discovery\/integrations\/[^/]+$/.test(key)) {
+    const kind = key.split("/").pop();
+    const integration = discoveryIntegrations.find((item) => item.kind === kind);
+    if (!integration) {
+      response = { status: 404, body: { detail: "Unknown integration." } };
+    } else {
+      if (body?.enabled !== undefined) integration.enabled = Boolean(body.enabled);
+      if (body?.config) integration.config = { ...integration.config, ...body.config };
+      if (body?.secrets && Object.keys(body.secrets).length) integration.secret_configured = true;
+      if (body?.clear_secrets) integration.secret_configured = false;
+      response = { status: 200, body: integration };
+    }
+  } else if (method === "POST" && /^\/api\/discovery\/integrations\/[^/]+\/(test|poll)$/.test(key)) {
+    const parts = key.split("/");
+    const kind = parts[4];
+    const action = parts[5];
+    const integration = discoveryIntegrations.find((item) => item.kind === kind);
+    if (integration && !integration.live_supported) {
+      response = { status: 502, body: { detail: "Fixture-only connector." } };
+    } else if (action === "test") {
+      response = { status: 200, body: { ok: true, kind, detail: "Connection succeeded." } };
+    } else {
+      response = { status: 200, body: { scan: { id: "dsc_poll", source: `adapter:${kind}` }, devices_merged: 1, targets: 1, errors: [], detail: "fixture" } };
+    }
   } else if (method === "POST" && /^\/api\/discovery\/devices\/[^/]+\/(promote|wake-target|link-agent|verify)$/.test(key)) {
     const id = key.split("/")[4];
     const action = key.split("/")[5];
@@ -2168,6 +2289,59 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!findButton(window.document.getElementById("discovery-filters"), "Export CSV")) {
     throw new Error("Discovery export buttons are missing");
   }
+  if (window.document.getElementById("discovery-import-panel").hidden) {
+    throw new Error("Discovery import panel is hidden for an admin");
+  }
+  const importContent = window.document.getElementById("discovery-import-content");
+  importContent.value = "192.168.1.77 aa:bb:cc:dd:ee:77 Imported Devices";
+  window.document.getElementById("discovery-import-preview").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  if (!window.document.getElementById("discovery-import-preview-result").textContent.includes("1 parsed")) {
+    throw new Error("Discovery import preview counts did not render");
+  }
+  window.document.getElementById("discovery-import-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(100);
+  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/discovery/import" && !request.body.dry_run)) {
+    throw new Error("Discovery import confirmation was not sent");
+  }
+  if (!window.document.getElementById("discovery-import-status").textContent.includes("Imported 1")) {
+    throw new Error("Discovery import result did not render");
+  }
+  if (!window.document.getElementById("discovery-import-history").textContent.includes("nmap-xml")) {
+    throw new Error("Discovery import history did not render");
+  }
+
+  const integrationList = window.document.getElementById("discovery-integration-list");
+  if (window.document.getElementById("discovery-integrations-panel").hidden || !integrationList.textContent.includes("SNMP v2c")) {
+    throw new Error("Discovery integrations panel did not render");
+  }
+  if (!integrationList.textContent.includes("fixture-only")) {
+    throw new Error("Discovery fixture-only adapter state is missing");
+  }
+  const snmpCard = [...integrationList.querySelectorAll("section")].find((item) => item.textContent.includes("SNMP v2c"));
+  const community = "TOPSECRETCOMMUNITY";
+  const communityInput = snmpCard.querySelector('input[data-secret="community"]');
+  communityInput.value = community;
+  findButton(snmpCard, "Save").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(100);
+  const integrationPatch = window.__requests.find(
+    (request) => request.method === "PATCH" && request.path === "/api/discovery/integrations/snmp",
+  );
+  if (!integrationPatch || integrationPatch.body.secrets.community !== community) {
+    throw new Error("Discovery SNMP secret was not sent write-only");
+  }
+  if (integrationList.textContent.includes(community)) {
+    throw new Error("Discovery SNMP secret was rendered back into the DOM");
+  }
+  const refreshedSnmp = [...integrationList.querySelectorAll("section")].find((item) => item.textContent.includes("SNMP v2c"));
+  if (!refreshedSnmp.querySelector('input[data-secret="community"]').placeholder.includes("configured")) {
+    throw new Error("Discovery SNMP secret-configured state is missing");
+  }
+  findButton(refreshedSnmp, "Test connection").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(100);
+  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/discovery/integrations/snmp/test")) {
+    throw new Error("Discovery SNMP connection test was not sent");
+  }
 
   const discoveryOpen = [...discoveryTable.querySelectorAll("button")].find((item) =>
     (item.getAttribute("aria-label") || "").includes("printer.lan"),
@@ -2437,7 +2611,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/exposure/conflicts/segments/table/drawer/edit/verify/promotion commands/token clearing/server-and-agent scan source/start/cancel/relay-disabled/disabled/unacknowledged states, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/exposure/conflicts/segments/table/drawer/edit/verify/promotion commands/token clearing/import preview/history/integration settings/secret redaction/SNMP fixture-only/server-and-agent scan source/start/cancel/relay-disabled/disabled/unacknowledged states, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

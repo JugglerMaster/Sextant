@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import csv
 import hashlib
 import hmac
@@ -48,6 +49,21 @@ from .discovery import (
     validate_network,
     verify_reachability,
 )
+from .discovery_imports import (
+    MAX_IMPORT_DEVICES,
+    DiscoveryImportError,
+    parse_import,
+)
+from .discovery_integrations import (
+    INTEGRATION_KINDS,
+    IntegrationError,
+    IntegrationSecretStore,
+    adapter_descriptor,
+    fetch_adapter_devices,
+    secret_fields,
+    test_adapter,
+    validate_integration_config,
+)
 from .docker_console import ConsoleBroker, ConsoleError
 from .docker_rules import DOCKER_MUTATION_ACTIONS
 from .docker_store import ComposeLibrary, DockerStoreError
@@ -77,6 +93,8 @@ from .models import (
     DockerInventoryIn,
     DockerSettingsIn,
     DiscoveryDevicePatchIn,
+    DiscoveryImportIn,
+    DiscoveryIntegrationIn,
     DiscoveryLinkAgentIn,
     DiscoveryPromoteIn,
     DiscoveryReportIn,
@@ -98,6 +116,14 @@ from .models import (
     UserUpdateIn,
     WakeTargetIn,
     WakeTargetWakeIn,
+)
+from .snmp import (
+    SNMPError,
+    redact_snmp_error,
+    snmp_device,
+    snmp_get,
+    snmp_status,
+    target_ips,
 )
 from .security import (
     LoginRateLimiter,
@@ -755,6 +781,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         on_change=notify_dashboard,
     )
     app.state.discovery_manager = discovery_manager
+    integration_secrets = IntegrationSecretStore()
+    app.state.integration_secrets = integration_secrets
 
     def _security_headers(response: Response, path: str) -> Response:
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -846,6 +874,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def get_notifications(request: Request) -> NotificationService:
         return request.app.state.notifications
+
+    def get_integration_secrets(request: Request) -> IntegrationSecretStore:
+        return request.app.state.integration_secrets
 
     def issue_session(
         user_row: sqlite3.Row,
@@ -4450,6 +4481,203 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         }
 
+    def _integration_defaults(kind: str) -> dict[str, Any]:
+        if kind == "snmp":
+            return {
+                "targets": [],
+                "use_discovered": True,
+                "timeout_ms": 600,
+                "retries": 1,
+                "max_targets": 256,
+                "verify_tls": True,
+            }
+        return {
+            "base_url": "",
+            "verify_tls": True,
+            "timeout_ms": 5000,
+            "max_response_bytes": 1_000_000,
+            **({"site": "default"} if kind == "unifi" else {}),
+            **({"auth_method": "token"} if kind == "proxmox" else {}),
+            **({"fixture_only": True} if kind == "esxi" else {}),
+        }
+
+    def _integration_row(kind: str) -> sqlite3.Row | None:
+        return app.state.db.get_discovery_integration(kind)
+
+    def _integration_config(kind: str, row: sqlite3.Row | None = None) -> dict[str, Any]:
+        defaults = _integration_defaults(kind)
+        if row is None:
+            row = _integration_row(kind)
+        if row is not None:
+            stored = loads(row["config"], {})
+            if isinstance(stored, dict):
+                defaults.update(stored)
+        return defaults
+
+    def _integration_descriptor(kind: str, row: sqlite3.Row | None = None) -> dict[str, Any]:
+        row = row if row is not None else _integration_row(kind)
+        if kind == "snmp":
+            label = "SNMP v2c"
+            live_supported = True
+            verified = False
+        else:
+            meta = adapter_descriptor(kind)
+            label = meta["label"]
+            live_supported = meta["live_supported"]
+            verified = meta["verified"]
+        fields = list(secret_fields(kind))
+        return {
+            "kind": kind,
+            "label": label,
+            "enabled": bool(row["enabled"]) if row is not None else False,
+            "config": _integration_config(kind, row),
+            "secret_fields": fields,
+            "secret_configured": integration_secrets.configured(kind, tuple(fields)),
+            "live_supported": live_supported,
+            "verified": verified,
+            "fixture_only": kind == "esxi",
+            "last_error": row["last_error"] if row is not None else "",
+            "last_checked_at": row["last_checked_at"] if row is not None else None,
+            "updated_at": row["updated_at"] if row is not None else None,
+        }
+
+    def _redact_integration_error(kind: str, message: Any) -> str:
+        text = redact_snmp_error(message) if kind == "snmp" else str(message)[:2000]
+        for secret in integration_secrets.get(kind).values():
+            if secret:
+                text = text.replace(secret, "***")
+        return text
+
+    def _integration_error(kind: str, message: str) -> str:
+        text = _redact_integration_error(kind, message)
+        app.state.db.set_discovery_integration_result(kind, last_error=text)
+        return text
+
+    def _observations_from_devices(
+        devices: list[dict[str, Any]],
+        *,
+        source: str,
+    ) -> list[DeviceObservation]:
+        try:
+            allowlist = validate_allowlist(app.state.settings.discovery.cidrs)
+        except DiscoveryError:
+            allowlist = []
+        observations: list[DeviceObservation] = []
+        for device in devices[:MAX_IMPORT_DEVICES]:
+            ip = str(device.get("ip") or "")
+            if not ip:
+                continue
+            observations.append(
+                DeviceObservation(
+                    ip=ip,
+                    mac=str(device.get("mac") or ""),
+                    hostname=str(device.get("hostname") or ""),
+                    vendor=str(device.get("vendor") or ""),
+                    source=source,
+                    segment=segment_for_ip(ip, allowlist),
+                    open_ports=list(device.get("open_ports") or []),
+                    services=device.get("services") if isinstance(device.get("services"), dict) else {},
+                    mdns=device.get("mdns") if isinstance(device.get("mdns"), dict) else {},
+                    ssdp=device.get("ssdp") if isinstance(device.get("ssdp"), dict) else {},
+                    evidence=device.get("evidence") if isinstance(device.get("evidence"), dict) else {},
+                )
+            )
+        return observations
+
+    def _preview_counts(observations: list[DeviceObservation]) -> dict[str, int]:
+        with app.state.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, mac, ip, hostname FROM discovered_devices"
+            ).fetchall()
+        by_mac = {str(row["mac"]).lower(): row for row in rows if row["mac"]}
+        by_ip = {str(row["ip"]): row for row in rows if row["ip"]}
+        by_hostname = {
+            str(row["hostname"]).lower(): row for row in rows if row["hostname"]
+        }
+        new = 0
+        existing = 0
+        seen: set[str] = set()
+        for observation in observations:
+            mac = str(observation.mac or "").lower()
+            match = by_mac.get(mac) if mac else None
+            if match is None and observation.ip:
+                match = by_ip.get(str(observation.ip))
+            if match is None and observation.hostname:
+                match = by_hostname.get(str(observation.hostname).lower())
+            key = str(match["id"]) if match is not None else f"new:{observation.ip}:{mac}"
+            if key in seen:
+                continue
+            seen.add(key)
+            if match is None:
+                new += 1
+            else:
+                existing += 1
+        return {"new": new, "existing": existing}
+
+    def _ingest_discovery_observations(
+        observations: list[DeviceObservation],
+        *,
+        source: str,
+        methods: list[str],
+        user: dict[str, Any],
+        request: Request,
+        audit_action: str,
+        audit_detail: dict[str, Any],
+        failure_action: str | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        segments = sorted({item.segment for item in observations if item.segment})
+        scan = app.state.db.create_discovery_scan(
+            segments, methods, user["username"], source=source
+        )
+        try:
+            merged = merge_observations(
+                app.state.db, observations, scan_id=scan["id"]
+            )
+        except Exception as exc:  # noqa: BLE001 - surface the failure safely
+            app.state.db.update_discovery_scan(
+                scan["id"],
+                status="failed",
+                finished_at=utcnow_iso(),
+                error=f"Ingest failed: {type(exc).__name__}",
+            )
+            app.state.db.audit(
+                actor=user["username"],
+                action=failure_action or f"{audit_action}_failed",
+                target=str(scan["id"]),
+                detail={**audit_detail, "error": type(exc).__name__},
+                ip=client_ip(request, app.state.settings.trust_proxy),
+            )
+            raise HTTPException(
+                status_code=400, detail="Discovery data could not be merged."
+            ) from None
+        app.state.db.update_discovery_scan(
+            scan["id"],
+            status="succeeded",
+            finished_at=utcnow_iso(),
+            hosts_found=len({item["id"] for item in merged}),
+            hosts_scanned=len(observations),
+            progress=100,
+            error="",
+        )
+        app.state.db.audit(
+            actor=user["username"],
+            action=audit_action,
+            target=str(scan["id"]),
+            detail={
+                **audit_detail,
+                "devices": len(merged),
+                "hosts_scanned": len(observations),
+                "source": source,
+            },
+            ip=client_ip(request, app.state.settings.trust_proxy),
+        )
+        notify_dashboard()
+        updated = app.state.db.get_discovery_scan(scan["id"])
+        return (
+            discovery_scan_to_dict(updated) if updated is not None else {},
+            merged,
+        )
+
     def discovery_settings_payload(
         database: Database, config: Settings
     ) -> dict[str, Any]:
@@ -5031,6 +5259,369 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "device": discovered_device_to_dict(updated) if updated is not None else None,
             "verification": {**verification, "status": wake_status},
+        }
+
+    @app.post("/api/discovery/import")
+    def import_discovery_data(
+        payload: DiscoveryImportIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if not config.discovery.enabled:
+            raise HTTPException(
+                status_code=403,
+                detail="Discovery is disabled. Set SEXTANT_DISCOVERY_ENABLED=1 first.",
+            )
+        acknowledgement = database.get_discovery_settings()
+        if acknowledgement is None or not acknowledgement["acknowledged_at"]:
+            raise HTTPException(
+                status_code=403,
+                detail="Discovery authorization acknowledgement is required.",
+            )
+        filename = payload.filename.replace("\\", "/").split("/")[-1][:255]
+        content_bytes = len(payload.content.encode("utf-8"))
+        try:
+            parsed = parse_import(payload.format, payload.content)
+        except DiscoveryImportError as exc:
+            database.audit(
+                actor=user["username"],
+                action="discovery.import_failed",
+                detail={
+                    "format": payload.format[:32],
+                    "filename": filename,
+                    "bytes": content_bytes,
+                    "error": str(exc)[:500],
+                },
+                ip=client_ip(request, config.trust_proxy),
+            )
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+        observations = _observations_from_devices(
+            parsed.devices, source=f"import:{parsed.format}"
+        )
+        if payload.dry_run:
+            counts = _preview_counts(observations)
+            return {
+                "dry_run": True,
+                "format": parsed.format,
+                "devices": len(observations),
+                "new": counts["new"],
+                "existing": counts["existing"],
+                "skipped": parsed.skipped,
+                "truncated": parsed.truncated,
+                "metadata": parsed.metadata,
+                "sample": [
+                    {
+                        "ip": item["ip"],
+                        "mac": item["mac"],
+                        "hostname": item["hostname"],
+                        "vendor": item["vendor"],
+                        "open_ports": item["open_ports"],
+                    }
+                    for item in parsed.devices[:10]
+                ],
+            }
+        scan, merged = _ingest_discovery_observations(
+            observations,
+            source=f"import:{parsed.format}",
+            methods=["import"],
+            user=user,
+            request=request,
+            audit_action="discovery.imported",
+            failure_action="discovery.import_failed",
+            audit_detail={
+                "format": parsed.format,
+                "filename": filename,
+                "bytes": content_bytes,
+                "skipped": parsed.skipped,
+                "truncated": parsed.truncated,
+            },
+        )
+        return {
+            "dry_run": False,
+            "format": parsed.format,
+            "scan": scan,
+            "devices_merged": len(merged),
+            "skipped": parsed.skipped,
+            "truncated": parsed.truncated,
+        }
+
+    @app.get("/api/discovery/integrations")
+    def list_discovery_integrations(
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        secrets: IntegrationSecretStore = Depends(get_integration_secrets),
+    ) -> dict[str, Any]:
+        del user
+        rows = {row["kind"]: row for row in database.list_discovery_integrations()}
+        return {
+            "integrations": [
+                _integration_descriptor(kind, rows.get(kind))
+                for kind in INTEGRATION_KINDS
+            ],
+            "snmp": snmp_status(),
+        }
+
+    @app.patch("/api/discovery/integrations/{kind}")
+    def update_discovery_integration(
+        kind: str,
+        payload: DiscoveryIntegrationIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        secrets: IntegrationSecretStore = Depends(get_integration_secrets),
+    ) -> dict[str, Any]:
+        normalized_kind = str(kind).lower()
+        if normalized_kind not in INTEGRATION_KINDS:
+            raise HTTPException(status_code=404, detail="Unknown discovery integration.")
+        row = database.get_discovery_integration(normalized_kind)
+        merged_config = _integration_config(normalized_kind, row)
+        if payload.config is not None:
+            merged_config.update(payload.config)
+        try:
+            normalized_config = validate_integration_config(
+                normalized_kind, merged_config
+            )
+        except (IntegrationError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        enabled = bool(row["enabled"]) if row is not None else False
+        if payload.enabled is not None:
+            enabled = bool(payload.enabled)
+        if payload.clear_secrets:
+            secrets.clear(normalized_kind)
+        provided_secret_fields: list[str] = []
+        if payload.secrets:
+            allowed = set(secret_fields(normalized_kind))
+            unknown = sorted(set(payload.secrets) - allowed)
+            if unknown:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown secret field(s): {', '.join(unknown)}",
+                )
+            secrets.set(normalized_kind, payload.secrets)
+            provided_secret_fields = sorted(payload.secrets)
+        updated = database.upsert_discovery_integration(
+            normalized_kind,
+            enabled=enabled,
+            config=normalized_config,
+            actor=user["username"],
+        )
+        database.audit(
+            actor=user["username"],
+            action="discovery.integration_updated",
+            target=normalized_kind,
+            detail={
+                "enabled": enabled,
+                "config_fields": sorted(normalized_config),
+                "secret_fields": provided_secret_fields,
+                "cleared_secrets": bool(payload.clear_secrets),
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return _integration_descriptor(normalized_kind, updated)
+
+    @app.post("/api/discovery/integrations/{kind}/test")
+    def test_discovery_integration(
+        kind: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        secrets: IntegrationSecretStore = Depends(get_integration_secrets),
+    ) -> dict[str, Any]:
+        normalized_kind = str(kind).lower()
+        if normalized_kind not in INTEGRATION_KINDS:
+            raise HTTPException(status_code=404, detail="Unknown discovery integration.")
+        if not config.discovery.enabled:
+            raise HTTPException(
+                status_code=403, detail="Discovery is disabled. Set SEXTANT_DISCOVERY_ENABLED=1 first."
+            )
+        acknowledgement = database.get_discovery_settings()
+        if acknowledgement is None or not acknowledgement["acknowledged_at"]:
+            raise HTTPException(
+                status_code=403, detail="Discovery authorization acknowledgement is required."
+            )
+        row = database.get_discovery_integration(normalized_kind)
+        integration_config = _integration_config(normalized_kind, row)
+        secret_values = secrets.get(normalized_kind)
+        ok = False
+        detail = ""
+        try:
+            if normalized_kind == "snmp":
+                community = secret_values.get("community", "")
+                if not community:
+                    raise IntegrationError("SNMP community is not configured.")
+                targets = target_ips(
+                    integration_config.get("targets") or [],
+                    integration_config.get("max_targets", 256),
+                )
+                if not targets:
+                    discovered, _total = database.list_discovered_devices(
+                        limit=integration_config.get("max_targets", 256)
+                    )
+                    targets = [str(row["ip"]) for row in discovered if row["ip"]]
+                if not targets:
+                    raise IntegrationError("No SNMP targets are configured or discovered.")
+                result = snmp_get(
+                    targets[0],
+                    community,
+                    timeout_ms=integration_config.get("timeout_ms", 600),
+                    retries=integration_config.get("retries", 1),
+                )
+                name = result["values"].get("1.3.6.1.2.1.1.5.0")
+                detail = f"SNMP GET succeeded for {targets[0]}"
+                if name:
+                    detail += f" (sysName {str(name)[:80]})"
+                ok = True
+            else:
+                result = test_adapter(
+                    normalized_kind, integration_config, secret_values
+                )
+                detail = result.detail or "Adapter request succeeded."
+                ok = True
+        except (IntegrationError, SNMPError) as exc:
+            detail = _redact_integration_error(normalized_kind, exc)
+            _integration_error(normalized_kind, detail)
+        except Exception as exc:  # noqa: BLE001 - never leak a credential in the error
+            detail = _redact_integration_error(normalized_kind, type(exc).__name__)
+            _integration_error(normalized_kind, detail)
+        if ok:
+            database.set_discovery_integration_result(
+                normalized_kind, last_error="", last_checked_at=utcnow_iso()
+            )
+        database.audit(
+            actor=user["username"],
+            action="discovery.integration_tested",
+            target=normalized_kind,
+            detail={"ok": ok, "detail": detail[:500]},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        if not ok:
+            raise HTTPException(status_code=502, detail=detail)
+        return {"ok": True, "kind": normalized_kind, "detail": detail}
+
+    @app.post("/api/discovery/integrations/{kind}/poll")
+    def poll_discovery_integration(
+        kind: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        secrets: IntegrationSecretStore = Depends(get_integration_secrets),
+    ) -> dict[str, Any]:
+        normalized_kind = str(kind).lower()
+        if normalized_kind not in INTEGRATION_KINDS:
+            raise HTTPException(status_code=404, detail="Unknown discovery integration.")
+        if not config.discovery.enabled:
+            raise HTTPException(
+                status_code=403, detail="Discovery is disabled. Set SEXTANT_DISCOVERY_ENABLED=1 first."
+            )
+        acknowledgement = database.get_discovery_settings()
+        if acknowledgement is None or not acknowledgement["acknowledged_at"]:
+            raise HTTPException(
+                status_code=403, detail="Discovery authorization acknowledgement is required."
+            )
+        row = database.get_discovery_integration(normalized_kind)
+        if row is None or not row["enabled"]:
+            raise HTTPException(
+                status_code=409, detail="Enable this integration before polling."
+            )
+        integration_config = _integration_config(normalized_kind, row)
+        secret_values = secrets.get(normalized_kind)
+        errors: list[str] = []
+        devices: list[dict[str, Any]] = []
+        adapter_detail = ""
+        source = normalized_kind if normalized_kind == "snmp" else f"adapter:{normalized_kind}"
+        methods = ["snmp"] if normalized_kind == "snmp" else ["adapter"]
+        try:
+            if normalized_kind == "snmp":
+                community = secret_values.get("community", "")
+                if not community:
+                    raise IntegrationError("SNMP community is not configured.")
+                max_targets = int(integration_config.get("max_targets", 256))
+                targets = target_ips(
+                    integration_config.get("targets") or [], max_targets
+                )
+                if integration_config.get("use_discovered", True):
+                    discovered, _total = database.list_discovered_devices(
+                        limit=max_targets
+                    )
+                    for device in discovered:
+                        if device["ip"] and device["ip"] not in targets:
+                            targets.append(str(device["ip"]))
+                        if len(targets) >= max_targets:
+                            break
+                targets = list(dict.fromkeys(targets))[:max_targets]
+                if not targets:
+                    raise IntegrationError("No SNMP targets are configured or discovered.")
+                workers = max(1, min(8, len(targets)))
+
+                def poll_one(ip: str) -> dict[str, Any] | None:
+                    try:
+                        result = snmp_get(
+                            ip,
+                            community,
+                            timeout_ms=integration_config.get("timeout_ms", 600),
+                            retries=integration_config.get("retries", 1),
+                        )
+                        return snmp_device(ip, result["values"])
+                    except SNMPError as exc:
+                        errors.append(redact_snmp_error(exc))
+                        return None
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                    for device in pool.map(poll_one, targets):
+                        if device is not None:
+                            devices.append(device)
+            else:
+                result = fetch_adapter_devices(
+                    normalized_kind, integration_config, secret_values
+                )
+                devices = result.devices
+                adapter_detail = result.detail
+        except (IntegrationError, SNMPError) as exc:
+            detail = _redact_integration_error(normalized_kind, exc)
+            _integration_error(normalized_kind, detail)
+            database.audit(
+                actor=user["username"],
+                action="discovery.integration_poll_failed",
+                target=normalized_kind,
+                detail={"error": detail[:500]},
+                ip=client_ip(request, config.trust_proxy),
+            )
+            raise HTTPException(status_code=502, detail=detail) from None
+        observations = _observations_from_devices(devices, source=source)
+        try:
+            scan, merged = _ingest_discovery_observations(
+                observations,
+                source=source,
+                methods=methods,
+                user=user,
+                request=request,
+                audit_action="discovery.integration_polled",
+                failure_action="discovery.integration_poll_failed",
+                audit_detail={
+                    "integration": normalized_kind,
+                    "targets": len(devices),
+                    "errors": errors[:10],
+                },
+            )
+        except HTTPException:
+            _integration_error(normalized_kind, "Poll merge failed.")
+            raise
+        database.set_discovery_integration_result(
+            normalized_kind,
+            last_error=errors[0][:2000] if errors else "",
+            last_checked_at=utcnow_iso(),
+        )
+        return {
+            "scan": scan,
+            "devices_merged": len(merged),
+            "targets": len(devices),
+            "errors": errors[:10],
+            "detail": adapter_detail,
         }
 
     @app.get("/api/discovery/scans")

@@ -22,8 +22,13 @@ semantic versioning.
   verification, and bounded audited CSV/JSON export. Discovery onboarding (D5)
   promotes a device to a wake target, a one-time Linux install command, a manual
   Windows elevated-PowerShell command, or an existing-agent link, without
-  duplicating wake targets or exposing tokens after the response. Integrations
-  and credential-based Windows remote install remain future work.
+  duplicating wake targets or exposing tokens after the response. Discovery
+  integrations (D6) add Nmap XML/JSON, arp-scan, dnsmasq/ISC lease, and normalized
+  JSON imports; bounded stdlib SNMP v2c polling; and read-only UniFi/RouterOS/
+  OPNsense/Proxmox/ESXi adapters. All integrations are off by default, admin-only,
+  audited, and use write-only in-memory secrets that are never persisted or
+  logged. Live vendor connectors are marked unverified; ESXi is fixture-only.
+  Credential-based Windows remote install remains future work.
 
 ## [0.4.1] - 2026-11-11
 
