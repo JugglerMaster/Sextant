@@ -1,12 +1,12 @@
 # Discovery — plan
 
-**Status:** D1–D3 implemented. D4–D6 remain proposed.
+**Status:** D1–D5 implemented. D6 (DHCP/AP/hypervisor/SNMP integrations) remains proposed.
 
 **Scope:** find, identify, and analyze devices on the networks this console is authorized to manage, then offer a path from "found" to "managed" (wake target or enrolled agent).
 
-**Implemented now:** CIDR-scoped server-side discovery with allowlists and excludes, neighbour-table/PTR/OUI/SSDP collection, opt-in TCP connect and banner/TLS fingerprinting, classification, MAC/IP/hostname merging, deduplicated change events, a bounded background scan worker with cancellation, a read/write API, a Discovery page, and opt-in agent-relayed scans for an enrolled Linux agent's local VLAN over the existing outbound command/heartbeat path. See [Implementation notes](#implementation-notes-d1d3) at the end of this document for the exact route and data-model decisions.
+**Implemented now:** CIDR-scoped server-side discovery with allowlists and excludes, neighbour-table/PTR/OUI/SSDP collection, opt-in TCP connect and banner/TLS fingerprinting, classification, MAC/IP/hostname merging, deduplicated change events, a bounded background scan worker with cancellation, a read/write API, a Discovery page, and opt-in agent-relayed scans for an enrolled Linux agent's local VLAN over the existing outbound command/heartbeat path. D4 adds exposure/conflict analysis, segment/topology summaries, bounded CSV/JSON export, wake verification, and onboarding promotion. D5 adds wake-target creation, one-time Linux/Windows install commands, existing-agent linking, and a promotion UI. See [Implementation notes](#implementation-notes-d1d5) at the end of this document for the exact route and data-model decisions.
 
-**Not implemented yet:** analysis/reporting and export (D4), promotion/onboarding (D5), and DHCP/AP/hypervisor/SNMP integrations (D6).
+**Not implemented yet:** DHCP/AP/hypervisor/SNMP and external-scanner integrations (D6), and the credential-based Windows remote installer plan in [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md).
 
 Discovery is a separate concern from remote control. It answers *what is on the network*; control remains the existing agent path (queued shell, service management, power actions, WoL). Discovery does not add RDP/VNC/SSH/PTY support.
 
@@ -114,10 +114,10 @@ Design constraints:
 | D3 | ICMP sweep | agent | root | medium | hosts without open TCP ports |
 | D3 | Passive ARP/mDNS continuous | agent | root / optional extra | none | real-time new-device signals |
 | D3 | Agent-relayed multi-VLAN scans | agent | none | medium | coverage outside the server LAN |
-| D4 | SNMP v2c read (`sysDescr`, model, uptime) | server | none | low | printers, switches, UPS |
-| D4 | DHCP lease import (file/API) | server | none | none | full lease history, offline devices |
-| D4 | AP/hypervisor APIs (UniFi, RouterOS, OPNsense, Proxmox, ESXi) | server | token | none | Wi-Fi clients and VMs |
-| D4 | External scanner import (Nmap XML/JSON, `arp-scan`) | server | none | none | high-fidelity results without writing probes |
+| D6 | SNMP v2c read (`sysDescr`, model, uptime) | server | none | low | printers, switches, UPS |
+| D6 | DHCP lease import (file/API) | server | none | none | full lease history, offline devices |
+| D6 | AP/hypervisor APIs (UniFi, RouterOS, OPNsense, Proxmox, ESXi) | server | token | none | Wi-Fi clients and VMs |
+| D6 | External scanner import (Nmap XML/JSON, `arp-scan`) | server | none | none | high-fidelity results without writing probes |
 
 **v1 port set** (deliberately small): `22, 53, 80, 139, 443, 445, 631, 1883, 3389, 5900, 5985, 5986, 8006, 8080, 8443, 9100, 32400`. Anything else is opt-in.
 
@@ -196,14 +196,18 @@ Analysis layer (what makes the list useful):
 | GET | `/api/discovery/devices?state=new&segment=…&q=…&limit=…` | viewer+ | list/search |
 | GET | `/api/discovery/devices/{id}` | viewer+ | detail + evidence + events |
 | PATCH | `/api/discovery/devices/{id}` | operator+ | tags, notes, state |
-| POST | `/api/discovery/devices/{id}/promote` | operator+ | create wake target / link agent |
+| POST | `/api/discovery/devices/{id}/promote` | operator+ | promote to wake target, install command, or existing agent |
+| POST | `/api/discovery/devices/{id}/wake-target` | operator+ | create or reuse a wake target |
+| POST | `/api/discovery/devices/{id}/link-agent` | operator+ | link an enrolled agent by MAC |
+| POST | `/api/discovery/devices/{id}/verify` | operator+ | wake/reachability verification |
 | GET | `/api/discovery/scans` | viewer+ | scan history |
 | GET | `/api/discovery/scans/{id}` | viewer+ | progress/results |
 | POST | `/api/discovery/scan` | operator+ | start server-side scan |
 | POST | `/api/agents/{id}/discover` | operator+ | queue agent-relayed scan |
 | POST | `/api/agent/{id}/discovery/report` | agent bearer | ingest a bounded agent scan report |
 | GET | `/api/discovery/agents` | viewer+ | eligible agent sources and segments |
-| GET | `/api/discovery/export?format=csv` | admin | bounded export |
+| GET | `/api/discovery/export?format=csv|json` | admin | bounded, audited export |
+| GET | `/api/discovery/conflicts` | viewer+ | identity conflicts |
 | DELETE | `/api/discovery/devices/{id}` | admin | delete |
 
 Scans are asynchronous: start returns a scan ID; the UI polls until `finished`. SSE/WebSocket can replace polling later.
@@ -262,8 +266,8 @@ Non-negotiable:
 | **D1** ✅ | Schema + engine skeleton; server-side neighbor/PTR/OUI/SSDP; Discovery page read-only; API; audit; default off | M | low | A scan of an allowlisted CIDR returns devices with IP/MAC/vendor; no packets sent when disabled; viewer can read, operator can scan |
 | **D2** ✅ | Opt-in TCP fingerprint + banners + classifier + drift/new-device events | M | medium | New device/new port events are deduplicated; scan is rate-limited and cancellable; unknown stays unknown |
 | **D3** ✅ | Agent-relayed discovery for other VLANs (`discovery.scan` over the existing outbound command/heartbeat path, `allow_discovery`) | M | medium | An agent scans its own subnet and reports; server policy can disable; local agent denial wins; no inbound port opened |
-| **D4** | Analysis: exposure report, identity conflicts, wake verification, CSV/JSON export | S–M | low | False-positive rate acceptable on a test LAN; exports are bounded and audited |
-| **D5** | Onboarding: promote to wake target; enrollment token + install command; link to agent | S | low | Promoted device is marked and auditable; no duplicate wake targets |
+| **D4** ✅ | Analysis: exposure report, identity conflicts, segment summary, wake verification, CSV/JSON export | S–M | low | False-positive rate acceptable on a test LAN; exports are bounded and audited |
+| **D5** ✅ | Onboarding: promote to wake target; enrollment token + install command; link to agent | S | low | Promoted device is marked and auditable; no duplicate wake targets |
 | **D6** | Integrations: DHCP leases, UniFi/RouterOS/OPNsense, Proxmox/ESXi, SNMP | L each | low–medium | Import/merge does not overwrite operator metadata; failures are visible |
 
 Recommended sequence: **D1 → D2 → D5 → D4 → D3 → D6**. Onboarding early makes D1 immediately useful; agent relay can wait until a second VLAN matters.
@@ -415,7 +419,7 @@ These are alternatives to the hybrid recommendation, not additions to it. Choose
 
 ---
 
-# Implementation notes (D1–D3)
+# Implementation notes (D1–D5)
 
 ## Configuration
 
@@ -433,7 +437,7 @@ These are alternatives to the hybrid recommendation, not additions to it. Choose
 | `SEXTANT_DISCOVERY_TIMEOUT_MS` | `600` | Per-connect/banner timeout (100–5000 ms). |
 | `SEXTANT_DISCOVERY_RETENTION_DAYS` | `90` | Scans and discovery events older than this are pruned at startup and after each scan. Devices are retained until deleted or ignored. |
 | `SEXTANT_DISCOVERY_AGENT_RELAY` | `0` | Enables `POST /api/agents/{id}/discover` and agent report ingestion. Relay also requires the profile `discovery` module and per-agent `allow_discovery`; the agent's local `allow_discovery` is a hard ceiling. |
-| `SEXTANT_DISCOVERY_EXPORT_LIMIT` | `10000` | Parsed and exposed for the future D4 export; export is not implemented. |
+| `SEXTANT_DISCOVERY_EXPORT_LIMIT` | `10000` | Maximum rows returned by the admin CSV/JSON export. |
 
 ## Safety model
 
@@ -482,6 +486,39 @@ agents, their reported IP and allowlisted segment, and a relay-disabled or
 no-eligible-agent explanation. Selecting an agent scopes the form to that
 agent's segment; selecting **This server** uses the server-side worker from D1–D2.
 
+## Analysis, export, verification, and promotion (D4–D5)
+
+- **Exposure:** devices with any of `22, 3389, 5900, 5985, 5986, 8006` open and
+  no linked agent. `GET /api/discovery/devices?exposure=true`, the summary
+  `exposure` count, and the UI **Exposure only** filter use the same rule.
+- **Identity conflicts:** `GET /api/discovery/conflicts` groups same-MAC/
+  multiple-IP events, multiple MACs on one IP, and reused hostnames with
+  different MACs/vendors. `GET /api/discovery/devices?conflict=true` filters the
+  inventory, the table shows a **conflict** badge, and device detail includes the
+  conflict evidence. Existing `identity_conflict` events remain in the event log.
+- **Segments:** the summary carries per-segment counts for total/new/managed/
+  unmanaged/exposure, plus a gateway hint derived from a router/switch device,
+  a `.1` host, or the first address of the CIDR (explicitly labelled as a guess).
+- **Wake verification:** `POST /api/discovery/devices/{id}/verify` checks the
+  neighbour table and, when active probes are enabled, TCP connect ports. It
+  stores `wake_status` (`woke`, `sent`, `failed`) and `wake_verified_at`, emits a
+  deduplicated `wake_verified` event, and never uses ICMP or raw sockets. Sending
+  a linked wake target marks the device `sent` immediately.
+- **Export:** `GET /api/discovery/export?format=csv|json` is admin-only, audited
+  as `discovery.exported`, accepts the device filters, and returns at most
+  `SEXTANT_DISCOVERY_EXPORT_LIMIT` rows. CSV/JSON include state, identity,
+  ports/services, links, wake status, tags/notes, and timestamps.
+- **Promotion:** `POST /api/discovery/devices/{id}/promote` with target
+  `wake_target`, `linux_agent`, `windows_agent`, or `existing_agent`.
+  Wake-target promotion reuses an existing target for the same MAC and links it.
+  Install promotion generates a single-use enrollment token, stores only its
+  hash, returns the install command once, and never puts the token in audit or
+  event detail. Existing-agent linking requires matching MACs. All paths set
+  state `promoted`, write a deduplicated `promoted` event, and audit the action.
+- **Windows:** the generated command is manual elevated PowerShell only. The
+  credential-based remote installer remains a plan in
+  [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md).
+
 ## Data model
 
 - `discovered_devices` stores identity, classifier output, source/segment, bounded JSON evidence (`open_ports`, `services`, `mdns`, `ssdp`, `evidence`), operator metadata, and agent/wake-target links.
@@ -521,4 +558,7 @@ The top-level **Discovery** page is available to every signed-in user. It render
 - Passive SSDP requires the server to be able to bind UDP 1900; otherwise SSDP collection returns no results without failing the scan.
 - Reverse DNS depends on the host resolver and is best-effort.
 - TLS subject/SAN extraction uses the CPython stdlib X.509 test decoder; platforms that omit it still report an open TLS port but no certificate names.
-- There is no CSV/JSON export, promotion, or automatic alert delivery yet (D4/D5 and the alerting work).
+- CSV/JSON export is synchronous and capped by `SEXTANT_DISCOVERY_EXPORT_LIMIT`; very large exports can take a moment and are audited.
+- Promotion to a wake target or install command marks the device `promoted`; it does not automatically complete enrollment or prove that a generated install command was used.
+- The generated Windows command is manual and requires a pre-installed agent package. The planned credential-based remote installer is documented in [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md) and is not implemented.
+- Wake verification uses the neighbour table and, when active probes are enabled, TCP connect checks. It never uses ICMP or raw sockets.

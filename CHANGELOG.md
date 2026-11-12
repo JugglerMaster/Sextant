@@ -17,8 +17,13 @@ semantic versioning.
   disabled/unacknowledged states. Agent-relayed discovery (D3) lets an eligible
   Linux agent scan its own allowlisted VLAN over the existing outbound command
   channel and report bounded results back; local, profile, per-agent policy, and
-  server relay gates all apply. Export, promotion, and integrations remain future
-  phases.
+  server relay gates all apply. Discovery analysis (D4) adds exposure and
+  identity-conflict views, per-segment topology summaries, TCP/neighbour wake
+  verification, and bounded audited CSV/JSON export. Discovery onboarding (D5)
+  promotes a device to a wake target, a one-time Linux install command, a manual
+  Windows elevated-PowerShell command, or an existing-agent link, without
+  duplicating wake targets or exposing tokens after the response. Integrations
+  and credential-based Windows remote install remain future work.
 
 ## [0.4.1] - 2026-11-11
 

@@ -83,9 +83,9 @@ Key properties:
 | `docker_stacks`, `docker_stack_revisions` | Compose stack metadata and immutable revision manifests; file bytes live on disk |
 | `docker_deployments` | Per-host Compose deploy/update/down/restart/pull history, command link, active revision, Compose config-hash baseline, bounded log |
 | `docker_console_sessions` | Console session metadata: agent/container/shell/user/status/timestamps/exit/error; no stdin or output |
-| `discovered_devices` | One row per merged discovery identity: MAC/IP/hostname/vendor, type/OS/confidence, segment/source, bounded evidence, state, agent/wake links, tags/notes, randomized-MAC flag |
+| `discovered_devices` | One row per merged discovery identity: MAC/IP/hostname/vendor, type/OS/confidence, segment/source, bounded evidence, state, agent/wake links, tags/notes, randomized-MAC flag, wake status/verification time |
 | `discovery_scans` | Requested scope/methods, initiator, source (`server` or `agent:<id>`), agent/command binding, status, progress, host counts, cancellation flag, bounded error |
-| `discovery_events` | Deduplicated `new_device`, `new_port`, `service_changed`, `identity_conflict`, `went_dark`, and reserved `promoted` events |
+| `discovery_events` | Deduplicated `new_device`, `new_port`, `service_changed`, `identity_conflict`, `went_dark`, `promoted`, and `wake_verified` events |
 | `discovery_settings` | Single-row audited acknowledgement of the network-scan authorization statement |
 | `agent_profiles` | Server-managed behavior profiles (cadence, modules, action gates, update policy) |
 | `profile_tag_assignments` | Tag → profile assignments (applied to matching agents) |
@@ -176,6 +176,24 @@ classification/event deduplication, and marks the scan finished. Windows agents
 return `unsupported`. The effective gate is the intersection of the relay switch,
 the profile `discovery` module, the per-agent `allow_discovery` policy, and the
 local agent `allow_discovery` flag; the local denial always wins.
+
+D4 analysis is query-time over the device/event tables: exposure is an admin-
+port/no-agent filter, identity conflicts group current rows plus recent
+`identity_conflict` events, and the summary aggregates per-segment counts and a
+gateway hint. Export serializes the same filtered rows through the bounded
+`SEXTANT_DISCOVERY_EXPORT_LIMIT` and audits the row count/filter set. Wake
+verification uses the neighbour reader and optional TCP prober, stores
+`wake_status`/`wake_verified_at`, and emits a `wake_verified` event; it never uses
+ICMP or raw sockets. Sending a linked wake target marks discovered devices
+`sent` immediately.
+
+D5 promotion uses the existing wake-target and enrollment-token tables. Wake
+targets are reused by MAC, install promotion generates a one-time token whose
+plaintext is returned once and stored only as a hash, and existing agents are
+linked only when MACs match. All paths set state `promoted`, write a
+deduplicated `promoted` event, and audit without secret material. Windows
+install is manual PowerShell only; the credential-based remote installer is a
+plan in [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md).
 
 Discovery is disabled by default and requires both the environment switch and
 the stored acknowledgement. Raw sockets, packet capture, exploit modules, and

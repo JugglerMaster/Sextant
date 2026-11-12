@@ -384,7 +384,10 @@ const discoveryDevices = [
     evidence: { methods: ["neigh", "dns", "oui", "ssdp"], neighbor: true, reverse_dns: true, ssdp: false, tcp: true },
     state: "new",
     agent_id: null,
-    wake_target_id: null,
+    wake_target_id: "wol_dev",
+    wake_status: "sent",
+    wake_verified_at: "2026-11-06T07:58:00Z",
+    identity_conflict: true,
     tags: ["office"],
     notes: "",
     mac_randomized: false,
@@ -410,6 +413,9 @@ const discoveryDevices = [
     state: "known",
     agent_id: "agt_demo",
     wake_target_id: null,
+    wake_status: "woke",
+    wake_verified_at: "2026-11-06T07:59:00Z",
+    identity_conflict: false,
     tags: [],
     notes: "VM host",
     mac_randomized: false,
@@ -418,18 +424,44 @@ const discoveryDevices = [
 const discoverySummary = {
   total: 2,
   new: 1,
+  new_count: 1,
   states: { new: 1, known: 1, ignored: 0, promoted: 0 },
   types: [
     { type: "printer", count: 1 },
     { type: "hypervisor", count: 1 },
   ],
-  segments: [{ segment: "192.168.1.0/24", count: 2 }],
+  segments: [
+    {
+      segment: "192.168.1.0/24",
+      count: 2,
+      new: 1,
+      managed: 1,
+      unmanaged: 1,
+      exposure: 1,
+      gateway_hint: "192.168.1.1",
+      gateway_source: "lowest host",
+    },
+  ],
   vendors: [
     { vendor: "Raspberry Pi Foundation", count: 1 },
     { vendor: "VMware", count: 1 },
   ],
   no_agent: 1,
+  managed: 1,
+  unmanaged: 1,
+  exposure: 1,
+  conflicts: 1,
+  conflict_device_ids: ["dev_printer"],
 };
+const discoveryConflicts = [
+  {
+    type: "ip_multiple_macs",
+    key: "192.168.1.40",
+    device_ids: ["dev_printer"],
+    devices: [discoveryDevices[0]],
+    detail: { ip: "192.168.1.40", macs: ["b8:27:eb:11:22:33", "aa:bb:cc:dd:ee:ff"] },
+  },
+];
 const discoveryEvents = [
   { id: 2, at: "2026-11-06T07:50:00Z", device_id: "dev_printer", kind: "new_port", detail: { port: 631 } },
   { id: 1, at: "2026-11-06T07:00:00Z", device_id: "dev_printer", kind: "new_device", detail: { ip: "192.168.1.40" } },
@@ -601,11 +633,22 @@ const responses = {
   },
   "/api/discovery/devices/dev_printer": {
     status: 200,
-    body: { device: discoveryDevices[0], events: discoveryEvents, agent: null, wake_target: null },
+    body: {
+      device: discoveryDevices[0],
+      events: discoveryEvents,
+      agent: null,
+      wake_target: null,
+      conflicts: discoveryConflicts,
+      agent_candidates: [],
+    },
   },
   "/api/discovery/scans": {
     status: 200,
     body: { scans: discoveryScans, total: discoveryScans.length, limit: 50, offset: 0, active_scan_id: discoveryActiveScan?.id || null },
+  },
+  "/api/discovery/conflicts": {
+    status: 200,
+    body: { conflicts: discoveryConflicts, conflict_device_ids: ["dev_printer"], total: 1 },
   },
   "/api/profiles": {
     status: 200,
@@ -792,7 +835,19 @@ window.fetch = async (path, options = {}) => {
     if (vendor) filtered = filtered.filter((device) => device.vendor === vendor);
     if (params.get("no_agent") === "true") filtered = filtered.filter((device) => !device.agent_id);
     if (params.get("admin_ports") === "true") {
-      filtered = filtered.filter((device) => device.open_ports.some((port) => [22, 3389, 5900, 5985, 5986].includes(port)));
+      filtered = filtered.filter((device) =>
+        device.open_ports.some((port) => [22, 3389, 5900, 5985, 5986, 8006].includes(port)),
+      );
+    }
+    if (params.get("exposure") === "true") {
+      filtered = filtered.filter(
+        (device) =>
+          !device.agent_id &&
+          device.open_ports.some((port) => [22, 3389, 5900, 5985, 5986, 8006].includes(port)),
+      );
+    }
+    if (params.get("conflict") === "true") {
+      filtered = filtered.filter((device) => device.identity_conflict);
     }
     response = {
       status: 200,
@@ -802,8 +857,19 @@ window.fetch = async (path, options = {}) => {
     const id = key.slice("/api/discovery/devices/".length);
     const device = discoveryDevices.find((item) => item.id === id);
     const events = id === "dev_printer" ? discoveryEvents : [];
+    const conflicts = id === "dev_printer" ? discoveryConflicts : [];
     response = device
-      ? { status: 200, body: { device, events, agent: device.agent_id ? agent : null, wake_target: null } }
+      ? {
+          status: 200,
+          body: {
+            device,
+            events,
+            agent: device.agent_id ? agent : null,
+            wake_target: null,
+            conflicts,
+            agent_candidates: [],
+          },
+        }
       : { status: 404, body: { detail: "Discovered device not found." } };
   } else if (method === "PATCH" && key.startsWith("/api/discovery/devices/")) {
     const id = key.slice("/api/discovery/devices/".length);
@@ -846,6 +912,78 @@ window.fetch = async (path, options = {}) => {
         active_scan_id: discoveryActiveScan?.status === "running" ? discoveryActiveScan.id : null,
       },
     };
+  } else if (method === "POST" && /^\/api\/discovery\/devices\/[^/]+\/(promote|wake-target|link-agent|verify)$/.test(key)) {
+    const id = key.split("/")[4];
+    const action = key.split("/")[5];
+    const device = discoveryDevices.find((item) => item.id === id);
+    if (!device) {
+      response = { status: 404, body: { detail: "Discovered device not found." } };
+    } else if (action === "verify") {
+      device.wake_status = "woke";
+      device.wake_verified_at = "2026-11-06T08:06:00Z";
+      response = {
+        status: 200,
+        body: {
+          device,
+          verification: { reachable: true, method: "tcp", status: "woke", open_ports: [22], checked_at: "2026-11-06T08:06:00Z" },
+        },
+      };
+    } else if (action === "wake-target" || body?.target === "wake_target") {
+      device.state = "promoted";
+      device.wake_target_id = "wol_dev";
+      response = {
+        status: 200,
+        body: {
+          device,
+          wake_target: {
+            id: "wol_dev",
+            name: body?.name || device.hostname,
+            mac: device.mac,
+            ip: device.ip,
+            broadcast: body?.broadcast || "255.255.255.255",
+            port: body?.port || 9,
+            created_at: "2026-11-06T08:06:00Z",
+            last_woken_at: null,
+          },
+          duplicate: false,
+        },
+      };
+    } else if (action === "link-agent") {
+      device.state = "promoted";
+      device.agent_id = body?.agent_id || "agt_demo";
+      response = { status: 200, body: { device, agent } };
+    } else {
+      const osName = body?.target === "windows_agent" ? "windows" : "linux";
+      device.state = "promoted";
+      const command =
+        osName === "windows"
+          ? "# Run in an elevated PowerShell on 192.168.1.40.\\n& 'C:\\ProgramData\\SextantAgent\\current\\Scripts\\sextant-agent.exe' enroll --server 'https://ops.example.test' --token 'sextant_enroll_TOPSECRET' --name 'printer.lan'"
+          : "# Run on 192.168.1.40 as root.\\nsudo /opt/sextant-agent/.venv/bin/sextant-agent enroll --server 'https://ops.example.test' --token 'sextant_enroll_TOPSECRET' --name 'printer.lan'";
+      response = {
+        status: 200,
+        body: {
+          device,
+          enrollment: {
+            id: "enr_promote",
+            token: "sextant_enroll_TOPSECRET",
+            label: `discovery:${id}`,
+            os: osName,
+            name: body?.name || device.hostname,
+            address: device.ip,
+            expires_at: "2026-11-06T08:36:00Z",
+            install_command: command,
+            prerequisites:
+              osName === "windows"
+                ? ["Run in an elevated PowerShell on the target host.", "Manual Windows install only; remote Windows install is not implemented."]
+                : ["Run as root on the target host."],
+            windows_plan:
+              osName === "windows"
+                ? "https://github.com/JugglerMaster/Sextant/blob/main/docs/WINDOWS_REMOTE_INSTALL.md"
+                : "",
+          },
+        },
+      };
+    }
   } else if (method === "POST" && /^\/api\/agents\/[^/]+\/discover$/.test(key)) {
     const agentId = key.split("/")[3];
     const scan = {
@@ -2001,6 +2139,35 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   window.document.getElementById("discovery-filter-clear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(60);
   if (!discoveryTable.textContent.includes("esxi.lan")) throw new Error("Discovery filter clear did not restore devices");
+  const segmentPanel = window.document.getElementById("discovery-segment-list");
+  if (!segmentPanel.textContent.includes("Gateway hint") || !segmentPanel.textContent.includes("192.168.1.1")) {
+    throw new Error("Discovery segment summary did not render the gateway hint");
+  }
+  if (!discoverySummaryNode.textContent.includes("Exposure") || !discoverySummaryNode.textContent.includes("Conflicts")) {
+    throw new Error("Discovery summary is missing exposure/conflict counts");
+  }
+  const exposureFilter = window.document.getElementById("discovery-filter-exposure");
+  exposureFilter.checked = true;
+  exposureFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(60);
+  if (!discoveryTable.textContent.includes("printer.lan") || discoveryTable.textContent.includes("esxi.lan")) {
+    throw new Error("Discovery exposure filter did not narrow the table");
+  }
+  exposureFilter.checked = false;
+  exposureFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
+  const conflictFilter = window.document.getElementById("discovery-filter-conflict");
+  conflictFilter.checked = true;
+  conflictFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(60);
+  if (!discoveryTable.textContent.includes("conflict") || discoveryTable.textContent.includes("esxi.lan")) {
+    throw new Error("Discovery conflict filter/badge did not render");
+  }
+  conflictFilter.checked = false;
+  conflictFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(60);
+  if (!findButton(window.document.getElementById("discovery-filters"), "Export CSV")) {
+    throw new Error("Discovery export buttons are missing");
+  }
 
   const discoveryOpen = [...discoveryTable.querySelectorAll("button")].find((item) =>
     (item.getAttribute("aria-label") || "").includes("printer.lan"),
@@ -2019,6 +2186,78 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!discoveryDrawerBody.textContent.includes("OpenSSH")) {
     throw new Error("Discovery drawer is missing service evidence");
   }
+  if (!discoveryDrawerBody.textContent.includes("Identity evidence") || !discoveryDrawerBody.textContent.includes("Wake status")) {
+    throw new Error("Discovery drawer is missing conflicts or wake status");
+  }
+  const verifyButton = findButton(window.document.getElementById("discovery-drawer-actions"), "Verify wake");
+  if (!verifyButton) throw new Error("Discovery verify action is missing");
+  verifyButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(100);
+  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/discovery/devices/dev_printer/verify")) {
+    throw new Error("Discovery wake verification was not sent");
+  }
+  if (!window.document.getElementById("toast-region").textContent.includes("Wake verification: woke")) {
+    throw new Error("Discovery wake verification result did not render");
+  }
+
+  const promoteButton = findButton(window.document.getElementById("discovery-drawer-actions"), "Promote");
+  if (!promoteButton) throw new Error("Discovery promote action is missing");
+  promoteButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  const promoteDialog = window.document.getElementById("discovery-promote-dialog");
+  if (!promoteDialog.open) throw new Error("Discovery promote dialog did not open");
+  findButton(promoteDialog, "Create wake target").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(120);
+  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/discovery/devices/dev_printer/promote" && request.body.target === "wake_target")) {
+    throw new Error("Discovery wake-target promotion was not sent");
+  }
+  if (promoteDialog.open) throw new Error("Wake-target promotion should close the dialog");
+
+  const promoteButton2 = findButton(window.document.getElementById("discovery-drawer-actions"), "Promote");
+  if (!promoteButton2) throw new Error("Discovery promote action disappeared");
+  promoteButton2.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  if (!promoteDialog.open) throw new Error("Discovery promote dialog did not reopen for Linux");
+  const promoteTarget = window.document.getElementById("discovery-promote-target");
+  promoteTarget.value = "linux_agent";
+  promoteTarget.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(20);
+  findButton(promoteDialog, "Generate install command").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(120);
+  const promoteBody = window.document.getElementById("discovery-promote-body");
+  if (!promoteBody.textContent.includes("sextant_enroll_TOPSECRET") || !promoteBody.textContent.includes("sudo")) {
+    throw new Error("Linux install command did not render");
+  }
+  if (!findButton(promoteDialog, "Copy command")) throw new Error("Install command copy button is missing");
+  findButton(promoteDialog, "Close").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
+  if (promoteBody.textContent.includes("sextant_enroll_TOPSECRET")) {
+    throw new Error("Discovery token stayed visible after the promotion dialog closed");
+  }
+  if (JSON.stringify(window.__requests).includes("sextant_enroll_TOPSECRET")) {
+    throw new Error("Discovery token was sent back to the server in a request");
+  }
+
+  const promoteButton3 = findButton(window.document.getElementById("discovery-drawer-actions"), "Promote");
+  if (!promoteButton3) throw new Error("Discovery promote action disappeared");
+  promoteButton3.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  if (!promoteDialog.open) throw new Error("Discovery promote dialog did not reopen for Windows");
+  const winTarget = window.document.getElementById("discovery-promote-target");
+  winTarget.value = "windows_agent";
+  winTarget.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(20);
+  findButton(promoteDialog, "Generate install command").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(120);
+  if (
+    !promoteBody.textContent.includes("PowerShell") ||
+    !promoteBody.querySelector('a[href*="WINDOWS_REMOTE_INSTALL.md"]')
+  ) {
+    throw new Error(`Windows manual install guidance did not render: ${promoteBody.textContent.slice(0, 300)}`);
+  }
+  findButton(promoteDialog, "Close").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
+
   const discoveryForm = discoveryDrawerBody.querySelector("form");
   discoveryForm.elements.tags.value = "office, shelf";
   discoveryForm.elements.notes.value = "checked by operator";
@@ -2198,7 +2437,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/table/drawer/edit/server-and-agent scan source/start/cancel/relay-disabled/disabled/unacknowledged states, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/exposure/conflicts/segments/table/drawer/edit/verify/promotion commands/token clearing/server-and-agent scan source/start/cancel/relay-disabled/disabled/unacknowledged states, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

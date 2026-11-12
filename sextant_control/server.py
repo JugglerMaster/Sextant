@@ -10,6 +10,7 @@ import ipaddress
 import logging
 import re
 import secrets
+import shlex
 import sqlite3
 import threading
 import time
@@ -36,6 +37,7 @@ from .discovery import (
     DiscoveryError,
     DiscoveryManager,
     DiscoveryRateLimited,
+    detect_identity_conflicts,
     expand_targets,
     merge_observations,
     parse_scope,
@@ -44,6 +46,7 @@ from .discovery import (
     validate_excludes,
     validate_methods,
     validate_network,
+    verify_reachability,
 )
 from .docker_console import ConsoleBroker, ConsoleError
 from .docker_rules import DOCKER_MUTATION_ACTIONS
@@ -74,9 +77,12 @@ from .models import (
     DockerInventoryIn,
     DockerSettingsIn,
     DiscoveryDevicePatchIn,
+    DiscoveryLinkAgentIn,
+    DiscoveryPromoteIn,
     DiscoveryReportIn,
     DiscoveryScanIn,
     DiscoverySettingsIn,
+    DiscoveryWakeTargetIn,
     DockerStackIn,
     DockerStackPatchIn,
     EnrollmentTokenIn,
@@ -405,6 +411,32 @@ def _public_settings(settings: Settings) -> dict[str, Any]:
             "inventory_max_bytes": settings.docker_inventory_max_bytes,
         },
     }
+
+
+def _powershell_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _discovery_install_command(
+    base_url: str, token: str, os_name: str, name: str, address: str
+) -> str:
+    """Build a one-time install command. The caller must never log the result."""
+    display_name = name or address or "discovered-device"
+    if os_name == "windows":
+        return (
+            f"# Run in an elevated PowerShell on {address or 'the target host'}.\n"
+            f"& 'C:\\ProgramData\\SextantAgent\\current\\Scripts\\sextant-agent.exe' enroll "
+            f"--config 'C:\\ProgramData\\SextantAgent\\config.json' "
+            f"--server {_powershell_quote(base_url)} --token {_powershell_quote(token)} "
+            f"--name {_powershell_quote(display_name)} --profile workstation"
+        )
+    return (
+        f"# Run on {address or 'the target host'} as root.\n"
+        f"sudo /opt/sextant-agent/.venv/bin/sextant-agent enroll "
+        f"--config /etc/sextant-agent/config.json "
+        f"--server {shlex.quote(base_url)} --token {shlex.quote(token)} "
+        f"--name {shlex.quote(display_name)} --profile workstation"
+    )
 
 
 def _session_cookie(response: Response, settings: Settings, payload: dict[str, Any]) -> None:
@@ -3867,6 +3899,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ip=client_ip(request, config.trust_proxy),
                 conn=conn,
             )
+            discovered = conn.execute(
+                "SELECT * FROM discovered_devices WHERE wake_target_id = ?",
+                (target_id,),
+            ).fetchall()
+            for device in discovered:
+                database.update_discovered_device(
+                    device["id"],
+                    wake_status="sent",
+                    wake_verified_at=now,
+                    conn=conn,
+                )
+                database.record_discovery_event(
+                    device["id"],
+                    "wake_verified",
+                    {"status": "sent", "method": "wake_packet", "target_id": target_id},
+                    conn=conn,
+                )
+                database.audit(
+                    actor=user["username"],
+                    action="discovery.wake_verified",
+                    target=device["id"],
+                    detail={"status": "sent", "method": "wake_packet", "target_id": target_id},
+                    ip=client_ip(request, config.trust_proxy),
+                    conn=conn,
+                )
+                if device["agent_id"]:
+                    database.record_agent_event(
+                        str(device["agent_id"]),
+                        "discovery",
+                        "info",
+                        f"Wake packet sent for {device['hostname'] or device['ip']}",
+                        {"device_id": device["id"], "status": "sent"},
+                        conn=conn,
+                    )
         return {"sent": packets, "mac": row["mac"], "broadcast": broadcast, "port": port}
 
     @app.post("/api/enrollment-tokens")
@@ -4098,7 +4164,291 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ]
         }
 
-    # ---- Discovery (D1-D2) -------------------------------------------
+    # ---- Discovery (D1-D5) -------------------------------------------
+
+    def _discovery_device_or_404(device_id: str, database: Database) -> sqlite3.Row:
+        row = database.get_discovered_device(device_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Discovered device not found.")
+        return row
+
+    def _promote_wake_target_row(
+        device: sqlite3.Row,
+        payload: DiscoveryWakeTargetIn | DiscoveryPromoteIn,
+        user: dict[str, Any],
+        request: Request,
+        database: Database,
+        config: Settings,
+    ) -> dict[str, Any]:
+        mac = normalize_mac(device["mac"])
+        if not mac:
+            raise HTTPException(
+                status_code=400,
+                detail="This device has no observed MAC address; a wake target cannot be created.",
+            )
+        try:
+            broadcast = _validate_broadcast(payload.broadcast)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        name = (payload.name or device["hostname"] or device["ip"] or mac)[:120]
+        with database.transaction() as conn:
+            existing = conn.execute(
+                """SELECT * FROM wake_targets
+                   WHERE mac = ? COLLATE NOCASE AND mac != '' LIMIT 1""",
+                (mac,),
+            ).fetchone()
+            duplicate = existing is not None
+            if existing is None:
+                target_id = "wol_" + secrets.token_hex(8)
+                conn.execute(
+                    """INSERT INTO wake_targets
+                       (id, name, mac, ip, broadcast, port, created_by, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        target_id,
+                        name,
+                        mac,
+                        device["ip"] or "",
+                        broadcast,
+                        payload.port,
+                        user["username"],
+                        utcnow_iso(),
+                    ),
+                )
+                database.audit(
+                    actor=user["username"],
+                    action="wol.target_created",
+                    target=target_id,
+                    detail={"name": name, "mac": mac, "source": "discovery"},
+                    ip=client_ip(request, config.trust_proxy),
+                    conn=conn,
+                )
+            else:
+                target_id = str(existing["id"])
+            database.update_discovered_device(
+                device["id"],
+                state="promoted",
+                wake_target_id=target_id,
+                conn=conn,
+            )
+            database.record_discovery_event(
+                device["id"],
+                "promoted",
+                {"kind": "wake_target", "wake_target_id": target_id},
+                conn=conn,
+            )
+            database.audit(
+                actor=user["username"],
+                action="discovery.device_promoted",
+                target=device["id"],
+                detail={
+                    "kind": "wake_target",
+                    "wake_target_id": target_id,
+                    "duplicate": duplicate,
+                },
+                ip=client_ip(request, config.trust_proxy),
+                conn=conn,
+            )
+            if device["agent_id"]:
+                database.record_agent_event(
+                    str(device["agent_id"]),
+                    "discovery",
+                    "info",
+                    f"Discovered device {device['hostname'] or device['ip']} promoted to a wake target",
+                    {"device_id": device["id"], "wake_target_id": target_id},
+                    conn=conn,
+                )
+            target = conn.execute(
+                "SELECT * FROM wake_targets WHERE id = ?", (target_id,)
+            ).fetchone()
+        return {
+            "device": discovered_device_to_dict(
+                _discovery_device_or_404(device["id"], database)
+            ),
+            "wake_target": wake_target_to_dict(target),
+            "duplicate": duplicate,
+        }
+
+    def _promote_link_agent_row(
+        device: sqlite3.Row,
+        agent_id: str,
+        user: dict[str, Any],
+        request: Request,
+        database: Database,
+        config: Settings,
+    ) -> dict[str, Any]:
+        with database.connection() as conn:
+            agent_row = conn.execute(
+                "SELECT * FROM agents WHERE id = ?", (agent_id,)
+            ).fetchone()
+        if agent_row is None:
+            raise HTTPException(status_code=404, detail="Agent not found.")
+        device_mac = normalize_mac(device["mac"])
+        agent_mac = normalize_mac(agent_row["mac"])
+        if not device_mac or not agent_mac:
+            raise HTTPException(
+                status_code=409,
+                detail="Both the discovered device and the enrolled agent need a MAC address to link.",
+            )
+        if device_mac != agent_mac:
+            raise HTTPException(
+                status_code=409,
+                detail="The discovered MAC does not match the enrolled agent MAC.",
+            )
+        if device["agent_id"] and str(device["agent_id"]) != str(agent_id):
+            raise HTTPException(
+                status_code=409,
+                detail="This discovered device is already linked to another agent.",
+            )
+        with database.transaction() as conn:
+            database.update_discovered_device(
+                device["id"], state="promoted", agent_id=agent_id, conn=conn
+            )
+            database.record_discovery_event(
+                device["id"],
+                "promoted",
+                {"kind": "existing_agent", "agent_id": agent_id},
+                conn=conn,
+            )
+            database.audit(
+                actor=user["username"],
+                action="discovery.device_promoted",
+                target=device["id"],
+                detail={"kind": "existing_agent", "agent_id": agent_id},
+                ip=client_ip(request, config.trust_proxy),
+                conn=conn,
+            )
+            database.record_agent_event(
+                agent_id,
+                "discovery",
+                "info",
+                f"Discovered device {device['hostname'] or device['ip']} linked to this agent",
+                {"device_id": device["id"]},
+                conn=conn,
+            )
+        return {
+            "device": discovered_device_to_dict(
+                _discovery_device_or_404(device["id"], database)
+            ),
+            "agent": agent_to_dict(agent_row, config),
+        }
+
+    def _promote_install_row(
+        device: sqlite3.Row,
+        os_name: str,
+        payload: DiscoveryPromoteIn,
+        user: dict[str, Any],
+        request: Request,
+        database: Database,
+        config: Settings,
+    ) -> dict[str, Any]:
+        token = new_token("sextant_enroll_")
+        token_id = "enr_" + secrets.token_hex(8)
+        now = utcnow()
+        minutes = payload.expires_minutes or config.enrollment_ttl_minutes
+        expires = now + timedelta(minutes=max(5, min(1440, int(minutes))))
+        expires_at = expires.isoformat(timespec="seconds").replace("+00:00", "Z")
+        name = (payload.name or device["hostname"] or device["ip"] or "discovered device")[:255]
+        address = device["ip"] or ""
+        base = config.public_url or str(request.base_url).rstrip("/")
+        install_command = _discovery_install_command(base, token, os_name, name, address)
+        with database.transaction() as conn:
+            conn.execute(
+                """INSERT INTO enrollment_tokens
+                   (id, token_hash, label, created_by, created_at, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    token_id,
+                    hash_token(token),
+                    f"discovery:{device['id']}",
+                    user["username"],
+                    now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                    expires_at,
+                ),
+            )
+            database.audit(
+                actor=user["username"],
+                action="enrollment.created",
+                target=token_id,
+                detail={
+                    "label": f"discovery:{device['id']}",
+                    "purpose": f"discovery_promote_{os_name}",
+                    "expires_at": expires_at,
+                },
+                ip=client_ip(request, config.trust_proxy),
+                conn=conn,
+            )
+            database.update_discovered_device(
+                device["id"], state="promoted", conn=conn
+            )
+            database.record_discovery_event(
+                device["id"],
+                "promoted",
+                {
+                    "kind": f"{os_name}_agent",
+                    "enrollment_id": token_id,
+                    "expires_at": expires_at,
+                },
+                conn=conn,
+            )
+            database.audit(
+                actor=user["username"],
+                action="discovery.device_promoted",
+                target=device["id"],
+                detail={
+                    "kind": f"{os_name}_agent",
+                    "enrollment_id": token_id,
+                    "expires_at": expires_at,
+                },
+                ip=client_ip(request, config.trust_proxy),
+                conn=conn,
+            )
+            if device["agent_id"]:
+                database.record_agent_event(
+                    str(device["agent_id"]),
+                    "discovery",
+                    "info",
+                    f"Onboarding started for {device['hostname'] or device['ip']}",
+                    {"device_id": device["id"], "os": os_name},
+                    conn=conn,
+                )
+        prerequisites = (
+            [
+                "Run in an elevated PowerShell on the target host.",
+                "Python 3.11+ and the Sextant agent package must already be installed.",
+                "The host must reach the console over HTTPS.",
+                "Manual Windows install only; remote Windows install is not implemented.",
+                f"Token expires at {expires_at}.",
+            ]
+            if os_name == "windows"
+            else [
+                "Run as root on the target host.",
+                "Install the Sextant agent package and service first.",
+                "The host must reach the console over HTTPS.",
+                f"Token expires at {expires_at}.",
+            ]
+        )
+        return {
+            "device": discovered_device_to_dict(
+                _discovery_device_or_404(device["id"], database)
+            ),
+            "enrollment": {
+                "id": token_id,
+                "token": token,
+                "label": f"discovery:{device['id']}",
+                "os": os_name,
+                "name": name,
+                "address": address,
+                "expires_at": expires_at,
+                "install_command": install_command,
+                "prerequisites": prerequisites,
+                "windows_plan": (
+                    "https://github.com/JugglerMaster/Sextant/blob/main/docs/WINDOWS_REMOTE_INSTALL.md"
+                    if os_name == "windows"
+                    else ""
+                ),
+            },
+        }
 
     def discovery_settings_payload(
         database: Database, config: Settings
@@ -4194,6 +4544,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         vendor: str = "",
         no_agent: bool = False,
         admin_ports: bool = False,
+        exposure: bool = False,
+        conflict: bool = False,
         mac: str = "",
         limit: int = Query(default=50, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
@@ -4220,16 +4572,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             vendor=vendor.strip() or None,
             no_agent=no_agent,
             admin_ports=admin_ports,
+            exposure=exposure,
+            conflict=conflict,
             mac=mac.strip() or None,
             limit=limit,
             offset=offset,
         )
+        summary = database.discovery_summary()
+        conflict_ids = set(summary.get("conflict_device_ids") or [])
+        devices = []
+        for row in rows:
+            device = discovered_device_to_dict(row)
+            device["identity_conflict"] = device["id"] in conflict_ids
+            devices.append(device)
         return {
-            "devices": [discovered_device_to_dict(row) for row in rows],
+            "devices": devices,
             "total": total,
             "limit": limit,
             "offset": offset,
-            "summary": database.discovery_summary(),
+            "summary": summary,
         }
 
     @app.get("/api/discovery/devices/{device_id}")
@@ -4261,7 +4622,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             target_row = database.get_wake_target(device["wake_target_id"])
             if target_row is not None:
                 wake_target = wake_target_to_dict(target_row)
-        return {"device": device, "events": events, "agent": agent, "wake_target": wake_target}
+        conflicts = detect_identity_conflicts(database, device_id)
+        device["identity_conflict"] = bool(conflicts)
+        candidates: list[dict[str, Any]] = []
+        if device["mac"] and not device["agent_id"]:
+            with database.connection() as conn:
+                candidate_rows = conn.execute(
+                    "SELECT * FROM agents WHERE mac = ? COLLATE NOCASE LIMIT 10",
+                    (device["mac"],),
+                ).fetchall()
+            candidates = [agent_to_dict(item, config) for item in candidate_rows]
+        return {
+            "device": device,
+            "events": events,
+            "agent": agent,
+            "wake_target": wake_target,
+            "conflicts": conflicts,
+            "agent_candidates": candidates,
+        }
 
     @app.patch("/api/discovery/devices/{device_id}")
     def update_discovery_device(
@@ -4329,6 +4707,331 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         notify_dashboard()
         return Response(status_code=204)
+
+    @app.get("/api/discovery/conflicts")
+    def list_discovery_conflicts(
+        device_id: str = "",
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        del user
+        conflicts = detect_identity_conflicts(database, device_id.strip() or None)
+        return {
+            "conflicts": conflicts,
+            "conflict_device_ids": sorted(set(database.discovery_conflict_ids())),
+            "total": len(conflicts),
+        }
+
+    @app.get("/api/discovery/export")
+    def export_discovery_devices(
+        request: Request,
+        format: str = "csv",
+        state: str = "",
+        segment: str = "",
+        q: str = "",
+        type: str = "",
+        vendor: str = "",
+        no_agent: bool = False,
+        admin_ports: bool = False,
+        exposure: bool = False,
+        conflict: bool = False,
+        mac: str = "",
+        limit: int = Query(default=0, ge=0, le=100000),
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> Response:
+        export_format = str(format or "csv").strip().lower()
+        if export_format not in {"csv", "json"}:
+            raise HTTPException(status_code=400, detail="format must be csv or json.")
+        normalized_state = state.strip().lower()
+        if normalized_state and normalized_state not in {
+            "new",
+            "known",
+            "ignored",
+            "promoted",
+        }:
+            raise HTTPException(status_code=400, detail="Invalid device state.")
+        normalized_segment = segment.strip()
+        if normalized_segment == "unsegmented":
+            normalized_segment = ""
+        cap = max(1, min(100_000, int(config.discovery.export_limit)))
+        take = cap if not limit else min(cap, max(1, int(limit)))
+        rows, total = database.list_discovered_devices(
+            state=normalized_state or None,
+            segment=normalized_segment or None,
+            query=q.strip() or None,
+            device_type=type.strip() or None,
+            vendor=vendor.strip() or None,
+            no_agent=no_agent,
+            admin_ports=admin_ports,
+            exposure=exposure,
+            conflict=conflict,
+            mac=mac.strip() or None,
+            limit=take,
+            offset=0,
+        )
+        conflict_ids = database.discovery_conflict_ids()
+        devices = []
+        for row in rows:
+            device = discovered_device_to_dict(row)
+            device["identity_conflict"] = device["id"] in conflict_ids
+            devices.append(device)
+        truncated = total > len(devices)
+        database.audit(
+            actor=user["username"],
+            action="discovery.exported",
+            detail={
+                "format": export_format,
+                "rows": len(devices),
+                "total": total,
+                "truncated": truncated,
+                "cap": cap,
+                "filters": {
+                    "state": normalized_state,
+                    "segment": normalized_segment,
+                    "q": q.strip()[:255],
+                    "type": type.strip(),
+                    "vendor": vendor.strip(),
+                    "no_agent": no_agent,
+                    "admin_ports": admin_ports,
+                    "exposure": exposure,
+                    "conflict": conflict,
+                    "mac": mac.strip(),
+                },
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        headers = {
+            "Content-Disposition": (
+                f'attachment; filename="sextant-discovery.{export_format}"'
+            ),
+            "X-Discovery-Truncated": "true" if truncated else "false",
+            "X-Discovery-Rows": str(len(devices)),
+        }
+        if export_format == "json":
+            return Response(
+                dumps(
+                    {
+                        "generated_at": utcnow_iso(),
+                        "total": total,
+                        "returned": len(devices),
+                        "truncated": truncated,
+                        "devices": devices,
+                    }
+                ),
+                media_type="application/json",
+                headers=headers,
+            )
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            [
+                "id",
+                "state",
+                "ip",
+                "mac",
+                "vendor",
+                "hostname",
+                "device_type",
+                "os_guess",
+                "confidence",
+                "segment",
+                "open_ports",
+                "services",
+                "agent_id",
+                "wake_target_id",
+                "wake_status",
+                "wake_verified_at",
+                "tags",
+                "notes",
+                "first_seen",
+                "last_seen",
+                "mac_randomized",
+                "identity_conflict",
+            ]
+        )
+        for device in devices:
+            writer.writerow(
+                [
+                    device["id"],
+                    device["state"],
+                    device["ip"],
+                    device["mac"],
+                    device["vendor"],
+                    device["hostname"],
+                    device["device_type"],
+                    device["os_guess"],
+                    device["confidence"],
+                    device["segment"],
+                    dumps(device["open_ports"]),
+                    dumps(device["services"]),
+                    device["agent_id"] or "",
+                    device["wake_target_id"] or "",
+                    device["wake_status"],
+                    device["wake_verified_at"] or "",
+                    dumps(device["tags"]),
+                    device["notes"],
+                    device["first_seen"],
+                    device["last_seen"],
+                    "1" if device["mac_randomized"] else "0",
+                    "1" if device["identity_conflict"] else "0",
+                ]
+            )
+        return Response(output.getvalue(), media_type="text/csv", headers=headers)
+
+    @app.post("/api/discovery/devices/{device_id}/wake-target")
+    def discovery_wake_target(
+        device_id: str,
+        payload: DiscoveryWakeTargetIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        device = _discovery_device_or_404(device_id, database)
+        result = _promote_wake_target_row(
+            device, payload, user, request, database, config
+        )
+        notify_dashboard()
+        return result
+
+    @app.post("/api/discovery/devices/{device_id}/link-agent")
+    def discovery_link_agent(
+        device_id: str,
+        payload: DiscoveryLinkAgentIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        device = _discovery_device_or_404(device_id, database)
+        result = _promote_link_agent_row(
+            device, payload.agent_id, user, request, database, config
+        )
+        notify_dashboard()
+        return result
+
+    @app.post("/api/discovery/devices/{device_id}/promote")
+    def promote_discovery_device(
+        device_id: str,
+        payload: DiscoveryPromoteIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        device = _discovery_device_or_404(device_id, database)
+        if payload.target == "wake_target":
+            result = _promote_wake_target_row(
+                device, payload, user, request, database, config
+            )
+        elif payload.target == "existing_agent":
+            if not payload.agent_id:
+                raise HTTPException(status_code=400, detail="agent_id is required.")
+            result = _promote_link_agent_row(
+                device, payload.agent_id, user, request, database, config
+            )
+        else:
+            os_name = "windows" if payload.target == "windows_agent" else "linux"
+            result = _promote_install_row(
+                device, os_name, payload, user, request, database, config
+            )
+        notify_dashboard()
+        return result
+
+    @app.post("/api/discovery/devices/{device_id}/verify")
+    def verify_discovery_device(
+        device_id: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if not config.discovery.enabled:
+            raise HTTPException(
+                status_code=403,
+                detail="Discovery is disabled. Set SEXTANT_DISCOVERY_ENABLED=1 first.",
+            )
+        acknowledgement = database.get_discovery_settings()
+        if acknowledgement is None or not acknowledgement["acknowledged_at"]:
+            raise HTTPException(
+                status_code=403,
+                detail="Discovery authorization acknowledgement is required.",
+            )
+        device = _discovery_device_or_404(device_id, database)
+        if not device["ip"]:
+            raise HTTPException(
+                status_code=400, detail="This device has no IP address to verify."
+            )
+        ports = list(config.discovery.probe_ports) if config.discovery.active_probes else []
+        try:
+            verification = verify_reachability(
+                device["ip"],
+                ports,
+                mac=device["mac"],
+                timeout_ms=config.discovery.timeout_ms,
+                concurrency=config.discovery.concurrency,
+            )
+        except DiscoveryError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+        target = (
+            database.get_wake_target(device["wake_target_id"])
+            if device["wake_target_id"]
+            else None
+        )
+        if verification["reachable"]:
+            wake_status = "woke"
+        elif target is not None and target["last_woken_at"]:
+            wake_status = "sent"
+        else:
+            wake_status = "failed"
+        now = utcnow_iso()
+        with database.transaction() as conn:
+            database.update_discovered_device(
+                device_id,
+                wake_status=wake_status,
+                wake_verified_at=now,
+                last_seen=now if wake_status == "woke" else None,
+                conn=conn,
+            )
+            database.record_discovery_event(
+                device_id,
+                "wake_verified",
+                {
+                    "status": wake_status,
+                    "method": verification["method"],
+                    "open_ports": verification["open_ports"],
+                },
+                conn=conn,
+            )
+            database.audit(
+                actor=user["username"],
+                action="discovery.wake_verified",
+                target=device_id,
+                detail={
+                    "status": wake_status,
+                    "method": verification["method"],
+                    "open_ports": verification["open_ports"],
+                },
+                ip=client_ip(request, config.trust_proxy),
+                conn=conn,
+            )
+            if device["agent_id"]:
+                database.record_agent_event(
+                    str(device["agent_id"]),
+                    "discovery",
+                    "info",
+                    f"Wake verification for {device['hostname'] or device['ip']}: {wake_status}",
+                    {"device_id": device_id, "status": wake_status},
+                    conn=conn,
+                )
+        notify_dashboard()
+        updated = database.get_discovered_device(device_id)
+        return {
+            "device": discovered_device_to_dict(updated) if updated is not None else None,
+            "verification": {**verification, "status": wake_status},
+        }
 
     @app.get("/api/discovery/scans")
     def list_discovery_scans(

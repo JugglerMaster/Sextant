@@ -12,6 +12,8 @@ from sextant_control.discovery import (
     ACKNOWLEDGEMENT,
     DeviceObservation,
     DiscoveryBusy,
+    detect_identity_conflicts,
+    verify_reachability,
     DiscoveryDisabled,
     DiscoveryError,
     DiscoveryManager,
@@ -540,3 +542,125 @@ def test_run_scan_collects_neighbors_dns_ssdp_and_tcp(database, monkeypatch):
     assert by_ip["192.168.1.3"]["mac"] == ""
     assert by_ip["192.168.1.3"]["device_type"] == "media/IoT"
     assert progress[-1] == (100, 2)
+
+
+def test_identity_conflicts_group_ip_and_hostname(database):
+    merge_observation(
+        database,
+        _observation(mac="aa:bb:cc:dd:ee:01", ip="192.168.1.70", hostname="shared.lan"),
+    )
+    merge_observation(
+        database,
+        _observation(mac="aa:bb:cc:dd:ee:02", ip="192.168.1.70", hostname="other.lan"),
+    )
+    merge_observation(
+        database,
+        _observation(mac="aa:bb:cc:dd:ee:03", ip="192.168.1.71", hostname="shared.lan"),
+    )
+    conflicts = detect_identity_conflicts(database)
+    types = {conflict["type"] for conflict in conflicts}
+    assert "ip_multiple_macs" in types
+    assert "hostname_multiple_identities" in types
+    ip_conflict = next(item for item in conflicts if item["type"] == "ip_multiple_macs")
+    assert ip_conflict["key"] == "192.168.1.70"
+    assert len(ip_conflict["device_ids"]) == 2
+
+
+def test_identity_conflict_event_for_mac_moving_ip_is_visible(database):
+    device = merge_observation(
+        database, _observation(mac="aa:bb:cc:dd:ee:09", ip="192.168.1.80")
+    )
+    merge_observation(
+        database, _observation(mac="aa:bb:cc:dd:ee:09", ip="192.168.1.81")
+    )
+    conflicts = detect_identity_conflicts(database, device["id"])
+    assert any(conflict["type"] == "event" for conflict in conflicts)
+    event_conflict = next(item for item in conflicts if item["type"] == "event")
+    assert event_conflict["detail"]["previous_ip"] == "192.168.1.80"
+    rows, total = database.list_discovered_devices(conflict=True)
+    assert total == 1
+    assert rows[0]["id"] == device["id"]
+
+
+def test_exposure_filter_and_summary(database):
+    merge_observation(
+        database,
+        _observation(
+            mac="aa:bb:cc:dd:ee:10",
+            ip="192.168.1.90",
+            open_ports=[22, 8006],
+            services={"22": {"protocol": "ssh"}},
+        ),
+    )
+    merge_observation(
+        database,
+        _observation(
+            mac="aa:bb:cc:dd:ee:11",
+            ip="192.168.1.91",
+            open_ports=[80],
+            services={"80": {"protocol": "http"}},
+        ),
+    )
+    rows, total = database.list_discovered_devices(exposure=True)
+    assert total == 1
+    assert rows[0]["ip"] == "192.168.1.90"
+    with database.connection() as conn:
+        conn.execute(
+            """INSERT INTO agents (id, name, hostname, os, mac, token_hash, enrolled_at)
+               VALUES ('agt_exposed', 'Exposed', 'exposed', 'linux',
+                       'aa:bb:cc:dd:ee:10', 'hash', ?)""",
+            (utcnow_iso(),),
+        )
+    merge_observation(
+        database,
+        _observation(
+            mac="aa:bb:cc:dd:ee:10",
+            ip="192.168.1.90",
+            open_ports=[22, 8006],
+            services={"22": {"protocol": "ssh"}},
+        ),
+    )
+    rows, total = database.list_discovered_devices(exposure=True)
+    assert total == 0
+    summary = database.discovery_summary()
+    assert summary["exposure"] == 0
+    assert summary["managed"] == 1
+    assert summary["unmanaged"] == 1
+    assert summary["segments"][0]["gateway_hint"]
+
+
+def test_wake_verification_neighbor_tcp_and_rejection():
+    def neighbor_reader():
+        return [
+            {
+                "ip": "192.168.1.40",
+                "mac": "b8:27:eb:11:22:33",
+                "hostname": "",
+                "state": "REACHABLE",
+            }
+        ]
+
+    by_neighbor = verify_reachability(
+        "192.168.1.40", [], neighbor_reader=neighbor_reader
+    )
+    assert by_neighbor["reachable"] is True
+    assert by_neighbor["method"] == "neighbor"
+
+    def prober(ip, ports, **kwargs):
+        return {"443": {"protocol": "tls"}}
+
+    by_tcp = verify_reachability(
+        "192.168.1.41", [443], neighbor_reader=lambda: [], prober=prober
+    )
+    assert by_tcp["reachable"] is True
+    assert by_tcp["method"] == "tcp"
+    assert by_tcp["open_ports"] == [443]
+
+    missing = verify_reachability(
+        "192.168.1.42", [], neighbor_reader=lambda: [], prober=prober
+    )
+    assert missing["reachable"] is False
+    assert missing["method"] == ""
+
+    with pytest.raises(DiscoveryError):
+        verify_reachability("8.8.8.8", [], neighbor_reader=lambda: [])

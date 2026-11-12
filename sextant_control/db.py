@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import secrets
 import sqlite3
@@ -511,7 +512,9 @@ CREATE TABLE IF NOT EXISTS discovered_devices (
     wake_target_id TEXT,
     tags TEXT NOT NULL DEFAULT '[]',
     notes TEXT NOT NULL DEFAULT '',
-    mac_randomized INTEGER NOT NULL DEFAULT 0
+    mac_randomized INTEGER NOT NULL DEFAULT 0,
+    wake_status TEXT NOT NULL DEFAULT '',
+    wake_verified_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS discovery_scans (
@@ -539,7 +542,8 @@ CREATE TABLE IF NOT EXISTS discovery_events (
     device_id TEXT NOT NULL,
     kind TEXT NOT NULL
         CHECK (kind IN ('new_device', 'new_port', 'service_changed',
-                        'identity_conflict', 'went_dark', 'promoted')),
+                        'identity_conflict', 'went_dark', 'promoted',
+                        'wake_verified')),
     detail TEXT NOT NULL DEFAULT '{}'
 );
 """
@@ -771,7 +775,7 @@ class Database:
             if old_version < 13:
                 self._ensure_discovery_profile_defaults(conn)
             conn.executescript(INDEXES)
-            conn.execute("PRAGMA user_version=13")
+            conn.execute("PRAGMA user_version=14")
             conn.execute("UPDATE agents SET profile_id = 'prof_workstation' WHERE profile_id = ''")
         try:
             self.path.chmod(0o600)
@@ -857,6 +861,40 @@ class Database:
                 conn.execute("ALTER TABLE discovery_scans ADD COLUMN source TEXT NOT NULL DEFAULT 'server'")
             if "command_id" not in discovery_scan_columns:
                 conn.execute("ALTER TABLE discovery_scans ADD COLUMN command_id TEXT NOT NULL DEFAULT ''")
+
+        device_columns = columns("discovered_devices")
+        if device_columns:
+            if "wake_status" not in device_columns:
+                conn.execute(
+                    "ALTER TABLE discovered_devices ADD COLUMN wake_status TEXT NOT NULL DEFAULT ''"
+                )
+            if "wake_verified_at" not in device_columns:
+                conn.execute("ALTER TABLE discovered_devices ADD COLUMN wake_verified_at TEXT")
+
+        event_table = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'discovery_events'"
+        ).fetchone()
+        if event_table is not None and "wake_verified" not in str(event_table["sql"] or ""):
+            # SQLite cannot alter a CHECK constraint, so rebuild the small event
+            # table. Indexes are recreated by INDEXES after this migration.
+            conn.execute("ALTER TABLE discovery_events RENAME TO discovery_events_old")
+            conn.execute(
+                """CREATE TABLE discovery_events (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       at TEXT NOT NULL,
+                       device_id TEXT NOT NULL,
+                       kind TEXT NOT NULL
+                           CHECK (kind IN ('new_device', 'new_port', 'service_changed',
+                                           'identity_conflict', 'went_dark', 'promoted',
+                                           'wake_verified')),
+                       detail TEXT NOT NULL DEFAULT '{}'
+                   )"""
+            )
+            conn.execute(
+                """INSERT INTO discovery_events (id, at, device_id, kind, detail)
+                   SELECT id, at, device_id, kind, detail FROM discovery_events_old"""
+            )
+            conn.execute("DROP TABLE discovery_events_old")
 
     @staticmethod
     def _seed_profiles(conn: sqlite3.Connection) -> None:
@@ -3629,6 +3667,8 @@ class Database:
         vendor: str | None = None,
         no_agent: bool = False,
         admin_ports: bool = False,
+        exposure: bool = False,
+        conflict: bool = False,
         mac: str | None = None,
         limit: int = 50,
         offset: int = 0,
@@ -3650,14 +3690,47 @@ class Database:
         if mac:
             clauses.append("mac = ? COLLATE NOCASE")
             params.append(mac)
-        if no_agent:
+        if no_agent or exposure:
             clauses.append("(agent_id IS NULL OR agent_id = '')")
-        if admin_ports:
-            ports = ("22", "3389", "5900", "5985", "5986")
+        if admin_ports or exposure:
+            ports = ("22", "3389", "5900", "5985", "5986", "8006")
+            patterns: list[str] = []
+            for port in ports:
+                patterns.extend(
+                    [
+                        f'%"{port}"%',
+                        f"%[{port},%",
+                        f"%,{port},%",
+                        f"%,{port}]%",
+                        f"%[{port}]%",
+                    ]
+                )
             clauses.append(
-                "(" + " OR ".join("open_ports LIKE ?" for _ in ports) + ")"
+                "(" + " OR ".join("open_ports LIKE ?" for _ in patterns) + ")"
             )
-            params.extend(f'%"{port}"%' for port in ports)
+            params.extend(patterns)
+        if conflict:
+            clauses.append(
+                """(
+                    (mac != '' AND mac IN (
+                        SELECT mac FROM discovered_devices
+                        WHERE mac != '' GROUP BY mac HAVING COUNT(DISTINCT ip) > 1
+                    ))
+                    OR (ip != '' AND ip IN (
+                        SELECT ip FROM discovered_devices
+                        WHERE ip != '' GROUP BY ip HAVING COUNT(DISTINCT mac) > 1
+                    ))
+                    OR (hostname != '' AND hostname IN (
+                        SELECT hostname FROM discovered_devices
+                        WHERE hostname != '' GROUP BY hostname
+                        HAVING COUNT(DISTINCT mac) > 1
+                    ))
+                    OR id IN (
+                        SELECT device_id FROM discovery_events
+                        WHERE kind = 'identity_conflict'
+                    )
+                )"""
+            )
         if query:
             pattern = f"%{query}%"
             clauses.append(
@@ -3666,7 +3739,7 @@ class Database:
             )
             params.extend([pattern] * 6)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        limit = max(1, min(500, int(limit)))
+        limit = max(1, min(100_000, int(limit)))
         offset = max(0, int(offset))
         with self.connection() as conn:
             total = int(
@@ -3697,15 +3770,55 @@ class Database:
                 (mac,),
             ).fetchone()
 
+    @staticmethod
+    def _discovery_conflict_ids(conn: sqlite3.Connection) -> set[str]:
+        ids: set[str] = set()
+        for row in conn.execute(
+            """SELECT id FROM discovered_devices WHERE mac != '' AND mac IN (
+                   SELECT mac FROM discovered_devices
+                   WHERE mac != '' GROUP BY mac HAVING COUNT(DISTINCT ip) > 1
+               )"""
+        ).fetchall():
+            ids.add(str(row["id"]))
+        for row in conn.execute(
+            """SELECT id FROM discovered_devices WHERE ip != '' AND ip IN (
+                   SELECT ip FROM discovered_devices
+                   WHERE ip != '' GROUP BY ip HAVING COUNT(DISTINCT mac) > 1
+               )"""
+        ).fetchall():
+            ids.add(str(row["id"]))
+        for row in conn.execute(
+            """SELECT id FROM discovered_devices WHERE hostname != '' AND hostname IN (
+                   SELECT hostname FROM discovered_devices
+                   WHERE hostname != '' GROUP BY hostname
+                   HAVING COUNT(DISTINCT mac) > 1
+               )"""
+        ).fetchall():
+            ids.add(str(row["id"]))
+        for row in conn.execute(
+            """SELECT DISTINCT device_id FROM discovery_events
+               WHERE kind = 'identity_conflict'"""
+        ).fetchall():
+            ids.add(str(row["device_id"]))
+        return ids
+
+    def discovery_conflict_ids(self) -> set[str]:
+        with self.connection() as conn:
+            return self._discovery_conflict_ids(conn)
+
     def discovery_summary(self) -> dict[str, Any]:
         with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT id, segment, ip, state, agent_id, open_ports,
+                          device_type, vendor, wake_status
+                   FROM discovered_devices"""
+            ).fetchall()
             states = {
                 str(row["state"]): int(row["n"])
                 for row in conn.execute(
                     "SELECT state, COUNT(*) AS n FROM discovered_devices GROUP BY state"
                 ).fetchall()
             }
-            total = sum(states.values())
             types = [
                 {"type": row["device_type"], "count": int(row["n"])}
                 for row in conn.execute(
@@ -3714,36 +3827,83 @@ class Database:
                        ORDER BY n DESC, device_type"""
                 ).fetchall()
             ]
-            segments = [
-                {"segment": row["segment"], "count": int(row["n"])}
-                for row in conn.execute(
-                    """SELECT segment, COUNT(*) AS n
-                       FROM discovered_devices GROUP BY segment
-                       ORDER BY segment"""
-                ).fetchall()
-            ]
             vendors = [
                 {"vendor": row["vendor"], "count": int(row["n"])}
                 for row in conn.execute(
-                    """SELECT vendor, COUNT(*) AS n
-                       FROM discovered_devices WHERE vendor != ''
-                       GROUP BY vendor ORDER BY n DESC, vendor LIMIT 50"""
+                    """SELECT vendor, COUNT(*) AS n FROM discovered_devices
+                       WHERE vendor != '' GROUP BY vendor ORDER BY n DESC, vendor LIMIT 50"""
                 ).fetchall()
             ]
-            no_agent = int(
-                conn.execute(
-                    """SELECT COUNT(*) AS n FROM discovered_devices
-                       WHERE agent_id IS NULL OR agent_id = ''"""
-                ).fetchone()["n"]
+            conflict_ids = self._discovery_conflict_ids(conn)
+        total = len(rows)
+        admin_ports = {"22", "3389", "5900", "5985", "5986", "8006"}
+        segment_map: dict[str, dict[str, Any]] = {}
+        exposure_count = 0
+        managed_count = 0
+        new_count = 0
+        for row in rows:
+            ports = set(str(port) for port in loads(row["open_ports"], []))
+            has_admin = bool(ports & admin_ports)
+            has_agent = bool(row["agent_id"])
+            exposed = has_admin and not has_agent
+            if has_agent:
+                managed_count += 1
+            if row["state"] == "new":
+                new_count += 1
+            if exposed:
+                exposure_count += 1
+            segment = str(row["segment"] or "")
+            entry = segment_map.setdefault(
+                segment,
+                {
+                    "segment": segment,
+                    "count": 0,
+                    "new": 0,
+                    "managed": 0,
+                    "unmanaged": 0,
+                    "exposure": 0,
+                    "gateway_hint": "",
+                    "gateway_source": "",
+                },
             )
+            entry["count"] += 1
+            if row["state"] == "new":
+                entry["new"] += 1
+            if has_agent:
+                entry["managed"] += 1
+            else:
+                entry["unmanaged"] += 1
+            if exposed:
+                entry["exposure"] += 1
+            if row["device_type"] == "router/switch" and not entry["gateway_hint"]:
+                entry["gateway_hint"] = str(row["ip"] or "")
+                entry["gateway_source"] = "router/switch device"
+            if str(row["ip"] or "").endswith(".1") and not entry["gateway_hint"]:
+                entry["gateway_hint"] = str(row["ip"] or "")
+                entry["gateway_source"] = "lowest host"
+        for entry in segment_map.values():
+            if not entry["gateway_hint"] and entry["segment"]:
+                try:
+                    network = ipaddress.ip_network(entry["segment"], strict=False)
+                    entry["gateway_hint"] = str(next(network.hosts()))
+                    entry["gateway_source"] = "network first host (guess)"
+                except (ValueError, StopIteration):
+                    pass
+        segments = sorted(segment_map.values(), key=lambda item: item["segment"])
         return {
             "total": total,
             "new": states.get("new", 0),
+            "new_count": new_count,
             "states": {name: states.get(name, 0) for name in ("new", "known", "ignored", "promoted")},
             "types": types,
             "segments": segments,
             "vendors": vendors,
-            "no_agent": no_agent,
+            "no_agent": total - managed_count,
+            "managed": managed_count,
+            "unmanaged": total - managed_count,
+            "exposure": exposure_count,
+            "conflicts": len(conflict_ids),
+            "conflict_device_ids": sorted(conflict_ids)[:5000],
         }
 
     def update_discovered_device(
@@ -3753,6 +3913,11 @@ class Database:
         tags: list[str] | None = None,
         notes: str | None = None,
         state: str | None = None,
+        agent_id: str | None = None,
+        wake_target_id: str | None = None,
+        wake_status: str | None = None,
+        wake_verified_at: str | None = None,
+        last_seen: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> sqlite3.Row | None:
         fields: list[str] = []
@@ -3766,6 +3931,21 @@ class Database:
         if state is not None:
             fields.append("state = ?")
             params.append(state)
+        if agent_id is not None:
+            fields.append("agent_id = ?")
+            params.append(agent_id[:64] or None)
+        if wake_target_id is not None:
+            fields.append("wake_target_id = ?")
+            params.append(wake_target_id[:64] or None)
+        if wake_status is not None:
+            fields.append("wake_status = ?")
+            params.append(wake_status[:32])
+        if wake_verified_at is not None:
+            fields.append("wake_verified_at = ?")
+            params.append(wake_verified_at[:64] or None)
+        if last_seen is not None:
+            fields.append("last_seen = ?")
+            params.append(last_seen[:64])
         if not fields:
             return self.get_discovered_device(device_id)
         params.append(device_id)
@@ -3866,6 +4046,15 @@ class Database:
             return conn.execute(
                 "SELECT * FROM wake_targets WHERE id = ?", (target_id,)
             ).fetchone()
+
+    def devices_for_wake_target(self, target_id: str) -> list[sqlite3.Row]:
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    "SELECT * FROM discovered_devices WHERE wake_target_id = ?",
+                    (target_id,),
+                ).fetchall()
+            )
 
     def prune_discovery(self, retention_days: int = 90) -> tuple[int, int]:
         days = max(1, min(3650, int(retention_days)))

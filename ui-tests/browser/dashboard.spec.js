@@ -37,12 +37,53 @@ for (const theme of THEMES) {
     await expect(page.locator("#discovery-table-body")).not.toContainText("esxi.lan");
     await page.locator("#discovery-filter-clear").click();
     await expect(page.locator("#discovery-table-body")).toContainText("esxi.lan");
+    await expect(page.locator("#discovery-summary")).toContainText("Exposure");
+    await expect(page.locator("#discovery-summary")).toContainText("Conflicts");
+    await expect(page.locator("#discovery-segment-list")).toContainText("Gateway hint: 192.168.1.1");
+
+    await page.locator("#discovery-filter-exposure").check();
+    await expect(page.locator("#discovery-table-body")).toContainText("printer.lan");
+    await expect(page.locator("#discovery-table-body")).not.toContainText("esxi.lan");
+    await page.locator("#discovery-filter-exposure").uncheck();
+    await page.locator("#discovery-filter-conflict").check();
+    await expect(page.locator("#discovery-table-body")).toContainText("conflict");
+    await expect(page.locator("#discovery-table-body")).not.toContainText("esxi.lan");
+    await page.locator("#discovery-filter-conflict").uncheck();
+    await expect(page.locator("#discovery-table-body")).toContainText("esxi.lan");
 
     await page.locator("#discovery-table-body").getByRole("button", { name: /printer\.lan details/ }).click();
     await expect(page.locator("#discovery-drawer")).toBeVisible();
     await expect(page.locator("#discovery-drawer-body")).toContainText("Device record");
     await expect(page.locator("#discovery-drawer-body")).toContainText("OpenSSH");
+    await expect(page.locator("#discovery-drawer-body")).toContainText("Identity evidence");
+    await expect(page.locator("#discovery-drawer-body")).toContainText("Wake status");
     await expect(page.locator("#discovery-drawer-body")).toContainText("Change events");
+    await page.locator("#discovery-drawer-actions").getByRole("button", { name: "Verify wake" }).click();
+    await expect(page.locator("#toast-region")).toContainText("Wake verification: woke");
+
+    await page.locator("#discovery-drawer-actions").getByRole("button", { name: "Promote" }).click();
+    const promoteDialog = page.locator("#discovery-promote-dialog");
+    await expect(promoteDialog).toBeVisible();
+    await promoteDialog.getByRole("button", { name: "Create wake target" }).click();
+    await expect(promoteDialog).toBeHidden();
+
+    await page.locator("#discovery-drawer-actions").getByRole("button", { name: "Promote" }).click();
+    await page.locator("#discovery-promote-target").selectOption("linux_agent");
+    await promoteDialog.getByRole("button", { name: "Generate install command" }).click();
+    await expect(page.locator("#discovery-promote-body")).toContainText("sextant_enroll_TOPSECRET");
+    await expect(promoteDialog.getByRole("button", { name: "Copy command" })).toBeVisible();
+    await screenshot(page, `discovery-promote-${theme}`);
+    await scan(page, `discovery promote ${theme}`);
+    await promoteDialog.getByRole("button", { name: "Close" }).click();
+    await expect(page.locator("#discovery-promote-body")).not.toContainText("sextant_enroll_TOPSECRET");
+
+    await page.locator("#discovery-drawer-actions").getByRole("button", { name: "Promote" }).click();
+    await page.locator("#discovery-promote-target").selectOption("windows_agent");
+    await promoteDialog.getByRole("button", { name: "Generate install command" }).click();
+    await expect(page.locator("#discovery-promote-body")).toContainText("PowerShell");
+    await expect(page.locator('#discovery-promote-body a[href*="WINDOWS_REMOTE_INSTALL.md"]')).toBeVisible();
+    await promoteDialog.getByRole("button", { name: "Close" }).click();
+
     await screenshot(page, `discovery-${theme}`);
     await scan(page, `discovery ${theme}`);
     await page.locator('#discovery-drawer [aria-label="Close discovered device details"]').click();

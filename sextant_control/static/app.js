@@ -77,8 +77,21 @@ const state = {
     activeScanId: null,
     detail: null,
     selectedId: null,
-    filters: { state: "", type: "", segment: "", vendor: "", no_agent: false, admin_ports: false },
+    filters: {
+      state: "",
+      type: "",
+      segment: "",
+      vendor: "",
+      no_agent: false,
+      admin_ports: false,
+      exposure: false,
+      conflict: false,
+    },
     methods: [],
+    conflicts: [],
+    conflictIds: new Set(),
+    promotion: null,
+    promoteTrigger: null,
     loading: false,
     pollTimer: null,
     trigger: null,
@@ -6317,12 +6330,66 @@ function renderDiscoverySummary() {
     discoveryStat("New", summary.new || 0, "Not yet marked known", "stat-warn"),
     discoveryStat("Known", summary.states?.known || 0, `${summary.states?.ignored || 0} ignored`, "stat-good"),
     discoveryStat(
+      "Exposure",
+      summary.exposure || 0,
+      "Admin ports open, no agent",
+      summary.exposure ? "stat-warn" : "stat-good",
+    ),
+    discoveryStat(
+      "Conflicts",
+      summary.conflicts || 0,
+      "Identity conflicts",
+      summary.conflicts ? "stat-warn" : "",
+    ),
+    discoveryStat(
       "Segments",
       Array.isArray(summary.segments) ? summary.segments.length : 0,
-      `${Array.isArray(summary.types) ? summary.types.length : 0} device types`,
+      `${summary.managed || 0} managed · ${summary.unmanaged || 0} unmanaged`,
       "stat-info",
     ),
   );
+  renderDiscoverySegments();
+}
+
+function renderDiscoverySegments() {
+  const container = $("discovery-segment-list");
+  const panel = $("discovery-segments-panel");
+  if (!container || !panel) return;
+  const segments = state.discovery.summary?.segments || [];
+  panel.hidden = !segments.length;
+  clear(container);
+  for (const segment of segments) {
+    container.append(
+      h(
+        "div",
+        { class: "list-row" },
+        h(
+          "div",
+          { class: "list-row-main" },
+          h("strong", {}, segment.segment || "unsegmented"),
+          h(
+            "small",
+            {},
+            `${segment.count} devices · ${segment.new} new · ${segment.managed} managed · ${segment.unmanaged} unmanaged`,
+          ),
+          h(
+            "small",
+            {},
+            segment.gateway_hint
+              ? `Gateway hint: ${segment.gateway_hint} (${segment.gateway_source})`
+              : "Gateway hint: none",
+          ),
+        ),
+        h(
+          "div",
+          { class: "list-row-actions" },
+          segment.exposure
+            ? statusPill(`${segment.exposure} exposed`, "warning")
+            : statusPill("no exposure", "online"),
+        ),
+      ),
+    );
+  }
 }
 
 function fillDiscoverySelect(id, values, selected, allLabel) {
@@ -6367,6 +6434,10 @@ function renderDiscoveryFilters() {
   if (noAgent) noAgent.checked = Boolean(filters.no_agent);
   const adminPorts = $("discovery-filter-admin-ports");
   if (adminPorts) adminPorts.checked = Boolean(filters.admin_ports);
+  const exposure = $("discovery-filter-exposure");
+  if (exposure) exposure.checked = Boolean(filters.exposure);
+  const conflict = $("discovery-filter-conflict");
+  if (conflict) conflict.checked = Boolean(filters.conflict);
 }
 
 function renderDiscoveryMethods() {
@@ -6520,7 +6591,14 @@ function renderDiscoveryTable() {
       h(
         "tr",
         {},
-        h("td", {}, statusPill(device.state, discoveryStateKind(device.state))),
+        h(
+          "td",
+          {},
+          statusPill(device.state, discoveryStateKind(device.state)),
+          device.identity_conflict
+            ? h("div", {}, statusPill("conflict", "critical"))
+            : null,
+        ),
         h("td", { class: "mono" }, device.ip || "—"),
         h(
           "td",
@@ -6535,6 +6613,20 @@ function renderDiscoveryTable() {
         h("td", {}, device.hostname || "—"),
         h("td", {}, device.device_type || "unknown", h("div", { class: "form-hint" }, device.os_guess || "")),
         h("td", { class: "mono" }, ports),
+        h(
+          "td",
+          {},
+          device.wake_status
+            ? statusPill(
+                device.wake_status,
+                device.wake_status === "woke"
+                  ? "online"
+                  : device.wake_status === "failed"
+                    ? "critical"
+                    : "warning",
+              )
+            : "—",
+        ),
         h("td", { title: device.last_seen || "" }, relativeTime(device.last_seen)),
         h("td", {}, agent ? agent.name : device.agent_id ? "linked" : "—"),
         h("td", {}, tags.length ? h("div", { class: "tag-row" }, ...tags) : "—"),
@@ -6614,7 +6706,12 @@ async function loadDiscovery() {
     discovery.settings = await api("/api/discovery/settings");
     renderDiscovery();
     if (!discoveryReady()) return;
-    await Promise.all([loadDiscoveryDevices(), loadDiscoveryScans(), loadDiscoveryAgents()]);
+    await Promise.all([
+      loadDiscoveryDevices(),
+      loadDiscoveryScans(),
+      loadDiscoveryAgents(),
+      loadDiscoveryConflicts(),
+    ]);
     renderDiscovery();
     armDiscoveryPoll();
   } catch (error) {
@@ -6633,6 +6730,8 @@ function discoveryFilterQuery() {
   if (filters.vendor) params.set("vendor", filters.vendor);
   if (filters.no_agent) params.set("no_agent", "true");
   if (filters.admin_ports) params.set("admin_ports", "true");
+  if (filters.exposure) params.set("exposure", "true");
+  if (filters.conflict) params.set("conflict", "true");
   const query = params.toString();
   return query ? `?${query}` : "";
 }
@@ -6651,6 +6750,12 @@ async function loadDiscoveryScans() {
   state.discovery.scans = data.scans || [];
   state.discovery.activeScanId = data.active_scan_id || null;
   renderDiscoveryScanHistory();
+}
+
+async function loadDiscoveryConflicts() {
+  const data = await api("/api/discovery/conflicts");
+  state.discovery.conflicts = data.conflicts || [];
+  state.discovery.conflictIds = new Set(data.conflict_device_ids || []);
 }
 
 async function loadDiscoveryAgents() {
@@ -6811,6 +6916,7 @@ function discoveryEventLabel(kind) {
       identity_conflict: "Identity conflict",
       went_dark: "Went dark",
       promoted: "Promoted",
+      wake_verified: "Wake verified",
     }[kind] || kind
   );
 }
@@ -6830,6 +6936,21 @@ function renderDiscoveryDrawer() {
   );
   clear(actions);
   if (state.permissions.operate) {
+    actions.append(
+      button("Promote", "button-primary button-small", () => openDiscoveryPromote(device)),
+    );
+    if (device.wake_target_id) {
+      actions.append(
+        button("Verify wake", "button-secondary button-small", () => verifyDiscoveryDevice(device)),
+      );
+    }
+    if ((detail.agent_candidates || []).length) {
+      actions.append(
+        button("Link agent", "button-secondary button-small", () =>
+          openDiscoveryPromote(device, "existing_agent"),
+        ),
+      );
+    }
     if (device.state !== "ignored") {
       actions.append(
         button("Ignore", "button-secondary button-small", () => updateDiscoveryState("ignored")),
@@ -6865,9 +6986,32 @@ function renderDiscoveryDrawer() {
         infoTile("First seen", localTime(device.first_seen)),
         infoTile("Last seen", localTime(device.last_seen)),
         infoTile("Randomized MAC", device.mac_randomized ? "yes" : "no"),
+        infoTile("Wake status", device.wake_status || "not verified"),
+        infoTile("Wake verified", device.wake_verified_at ? localTime(device.wake_verified_at) : "never"),
       ),
     ),
   );
+
+  if ((detail.conflicts || []).length) {
+    const conflictList = h("div", { class: "list-stack" });
+    for (const conflict of detail.conflicts) {
+      conflictList.append(
+        h(
+          "div",
+          { class: "list-row" },
+          h(
+            "div",
+            { class: "list-row-main" },
+            h("strong", {}, conflict.type.replaceAll("_", " ")),
+            h("small", {}, conflict.key),
+            h("small", {}, JSON.stringify(conflict.detail || {})),
+          ),
+          statusPill("conflict", "critical"),
+        ),
+      );
+    }
+    body.append(section("Conflicts", "Identity evidence", conflictList));
+  }
 
   const evidence = device.evidence || {};
   body.append(
@@ -6956,6 +7100,8 @@ function renderDiscoveryDrawer() {
         ),
         infoTile("Wake target", detail.wake_target?.name || device.wake_target_id || "not linked"),
         infoTile("Wake MAC", detail.wake_target?.mac || "—"),
+        infoTile("Wake status", device.wake_status || "not verified"),
+        infoTile("Last wake check", device.wake_verified_at ? localTime(device.wake_verified_at) : "never"),
       ),
     ),
   );
@@ -7003,6 +7149,307 @@ function renderDiscoveryDrawer() {
     }
   });
   body.append(section("Operator metadata", "Tags and notes", form));
+}
+
+function exportDiscovery(format) {
+  if (!state.permissions.admin) return;
+  const query = discoveryFilterQuery();
+  const suffix = query ? `&${query.slice(1)}` : "";
+  window.location.href = `/api/discovery/export?format=${encodeURIComponent(format)}${suffix}`;
+}
+
+async function refreshDiscoveryDetail(deviceId) {
+  try {
+    const detail = await api(`/api/discovery/devices/${deviceId}`);
+    state.discovery.detail = detail;
+    renderDiscoveryDrawer();
+  } catch (_error) {
+    closeDiscoveryDrawer();
+  }
+}
+
+async function verifyDiscoveryDevice(device) {
+  if (!state.permissions.operate) return;
+  try {
+    const data = await api(`/api/discovery/devices/${device.id}/verify`, {
+      method: "POST",
+      body: {},
+    });
+    state.discovery.detail = {
+      ...(state.discovery.detail || {}),
+      device: data.device,
+    };
+    renderDiscoveryDrawer();
+    await loadDiscoveryDevices();
+    await loadDiscoveryConflicts();
+    toast(`Wake verification: ${data.verification.status}.`);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function closeDiscoveryPromote() {
+  const dialog = $("discovery-promote-dialog");
+  if (dialog?.open) dialog.close();
+  clear($("discovery-promote-body"));
+  clear($("discovery-promote-actions"));
+  setText("discovery-promote-error", "");
+  state.discovery.promotion = null;
+  if (state.discovery.promoteTrigger && typeof state.discovery.promoteTrigger.focus === "function") {
+    state.discovery.promoteTrigger.focus();
+  }
+  state.discovery.promoteTrigger = null;
+}
+
+function openDiscoveryPromote(device, initialTarget = "wake_target") {
+  const dialog = $("discovery-promote-dialog");
+  if (!dialog) return;
+  const target = !device.mac && initialTarget === "wake_target" ? "linux_agent" : initialTarget;
+  state.discovery.promoteTrigger = document.activeElement;
+  state.discovery.promotion = { device, target };
+  renderDiscoveryPromote();
+  dialog.showModal();
+  const first = $("discovery-promote-body").querySelector("select, input, button");
+  if (first) first.focus();
+}
+
+function renderDiscoveryPromote() {
+  const promotion = state.discovery.promotion;
+  const body = $("discovery-promote-body");
+  const actions = $("discovery-promote-actions");
+  if (!promotion || !body || !actions) return;
+  const device = promotion.device;
+  const candidates = (state.discovery.detail?.agent_candidates || []).filter(
+    (agent) => agent.id,
+  );
+  clear(body);
+  clear(actions);
+  setText("discovery-promote-error", "");
+  setText("discovery-promote-title", `Promote ${discoveryDeviceName(device)}`);
+
+  const targetSelect = h(
+    "select",
+    { name: "target", id: "discovery-promote-target" },
+    h(
+      "option",
+      { value: "wake_target", selected: promotion.target === "wake_target", disabled: !device.mac },
+      "Wake target",
+    ),
+    h(
+      "option",
+      { value: "linux_agent", selected: promotion.target === "linux_agent" },
+      "Linux agent install",
+    ),
+    h(
+      "option",
+      { value: "windows_agent", selected: promotion.target === "windows_agent" },
+      "Windows agent install",
+    ),
+    h(
+      "option",
+      {
+        value: "existing_agent",
+        selected: promotion.target === "existing_agent",
+        disabled: !candidates.length,
+      },
+      "Link an enrolled agent",
+    ),
+  );
+  const form = h("form", { class: "form-stack", id: "discovery-promote-form" });
+  const fields = h("div", { class: "form-stack" });
+  form.append(
+    h("label", { class: "field" }, h("span", {}, "Onboarding path"), targetSelect),
+    fields,
+    h("p", { class: "form-error", id: "discovery-promote-form-error", role: "alert" }),
+  );
+
+  const submitButton = h(
+    "button",
+    { class: "button button-primary", type: "button", onClick: () => submitDiscoveryPromotion(form) },
+    "Continue",
+  );
+  const renderFields = () => {
+    const target = targetSelect.value;
+    promotion.target = target;
+    submitButton.textContent =
+      target === "wake_target"
+        ? "Create wake target"
+        : target === "existing_agent"
+          ? "Link agent"
+          : "Generate install command";
+    clear(fields);
+    if (target === "wake_target") {
+      fields.append(
+        h("label", { class: "field" }, h("span", {}, "Wake target name"), h("input", { name: "name", maxlength: "120", value: device.hostname || device.ip || "" })),
+        h("label", { class: "field" }, h("span", {}, "Broadcast address"), h("input", { name: "broadcast", maxlength: "64", value: "255.255.255.255" })),
+        h("label", { class: "field" }, h("span", {}, "UDP port"), h("input", { name: "port", type: "number", min: "1", max: "65535", value: "9" })),
+        h("p", { class: "form-hint" }, device.mac_randomized ? "This MAC looks randomized; WoL may not work after reboot." : `Uses the observed MAC ${device.mac}.`),
+      );
+    } else if (target === "existing_agent") {
+      fields.append(
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, "Enrolled agent"),
+          h(
+            "select",
+            { name: "agent_id" },
+            ...candidates.map((agent) =>
+              h("option", { value: agent.id }, `${agent.name} · ${agent.mac || "no MAC"}`),
+            ),
+          ),
+        ),
+        h("p", { class: "form-hint" }, "The discovered MAC must match the enrolled agent MAC."),
+      );
+    } else {
+      const windows = target === "windows_agent";
+      fields.append(
+        h("label", { class: "field" }, h("span", {}, "Agent name"), h("input", { name: "name", maxlength: "120", value: device.hostname || device.ip || "" })),
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, "Token lifetime"),
+          h(
+            "select",
+            { name: "expires_minutes" },
+            h("option", { value: "30" }, "30 minutes"),
+            h("option", { value: "60" }, "1 hour"),
+            h("option", { value: "240" }, "4 hours"),
+            h("option", { value: "1440" }, "24 hours"),
+          ),
+        ),
+        h(
+          "p",
+          { class: "form-hint" },
+          windows
+            ? "Manual elevated PowerShell only. Sextant does not implement remote Windows installation."
+            : "Run the command as root on the target after installing the agent package.",
+        ),
+        windows
+          ? h(
+              "p",
+              { class: "form-hint" },
+              h(
+                "a",
+                {
+                  href: "https://github.com/JugglerMaster/Sextant/blob/main/docs/WINDOWS_REMOTE_INSTALL.md",
+                  target: "_blank",
+                  rel: "noopener",
+                },
+                "Read the Windows remote-install plan",
+              ),
+            )
+          : null,
+        h(
+          "p",
+          { class: "form-hint" },
+          "The one-time token is shown only in the response and is stored only as a hash.",
+        ),
+      );
+    }
+  };
+  targetSelect.addEventListener("change", renderFields);
+  renderFields();
+  body.append(form);
+  actions.append(
+    button("Cancel", "button-ghost", closeDiscoveryPromote),
+    submitButton,
+  );
+}
+
+async function submitDiscoveryPromotion(form) {
+  const promotion = state.discovery.promotion;
+  if (!promotion) return;
+  const values = new FormData(form);
+  const target = String(values.get("target") || promotion.target);
+  const body = { target };
+  if (target === "existing_agent") {
+    body.agent_id = String(values.get("agent_id") || "");
+  } else {
+    body.name = String(values.get("name") || "");
+    if (target === "wake_target") {
+      body.broadcast = String(values.get("broadcast") || "255.255.255.255");
+      body.port = Number(values.get("port") || 9);
+    } else {
+      body.expires_minutes = Number(values.get("expires_minutes") || 30);
+    }
+  }
+  setText("discovery-promote-error", "");
+  setText("discovery-promote-form-error", "");
+  try {
+    const result = await api(`/api/discovery/devices/${promotion.device.id}/promote`, {
+      method: "POST",
+      body,
+    });
+    if (result.enrollment) {
+      const enrollment = { ...result.enrollment };
+      delete enrollment.token;
+      renderDiscoveryPromotionResult(enrollment);
+    } else {
+      closeDiscoveryPromote();
+      await loadDiscoveryDevices();
+      await loadDiscoveryConflicts();
+      await refreshDiscoveryDetail(promotion.device.id);
+      toast(
+        result.wake_target
+          ? result.duplicate
+            ? "Existing wake target linked."
+            : "Wake target created."
+          : "Agent linked.",
+      );
+    }
+  } catch (error) {
+    setText("discovery-promote-form-error", error.message);
+  }
+}
+
+function renderDiscoveryPromotionResult(enrollment) {
+  const body = $("discovery-promote-body");
+  const actions = $("discovery-promote-actions");
+  if (!body || !actions) return;
+  clear(body);
+  clear(actions);
+  setText("discovery-promote-error", "");
+  const code = h("code", { class: "code-block" }, enrollment.install_command);
+  body.append(
+    h(
+      "div",
+      { class: "callout" },
+      h("p", { class: "eyebrow" }, "Shown once"),
+      h("p", { class: "form-hint" }, `Use this command on ${enrollment.address || "the target host"}. It expires at ${localTime(enrollment.expires_at)}.`),
+      code,
+      h(
+        "div",
+        { class: "section-toolbar" },
+        h(
+          "button",
+          {
+            class: "button button-secondary button-small",
+            type: "button",
+            onClick: async () => {
+              if (await copyText(enrollment.install_command)) toast("Install command copied.");
+              else toast("Could not copy. Select the command manually.", "warn");
+            },
+          },
+          "Copy command",
+        ),
+      ),
+      h("p", { class: "eyebrow" }, "Prerequisites"),
+      h("ul", { class: "feature-list" }, ...(enrollment.prerequisites || []).map((item) => h("li", {}, item))),
+      enrollment.windows_plan
+        ? h(
+            "p",
+            { class: "form-hint" },
+            h(
+              "a",
+              { href: enrollment.windows_plan, target: "_blank", rel: "noopener" },
+              "Windows remote-install plan",
+            ),
+          )
+        : null,
+    ),
+  );
+  actions.append(button("Close", "button-ghost", closeDiscoveryPromote));
 }
 
 async function openDiscoveryDevice(deviceId) {
@@ -7221,6 +7668,15 @@ function wireEvents() {
   document.querySelectorAll("[data-close-discovery-drawer]").forEach((el) => {
     el.addEventListener("click", closeDiscoveryDrawer);
   });
+  $("discovery-promote-dialog")?.addEventListener("close", () => {
+    clear($("discovery-promote-body"));
+    clear($("discovery-promote-actions"));
+    setText("discovery-promote-error", "");
+    state.discovery.promotion = null;
+    const trigger = state.discovery.promoteTrigger;
+    state.discovery.promoteTrigger = null;
+    if (trigger && typeof trigger.focus === "function") trigger.focus();
+  });
   const discoveryFilters = {
     "discovery-filter-state": "state",
     "discovery-filter-type": "type",
@@ -7241,8 +7697,27 @@ function wireEvents() {
     state.discovery.filters.admin_ports = event.target.checked;
     loadDiscoveryDevices().catch((error) => toast(error.message, "error"));
   });
+  $("discovery-filter-exposure")?.addEventListener("change", (event) => {
+    state.discovery.filters.exposure = event.target.checked;
+    loadDiscoveryDevices().catch((error) => toast(error.message, "error"));
+  });
+  $("discovery-filter-conflict")?.addEventListener("change", (event) => {
+    state.discovery.filters.conflict = event.target.checked;
+    loadDiscoveryDevices().catch((error) => toast(error.message, "error"));
+  });
+  $("discovery-export-csv")?.addEventListener("click", () => exportDiscovery("csv"));
+  $("discovery-export-json")?.addEventListener("click", () => exportDiscovery("json"));
   $("discovery-filter-clear")?.addEventListener("click", () => {
-    state.discovery.filters = { state: "", type: "", segment: "", vendor: "", no_agent: false, admin_ports: false };
+    state.discovery.filters = {
+      state: "",
+      type: "",
+      segment: "",
+      vendor: "",
+      no_agent: false,
+      admin_ports: false,
+      exposure: false,
+      conflict: false,
+    };
     renderDiscoveryFilters();
     loadDiscoveryDevices().catch((error) => toast(error.message, "error"));
   });

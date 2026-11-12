@@ -600,7 +600,10 @@ const discoveryDevices = [
     evidence: { methods: ["neigh", "dns", "oui", "ssdp"], neighbor: true, reverse_dns: true, ssdp: false, tcp: true },
     state: "new",
     agent_id: null,
-    wake_target_id: null,
+    wake_target_id: "wol_dev",
+    wake_status: "sent",
+    wake_verified_at: "2026-11-06T07:58:00Z",
+    identity_conflict: true,
     tags: ["office"],
     notes: "",
     mac_randomized: false,
@@ -626,6 +629,9 @@ const discoveryDevices = [
     state: "known",
     agent_id: "agt_demo",
     wake_target_id: null,
+    wake_status: "woke",
+    wake_verified_at: "2026-11-06T07:59:00Z",
+    identity_conflict: false,
     tags: [],
     notes: "VM host",
     mac_randomized: false,
@@ -634,18 +640,44 @@ const discoveryDevices = [
 const discoverySummary = {
   total: 2,
   new: 1,
+  new_count: 1,
   states: { new: 1, known: 1, ignored: 0, promoted: 0 },
   types: [
     { type: "printer", count: 1 },
     { type: "hypervisor", count: 1 },
   ],
-  segments: [{ segment: "192.168.1.0/24", count: 2 }],
+  segments: [
+    {
+      segment: "192.168.1.0/24",
+      count: 2,
+      new: 1,
+      managed: 1,
+      unmanaged: 1,
+      exposure: 1,
+      gateway_hint: "192.168.1.1",
+      gateway_source: "lowest host",
+    },
+  ],
   vendors: [
     { vendor: "Raspberry Pi Foundation", count: 1 },
     { vendor: "VMware", count: 1 },
   ],
   no_agent: 1,
+  managed: 1,
+  unmanaged: 1,
+  exposure: 1,
+  conflicts: 1,
+  conflict_device_ids: ["dev_printer"],
 };
+const discoveryConflicts = [
+  {
+    type: "ip_multiple_macs",
+    key: "192.168.1.40",
+    device_ids: ["dev_printer"],
+    devices: [discoveryDevices[0]],
+    detail: { ip: "192.168.1.40", macs: ["b8:27:eb:11:22:33", "aa:bb:cc:dd:ee:ff"] },
+  },
+];
 const discoveryEvents = [
   { id: 2, at: "2026-11-06T07:50:00Z", device_id: "dev_printer", kind: "new_port", detail: { port: 631 } },
   { id: 1, at: "2026-11-06T07:00:00Z", device_id: "dev_printer", kind: "new_device", detail: { ip: "192.168.1.40" } },
@@ -744,6 +776,12 @@ function createApi(session) {
         },
       };
     }
+    if (key === "/api/discovery/conflicts") {
+      return {
+        status: 200,
+        body: { conflicts: discoveryConflicts, conflict_device_ids: ["dev_printer"], total: discoveryConflicts.length },
+      };
+    }
     if (key === "/api/discovery/devices") {
       let filtered = [...discoveryDeviceState];
       const state = url.searchParams.get("state") || "";
@@ -759,8 +797,18 @@ function createApi(session) {
       }
       if (url.searchParams.get("admin_ports") === "true") {
         filtered = filtered.filter((device) =>
-          device.open_ports.some((port) => [22, 3389, 5900, 5985, 5986].includes(port)),
+          device.open_ports.some((port) => [22, 3389, 5900, 5985, 5986, 8006].includes(port)),
         );
+      }
+      if (url.searchParams.get("exposure") === "true") {
+        filtered = filtered.filter(
+          (device) =>
+            !device.agent_id &&
+            device.open_ports.some((port) => [22, 3389, 5900, 5985, 5986, 8006].includes(port)),
+        );
+      }
+      if (url.searchParams.get("conflict") === "true") {
+        filtered = filtered.filter((device) => device.identity_conflict);
       }
       return {
         status: 200,
@@ -778,6 +826,8 @@ function createApi(session) {
               events: id === "dev_printer" ? discoveryEvents : [],
               agent: device.agent_id ? demoAgent : null,
               wake_target: null,
+              conflicts: id === "dev_printer" ? discoveryConflicts : [],
+              agent_candidates: [],
             },
           }
         : { status: 404, body: { detail: "Discovered device not found." } };
@@ -801,6 +851,81 @@ function createApi(session) {
       const index = discoveryDeviceState.findIndex((item) => item.id === id);
       if (index >= 0) discoveryDeviceState.splice(index, 1);
       return { status: 204, body: null };
+    }
+    if (method === "POST" && /^\/api\/discovery\/devices\/[^/]+\/(promote|wake-target|link-agent|verify)$/.test(key)) {
+      const parts = key.split("/");
+      const id = parts[4];
+      const action = parts[5];
+      const index = discoveryDeviceState.findIndex((item) => item.id === id);
+      if (index < 0) return { status: 404, body: { detail: "Discovered device not found." } };
+      const device = discoveryDeviceState[index];
+      if (action === "verify") {
+        device.wake_status = "woke";
+        device.wake_verified_at = "2026-11-06T08:06:00Z";
+        return {
+          status: 200,
+          body: {
+            device,
+            verification: { reachable: true, method: "tcp", status: "woke", open_ports: [22], checked_at: "2026-11-06T08:06:00Z" },
+          },
+        };
+      }
+      if (action === "wake-target" || body?.target === "wake_target") {
+        device.state = "promoted";
+        device.wake_target_id = "wol_dev";
+        return {
+          status: 200,
+          body: {
+            device,
+            wake_target: {
+              id: "wol_dev",
+              name: body?.name || device.hostname,
+              mac: device.mac,
+              ip: device.ip,
+              broadcast: body?.broadcast || "255.255.255.255",
+              port: body?.port || 9,
+              created_at: "2026-11-06T08:06:00Z",
+              last_woken_at: null,
+            },
+            duplicate: false,
+          },
+        };
+      }
+      if (action === "link-agent") {
+        device.state = "promoted";
+        device.agent_id = body?.agent_id || "agt_demo";
+        return { status: 200, body: { device, agent: demoAgent } };
+      }
+      const osName = body?.target === "windows_agent" ? "windows" : "linux";
+      device.state = "promoted";
+      const command =
+        osName === "windows"
+          ? "# Run in an elevated PowerShell on 192.168.1.40.\n& 'C:\\ProgramData\\SextantAgent\\current\\Scripts\\sextant-agent.exe' enroll --server 'https://ops.example.test' --token 'sextant_enroll_TOPSECRET' --name 'printer.lan'"
+          : "# Run on 192.168.1.40 as root.\nsudo /opt/sextant-agent/.venv/bin/sextant-agent enroll --server 'https://ops.example.test' --token 'sextant_enroll_TOPSECRET' --name 'printer.lan'";
+      return {
+        status: 200,
+        body: {
+          device,
+          enrollment: {
+            id: "enr_promote",
+            token: "sextant_enroll_TOPSECRET",
+            label: `discovery:${id}`,
+            os: osName,
+            name: body?.name || device.hostname,
+            address: device.ip,
+            expires_at: "2026-11-06T08:36:00Z",
+            install_command: command,
+            prerequisites:
+              osName === "windows"
+                ? ["Run in an elevated PowerShell on the target host.", "Manual Windows install only; remote Windows install is not implemented."]
+                : ["Run as root on the target host."],
+            windows_plan:
+              osName === "windows"
+                ? "https://github.com/JugglerMaster/Sextant/blob/main/docs/WINDOWS_REMOTE_INSTALL.md"
+                : "",
+          },
+        },
+      };
     }
     if (key === "/api/discovery/scans") {
       return {

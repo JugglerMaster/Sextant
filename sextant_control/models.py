@@ -819,6 +819,28 @@ class DiscoverySettingsIn(BaseModel):
     acknowledgement: str = Field(default="", max_length=500)
 
 
+class DiscoveryWakeTargetIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(default="", max_length=120)
+    broadcast: str = Field(default="255.255.255.255", max_length=64)
+    port: int = Field(default=9, ge=1, le=65535)
+
+
+class DiscoveryLinkAgentIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_id: str = Field(min_length=1, max_length=64)
+
+
+class DiscoveryPromoteIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target: Literal["wake_target", "linux_agent", "windows_agent", "existing_agent"]
+    name: str = Field(default="", max_length=120)
+    broadcast: str = Field(default="255.255.255.255", max_length=64)
+    port: int = Field(default=9, ge=1, le=65535)
+    agent_id: str = Field(default="", max_length=64)
+    expires_minutes: int | None = Field(default=None, ge=5, le=1440)
+
+
 class DiscoveryReportDeviceIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ip: str = Field(min_length=1, max_length=64)

@@ -180,6 +180,23 @@ Discovery is a network-scanning capability and is therefore **off by default**.
   device IPs, more than 512 devices, oversized evidence objects, and bodies over
   1 MB. Merging is atomic; report failure/cancellation marks the scan failed or
   cancelled. A late report after cancellation is rejected.
+- Discovery CSV/JSON export is admin-only, audited as `discovery.exported`, and
+  capped by `SEXTANT_DISCOVERY_EXPORT_LIMIT`. The export inherits the active
+  filters and does not add device data that the admin cannot otherwise read.
+- Wake verification uses only the neighbour table and opt-in TCP connect checks.
+  It never uses ICMP, raw sockets, packet capture, or credentials. Only private
+  device addresses are accepted.
+- Promotion requires operator+ and CSRF. Wake-target creation reuses a target for
+  the same MAC. Existing-agent linking requires matching MACs. Install promotion
+  generates a single-use enrollment token, stores only its SHA-256 hash, returns
+  the token once in that response, and never puts it in audit detail, discovery
+  events, logs, notifications, or subsequent device reads.
+- Windows promotion is a manual elevated PowerShell command. The server does not
+  accept or store Windows credentials. The planned credential-based remote
+  installer is documented separately and is not implemented; see
+  [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md).
+- Promotion does not email, notify, or log the generated install command. The UI
+  clears the command from the promotion dialog when it closes.
 
 ## Docker inventory and actions (D1–D5)
 

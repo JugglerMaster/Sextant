@@ -267,6 +267,11 @@
 
         <div class="stats-grid" id="discovery-summary" hidden></div>
 
+        <article class="panel" id="discovery-segments-panel" hidden>
+          <div class="panel-head"><div><p class="eyebrow">Topology</p><h2>Segments</h2></div></div>
+          <div id="discovery-segment-list" class="list-stack"></div>
+        </article>
+
         <div class="panel-grid">
           <article class="panel" id="discovery-scan-panel" hidden>
             <div class="panel-head">
@@ -310,7 +315,11 @@
               <label class="field"><span>Vendor</span><select id="discovery-filter-vendor"><option value="">All vendors</option></select></label>
               <label class="checkbox-row"><input type="checkbox" id="discovery-filter-no-agent"><span>No agent</span></label>
               <label class="checkbox-row"><input type="checkbox" id="discovery-filter-admin-ports"><span>Admin ports open</span></label>
+              <label class="checkbox-row"><input type="checkbox" id="discovery-filter-exposure"><span>Exposure only</span></label>
+              <label class="checkbox-row"><input type="checkbox" id="discovery-filter-conflict"><span>Identity conflicts</span></label>
               <button class="button button-ghost button-small" id="discovery-filter-clear" type="button">Clear filters</button>
+              <button class="button button-secondary button-small nav-admin" id="discovery-export-csv" type="button">Export CSV</button>
+              <button class="button button-secondary button-small nav-admin" id="discovery-export-json" type="button">Export JSON</button>
             </div>
             <div class="table-wrap">
               <table class="data-table discovery-table">
@@ -322,6 +331,7 @@
                     <th scope="col">Hostname</th>
                     <th scope="col">Type</th>
                     <th scope="col">Open ports</th>
+                    <th scope="col">Wake</th>
                     <th scope="col">Last seen</th>
                     <th scope="col">Agent</th>
                     <th scope="col">Tags</th>
@@ -748,6 +758,14 @@
     <div id="docker-dialog-body"></div>
     <p class="form-error" id="docker-dialog-error" role="alert"></p>
     <div class="dialog-actions" id="docker-dialog-actions"></div>
+  </dialog>
+
+  <dialog id="discovery-promote-dialog" class="dialog dialog-wide" aria-labelledby="discovery-promote-title">
+    <p class="eyebrow">Onboarding</p>
+    <h2 id="discovery-promote-title">Promote discovered device</h2>
+    <div id="discovery-promote-body"></div>
+    <p class="form-error" id="discovery-promote-error" role="alert"></p>
+    <div class="dialog-actions" id="discovery-promote-actions"></div>
   </dialog>
 
   <dialog id="confirm-dialog" class="dialog" aria-labelledby="confirm-title">

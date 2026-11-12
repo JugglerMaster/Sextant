@@ -2,7 +2,7 @@
 
 This document tracks work beyond the initial build and the first hardening pass. It is intentionally separate from the implementation docs so future changes can be prioritized without rewriting the deployment/security guidance.
 
-Related plans: [Discovery](DISCOVERY.md) (D1–D3 implemented; D4–D6 proposed), [Docker management](DOCKER_MANAGEMENT.md) (D1–D5 implemented, Linux-only), [Notifications](NOTIFICATIONS.md) (proposed, not implemented), [Package management](PACKAGE_MANAGEMENT.md), [Package store](PACKAGE_STORE.md), [Agent self-update](SELF_UPDATE.md), [Server update](SERVER_UPDATE.md), [Agent profiles](PROFILES.md), [UI status](UI.md), and [Code review](CODE_REVIEW.md) (remediation status).
+Related plans: [Discovery](DISCOVERY.md) (D1–D5 implemented; D6 proposed), [Docker management](DOCKER_MANAGEMENT.md) (D1–D5 implemented, Linux-only), [Notifications](NOTIFICATIONS.md) (proposed, not implemented), [Package management](PACKAGE_MANAGEMENT.md), [Package store](PACKAGE_STORE.md), [Agent self-update](SELF_UPDATE.md), [Server update](SERVER_UPDATE.md), [Agent profiles](PROFILES.md), [UI status](UI.md), and [Code review](CODE_REVIEW.md) (remediation status).
 
 ## Current state
 
@@ -31,7 +31,7 @@ Related plans: [Discovery](DISCOVERY.md) (D1–D3 implemented; D4–D6 proposed)
 - [x] Read-only package inventory and per-device apt/dnf/winget/choco desired-state sync (API + device Packages tab; rule editor pending).
 - [x] Server-managed agent profiles (`workstation`/`server`/custom) with installer selection, heartbeat sync, module flags, cadence, dashboard editor, admin reassignment, tag assignment, true package inventory delta, and weekly full reconciliation.
 - [x] Linux remote install over key-based SSH with prerequisite checks, one-time enrollment, job log, and one-at-a-time jobs.
-- [x] Discovery D1–D3: default-off, audited acknowledgement, CIDR allowlist/exclude validation, neighbour/PTR/OUI/SSDP, opt-in TCP/banner/TLS fingerprinting, classification, MAC/IP/hostname merge, deduplicated change events, a cancellable background scan worker, read/write API, the Discovery page, and opt-in agent-relayed VLAN scans over the existing outbound command path with local/profile/policy/server gates. Analysis/export, promotion, and integrations remain D4–D6.
+- [x] Discovery D1–D5: default-off, audited acknowledgement, CIDR allowlist/exclude validation, neighbour/PTR/OUI/SSDP, opt-in TCP/banner/TLS fingerprinting, classification, MAC/IP/hostname merge, deduplicated change events, a cancellable background scan worker, read/write API, the Discovery page, opt-in agent-relayed VLAN scans, exposure/conflict/segment analysis, bounded CSV/JSON export, wake verification, wake-target/install/existing-agent promotion, and the Discovery onboarding dialog. DHCP/AP/hypervisor/SNMP integrations and the credential-based Windows remote installer plan remain D6/future.
 - [x] Package desired-state rule editor, inventory filter, heartbeat/inventory freshness labels, interactive tables, fleet filters and per-user server-side saved views, alert center with acknowledge/snooze and recurrence-aware incidents, cadence-aware stale badges, gap-aware 24h/7d detail charts with a persistent event timeline and What changed summary, batch fleet actions, light/dark theme, command palette, Playwright/axe browser tests, change-driven SSE, and incremental command stdout streaming ([UI plan](UI.md)).
 - [ ] Remaining UI refinements: profile badges and a high-contrast/zoom accessibility pass.
 

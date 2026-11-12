@@ -42,7 +42,7 @@ from .oui import is_locally_administered, lookup_vendor, normalize_mac
 logger = logging.getLogger("sextant_control.discovery")
 
 ACKNOWLEDGEMENT = "I am authorized to scan these networks"
-ADMIN_PORTS = frozenset({"22", "3389", "5900", "5985", "5986"})
+ADMIN_PORTS = frozenset({"22", "3389", "5900", "5985", "5986", "8006"})
 SSH_PORTS = frozenset({22})
 HTTP_PORTS = frozenset({80, 631, 8080, 32400})
 TLS_PORTS = frozenset({443, 8006, 5986, 8443})
@@ -892,6 +892,8 @@ def _device_dict(row: Any) -> dict[str, Any]:
         "tags": loads(row["tags"], []),
         "notes": row["notes"],
         "mac_randomized": bool(row["mac_randomized"]),
+        "wake_status": row["wake_status"] if "wake_status" in row.keys() else "",
+        "wake_verified_at": row["wake_verified_at"] if "wake_verified_at" in row.keys() else None,
     }
 
 
@@ -1193,6 +1195,147 @@ def merge_observations(
                 )
             )
     return merged
+
+
+def detect_identity_conflicts(
+    database: Database, device_id: str | None = None
+) -> list[dict[str, Any]]:
+    """Return current MAC/IP/hostname conflicts and recent conflict events."""
+    conflicts: list[dict[str, Any]] = []
+    with database.connection() as conn:
+        rows = conn.execute("SELECT * FROM discovered_devices").fetchall()
+        event_rows = conn.execute(
+            """SELECT * FROM discovery_events WHERE kind = 'identity_conflict'
+               ORDER BY id DESC LIMIT 200"""
+        ).fetchall()
+
+    by_mac: dict[str, list[Any]] = {}
+    by_ip: dict[str, list[Any]] = {}
+    by_hostname: dict[str, list[Any]] = {}
+    for row in rows:
+        if row["mac"]:
+            by_mac.setdefault(str(row["mac"]).lower(), []).append(row)
+        if row["ip"]:
+            by_ip.setdefault(str(row["ip"]), []).append(row)
+        if row["hostname"]:
+            by_hostname.setdefault(str(row["hostname"]).lower(), []).append(row)
+
+    grouped_ids: set[str] = set()
+
+    def add_conflict(kind: str, key: str, group: list[Any], **detail: Any) -> None:
+        ids = sorted({str(row["id"]) for row in group})
+        grouped_ids.update(ids)
+        conflicts.append(
+            {
+                "type": kind,
+                "key": key,
+                "device_ids": ids,
+                "devices": [_device_dict(row) for row in group],
+                "detail": detail,
+            }
+        )
+
+    for mac, group in by_mac.items():
+        ips = sorted({str(row["ip"]) for row in group if row["ip"]})
+        if len(ips) > 1:
+            add_conflict("mac_multiple_ips", mac, group, mac=mac, ips=ips)
+    for ip, group in by_ip.items():
+        macs = sorted({str(row["mac"]).lower() for row in group if row["mac"]})
+        if len(macs) > 1:
+            add_conflict("ip_multiple_macs", ip, group, ip=ip, macs=macs)
+    for hostname, group in by_hostname.items():
+        macs = sorted({str(row["mac"]).lower() for row in group if row["mac"]})
+        vendors = sorted({str(row["vendor"]) for row in group if row["vendor"]})
+        if len(macs) > 1 or len(vendors) > 1:
+            add_conflict(
+                "hostname_multiple_identities",
+                hostname,
+                group,
+                hostname=hostname,
+                macs=macs,
+                vendors=vendors,
+            )
+    for event in event_rows:
+        event_device = str(event["device_id"])
+        if event_device in grouped_ids:
+            continue
+        detail = loads(event["detail"], {})
+        conflicts.append(
+            {
+                "type": "event",
+                "key": event_device,
+                "device_ids": [event_device],
+                "devices": [],
+                "at": event["at"],
+                "detail": detail if isinstance(detail, dict) else {},
+            }
+        )
+    if device_id:
+        conflicts = [
+            conflict
+            for conflict in conflicts
+            if device_id in conflict.get("device_ids", [])
+        ]
+    conflicts.sort(key=lambda item: (item["type"], item["key"]))
+    return conflicts
+
+
+def verify_reachability(
+    ip: str,
+    ports: Iterable[int] = (),
+    *,
+    mac: str = "",
+    timeout_ms: int = 600,
+    concurrency: int = 8,
+    neighbor_reader: Callable[[], list[dict[str, str]]] | None = None,
+    prober: Callable[..., dict[str, dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Bounded TCP/neighbour reachability check used by wake verification."""
+    address = _clean_ip(ip)
+    if not address:
+        raise DiscoveryError("A valid device IP address is required.")
+    parsed = ipaddress.ip_address(address)
+    if (
+        parsed.is_loopback
+        or parsed.is_link_local
+        or parsed.is_multicast
+        or parsed.is_unspecified
+        or parsed.is_global
+        or not parsed.is_private
+    ):
+        raise DiscoveryError("Wake verification only targets private device addresses.")
+    reader = neighbor_reader or read_neighbor_table
+    entries = reader()
+    neighbor_match = False
+    normalized_mac = normalize_mac(mac)
+    for entry in entries:
+        if str(entry.get("ip", "")) == address:
+            neighbor_match = True
+            break
+        if normalized_mac and normalize_mac(entry.get("mac", "")) == normalized_mac:
+            neighbor_match = True
+            break
+    open_ports: list[int] = []
+    services: dict[str, Any] = {}
+    if ports:
+        probe = prober or probe_tcp_host
+        services = probe(
+            address,
+            list(ports),
+            timeout_seconds=max(0.1, int(timeout_ms) / 1000.0),
+            concurrency=max(1, min(8, int(concurrency))),
+        )
+        open_ports = sorted(int(port) for port in services)
+    reachable = neighbor_match or bool(open_ports)
+    method = "neighbor" if neighbor_match else ("tcp" if open_ports else "")
+    return {
+        "reachable": reachable,
+        "method": method,
+        "neighbor": neighbor_match,
+        "open_ports": open_ports,
+        "services": services,
+        "checked_at": utcnow_iso(),
+    }
 
 
 def record_went_dark(

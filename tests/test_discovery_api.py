@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from datetime import timedelta
@@ -742,3 +743,341 @@ def test_agent_discovery_profile_policy_sync_reaches_heartbeat(tmp_path):
         eligible = _eligible_agent(app, admin, name="sync-eligible")
         synced = heartbeat(admin, eligible)
         assert synced["policy"]["allow_discovery"] is True
+
+
+def _discovered(database, *, mac: str, ip: str, hostname: str = "", ports=None, type_hint: str = "") -> dict:
+    return merge_observation(
+        database,
+        DeviceObservation(
+            ip=ip,
+            mac=mac,
+            hostname=hostname,
+            segment="192.168.1.0/24",
+            open_ports=list(ports or []),
+            services={str(port): {"protocol": "tcp"} for port in (ports or [])},
+        ),
+    )
+
+
+def test_exposure_conflicts_and_segment_summary(tmp_path):
+    app = create_app(_settings(tmp_path))
+    database = app.state.db
+    exposed = _discovered(
+        database, mac="aa:bb:cc:dd:ee:10", ip="192.168.1.100", ports=[22, 8006]
+    )
+    _discovered(database, mac="aa:bb:cc:dd:ee:11", ip="192.168.1.100", ports=[80])
+    _discovered(
+        database,
+        mac="aa:bb:cc:dd:ee:12",
+        ip="192.168.1.101",
+        hostname="shared.lan",
+        ports=[80],
+    )
+    _discovered(
+        database,
+        mac="aa:bb:cc:dd:ee:13",
+        ip="192.168.1.102",
+        hostname="shared.lan",
+        ports=[80],
+    )
+    with TestClient(app) as client:
+        login(client)
+        exposure = client.get("/api/discovery/devices?exposure=true").json()
+        assert exposure["total"] == 1
+        assert exposure["devices"][0]["id"] == exposed["id"]
+        assert exposure["summary"]["exposure"] == 1
+        assert exposure["devices"][0]["identity_conflict"] is True
+
+        conflicts = client.get("/api/discovery/conflicts").json()
+        types = {item["type"] for item in conflicts["conflicts"]}
+        assert "ip_multiple_macs" in types
+        assert "hostname_multiple_identities" in types
+        assert conflicts["total"] >= 2
+
+        filtered = client.get("/api/discovery/devices?conflict=true").json()
+        assert filtered["total"] >= 2
+
+        detail = client.get(f"/api/discovery/devices/{exposed['id']}").json()
+        assert detail["conflicts"]
+        assert detail["device"]["identity_conflict"] is True
+
+        summary = exposure["summary"]
+        assert summary["segments"]
+        segment = summary["segments"][0]
+        assert segment["gateway_hint"]
+        assert segment["managed"] == 0
+        assert segment["unmanaged"] == 4
+        assert segment["exposure"] == 1
+
+
+def test_discovery_export_rbac_caps_and_audit(tmp_path):
+    app = create_app(_settings(tmp_path, export_limit=1))
+    database = app.state.db
+    _discovered(database, mac="aa:bb:cc:dd:ee:20", ip="192.168.1.110", ports=[22])
+    _discovered(database, mac="aa:bb:cc:dd:ee:21", ip="192.168.1.111", ports=[443])
+    with TestClient(app) as client:
+        assert client.get("/api/discovery/export?format=csv").status_code == 401
+        admin = login(client)
+        created = client.post(
+            "/api/users",
+            json={
+                "username": "viewer3",
+                "display_name": "Viewer",
+                "role": "viewer",
+                "password": ADMIN_PASSWORD,
+            },
+            headers=headers(admin),
+        )
+        assert created.status_code == 200
+        with TestClient(app) as viewer_client:
+            viewer = login(viewer_client, username="viewer3")
+            assert (
+                viewer_client.get(
+                    "/api/discovery/export?format=csv", headers=headers(viewer)
+                ).status_code
+                == 403
+            )
+
+        csv_response = client.get("/api/discovery/export?format=csv")
+        assert csv_response.status_code == 200
+        assert csv_response.headers["x-discovery-truncated"] == "true"
+        lines = [line for line in csv_response.text.splitlines() if line]
+        assert len(lines) == 2  # header + one capped row
+
+        json_response = client.get("/api/discovery/export?format=json&exposure=false")
+        assert json_response.status_code == 200
+        payload = json_response.json()
+        assert payload["returned"] == 1
+        assert payload["truncated"] is True
+        audit = client.get("/api/audit").json()["events"]
+        exported = [event for event in audit if event["action"] == "discovery.exported"]
+        assert exported and exported[0]["detail"]["rows"] == 1
+        assert exported[0]["detail"]["cap"] == 1
+
+
+def test_promote_wake_target_is_idempotent(tmp_path):
+    app = create_app(_settings(tmp_path))
+    database = app.state.db
+    device = _discovered(
+        database, mac="aa:bb:cc:dd:ee:30", ip="192.168.1.120", hostname="wake-me.lan"
+    )
+    with TestClient(app) as client:
+        admin = login(client)
+        first = client.post(
+            f"/api/discovery/devices/{device['id']}/wake-target",
+            json={"name": "Wake me", "broadcast": "255.255.255.255", "port": 9},
+            headers=headers(admin),
+        )
+        assert first.status_code == 200, first.text
+        result = first.json()
+        assert result["duplicate"] is False
+        assert result["wake_target"]["mac"].lower() == "aa:bb:cc:dd:ee:30"
+        assert result["device"]["state"] == "promoted"
+        assert result["device"]["wake_target_id"] == result["wake_target"]["id"]
+
+        second = client.post(
+            f"/api/discovery/devices/{device['id']}/promote",
+            json={"target": "wake_target", "name": "Duplicate"},
+            headers=headers(admin),
+        )
+        assert second.status_code == 200, second.text
+        assert second.json()["duplicate"] is True
+        assert second.json()["wake_target"]["id"] == result["wake_target"]["id"]
+        with database.connection() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) AS n FROM wake_targets WHERE mac = ? COLLATE NOCASE",
+                ("aa:bb:cc:dd:ee:30",),
+            ).fetchone()["n"]
+        assert count == 1
+        events = client.get(f"/api/discovery/devices/{device['id']}").json()["events"]
+        assert len([event for event in events if event["kind"] == "promoted"]) == 1
+        actions = {event["action"] for event in client.get("/api/audit").json()["events"]}
+        assert "discovery.device_promoted" in actions
+
+
+def test_promote_install_tokens_are_one_time_and_redacted(tmp_path):
+    app = create_app(_settings(tmp_path))
+    database = app.state.db
+    linux = _discovered(
+        database, mac="aa:bb:cc:dd:ee:40", ip="192.168.1.140", hostname="printer.lan"
+    )
+    windows = _discovered(
+        database, mac="aa:bb:cc:dd:ee:41", ip="192.168.1.141", hostname="studio-pc"
+    )
+    with TestClient(app) as client:
+        admin = login(client)
+        linux_response = client.post(
+            f"/api/discovery/devices/{linux['id']}/promote",
+            json={"target": "linux_agent", "name": "printer.lan", "expires_minutes": 30},
+            headers=headers(admin),
+        )
+        assert linux_response.status_code == 200, linux_response.text
+        enrollment = linux_response.json()["enrollment"]
+        token = enrollment["token"]
+        assert token.startswith("sextant_enroll_")
+        assert token in enrollment["install_command"]
+        assert "printer.lan" in enrollment["install_command"]
+        assert "192.168.1.140" in enrollment["install_command"]
+        assert linux_response.json()["device"]["state"] == "promoted"
+
+        windows_response = client.post(
+            f"/api/discovery/devices/{windows['id']}/promote",
+            json={"target": "windows_agent", "name": "studio-pc"},
+            headers=headers(admin),
+        )
+        assert windows_response.status_code == 200, windows_response.text
+        win_enrollment = windows_response.json()["enrollment"]
+        assert win_enrollment["os"] == "windows"
+        assert "PowerShell" in win_enrollment["install_command"]
+        assert "WINDOWS_REMOTE_INSTALL.md" in win_enrollment["windows_plan"]
+        assert any("Manual Windows install" in item for item in win_enrollment["prerequisites"])
+
+        audit_text = json.dumps(client.get("/api/audit").json())
+        tokens_text = json.dumps(client.get("/api/enrollment-tokens").json())
+        for secret in (token, win_enrollment["token"]):
+            assert secret not in audit_text
+            assert secret not in tokens_text
+        with database.connection() as conn:
+            row = conn.execute(
+                "SELECT token_hash FROM enrollment_tokens WHERE id = ?",
+                (enrollment["id"],),
+            ).fetchone()
+        assert row["token_hash"] != token
+
+
+def test_link_existing_agent_by_mac_and_conflict(tmp_path):
+    app = create_app(_settings(tmp_path))
+    database = app.state.db
+    device = _discovered(
+        database,
+        mac="AA:BB:CC:DD:EE:FF",
+        ip="192.168.1.150",
+        hostname="linked-box",
+    )
+    with TestClient(app) as client:
+        admin = login(client)
+        agent = enroll_agent(admin, hostname="linked-box")
+        detail = client.get(f"/api/discovery/devices/{device['id']}").json()
+        assert detail["agent_candidates"][0]["id"] == agent["agent_id"]
+        linked = client.post(
+            f"/api/discovery/devices/{device['id']}/link-agent",
+            json={"agent_id": agent["agent_id"]},
+            headers=headers(admin),
+        )
+        assert linked.status_code == 200, linked.text
+        assert linked.json()["device"]["agent_id"] == agent["agent_id"]
+        assert linked.json()["device"]["state"] == "promoted"
+        events = client.get(f"/api/discovery/devices/{device['id']}").json()["events"]
+        assert any(event["kind"] == "promoted" for event in events)
+
+        mismatch = _discovered(
+            database, mac="aa:bb:cc:dd:ee:51", ip="192.168.1.151", hostname="other"
+        )
+        denied = client.post(
+            f"/api/discovery/devices/{mismatch['id']}/link-agent",
+            json={"agent_id": agent["agent_id"]},
+            headers=headers(admin),
+        )
+        assert denied.status_code == 409
+
+
+def test_wake_verification_status_and_events(tmp_path, monkeypatch):
+    app = create_app(_settings(tmp_path))
+    database = app.state.db
+    device = _discovered(
+        database, mac="aa:bb:cc:dd:ee:60", ip="192.168.1.160", hostname="wake-check.lan"
+    )
+    monkeypatch.setattr(
+        "sextant_control.server.send_magic_packet",
+        lambda *args, **kwargs: 3,
+    )
+    with TestClient(app) as client:
+        admin = login(client)
+        _ack(admin)
+        target = client.post(
+            f"/api/discovery/devices/{device['id']}/wake-target",
+            json={"name": "Wake check"},
+            headers=headers(admin),
+        ).json()["wake_target"]
+        sent = client.post(
+            f"/api/wake-targets/{target['id']}/wake",
+            json={"packets": 3},
+            headers=headers(admin),
+        )
+        assert sent.status_code == 200
+        detail = client.get(f"/api/discovery/devices/{device['id']}").json()
+        assert detail["device"]["wake_status"] == "sent"
+
+        monkeypatch.setattr(
+            "sextant_control.server.verify_reachability",
+            lambda *args, **kwargs: {
+                "reachable": False,
+                "method": "",
+                "neighbor": False,
+                "open_ports": [],
+                "services": {},
+                "checked_at": "2026-11-12T09:00:00Z",
+            },
+        )
+        still_sent = client.post(
+            f"/api/discovery/devices/{device['id']}/verify",
+            json={},
+            headers=headers(admin),
+        )
+        assert still_sent.status_code == 200
+        assert still_sent.json()["verification"]["status"] == "sent"
+
+        monkeypatch.setattr(
+            "sextant_control.server.verify_reachability",
+            lambda *args, **kwargs: {
+                "reachable": True,
+                "method": "tcp",
+                "neighbor": False,
+                "open_ports": [443],
+                "services": {},
+                "checked_at": "2026-11-12T09:01:00Z",
+            },
+        )
+        woke = client.post(
+            f"/api/discovery/devices/{device['id']}/verify",
+            json={},
+            headers=headers(admin),
+        )
+        assert woke.status_code == 200
+        assert woke.json()["verification"]["status"] == "woke"
+        assert woke.json()["device"]["wake_status"] == "woke"
+        events = client.get(f"/api/discovery/devices/{device['id']}").json()["events"]
+        verified = [event for event in events if event["kind"] == "wake_verified"]
+        assert {event["detail"]["status"] for event in verified} >= {"sent", "woke"}
+        actions = {event["action"] for event in client.get("/api/audit").json()["events"]}
+        assert "discovery.wake_verified" in actions
+
+
+def test_promotion_and_verify_rbac(tmp_path):
+    app = create_app(_settings(tmp_path))
+    database = app.state.db
+    device = _discovered(
+        database, mac="aa:bb:cc:dd:ee:70", ip="192.168.1.170", hostname="rbac.lan"
+    )
+    with TestClient(app) as client:
+        admin = login(client)
+        created = client.post(
+            "/api/users",
+            json={
+                "username": "viewer4",
+                "display_name": "Viewer",
+                "role": "viewer",
+                "password": ADMIN_PASSWORD,
+            },
+            headers=headers(admin),
+        )
+        assert created.status_code == 200
+        with TestClient(app) as viewer_client:
+            viewer = login(viewer_client, username="viewer4")
+            for path, payload in (
+                (f"/api/discovery/devices/{device['id']}/wake-target", {"name": "x"}),
+                (f"/api/discovery/devices/{device['id']}/promote", {"target": "linux_agent"}),
+                (f"/api/discovery/devices/{device['id']}/verify", {}),
+            ):
+                response = viewer_client.post(path, json=payload, headers=headers(viewer))
+                assert response.status_code == 403

@@ -663,6 +663,8 @@ def discovered_device_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "tags": loads(row["tags"], []),
         "notes": row["notes"],
         "mac_randomized": bool(row["mac_randomized"]),
+        "wake_status": row["wake_status"] if "wake_status" in row.keys() else "",
+        "wake_verified_at": row["wake_verified_at"] if "wake_verified_at" in row.keys() else None,
     }
 
 

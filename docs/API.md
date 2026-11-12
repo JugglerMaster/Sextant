@@ -725,6 +725,103 @@ classification, linkage, and event deduplication as server scans.
 device. Cancelling a queued agent scan also cancels its queued command; a report
 that arrives after cancellation is rejected and the scan stays cancelled.
 
+## Discovery analysis, export, and promotion (D4–D5)
+
+### Exposure, conflicts, and segments
+
+`GET /api/discovery/devices?exposure=true` returns devices with an admin port
+(`22`, `3389`, `5900`, `5985`, `5986`, `8006`) open and no linked agent. The
+`summary` object includes `exposure`, `conflicts`, `managed`, `unmanaged`, and
+per-segment objects with `count`, `new`, `managed`, `unmanaged`, `exposure`,
+`gateway_hint`, and `gateway_source`.
+
+`GET /api/discovery/devices?conflict=true` filters to identity conflicts.
+`GET /api/discovery/conflicts[?device_id=…]` (viewer+) returns grouped
+`mac_multiple_ips`, `ip_multiple_macs`, `hostname_multiple_identities`, and
+event-derived conflicts. Device detail also returns `conflicts`,
+`agent_candidates`, and an `identity_conflict` flag.
+
+### Export
+
+`GET /api/discovery/export?format=csv|json` (admin, CSRF not needed for GET)
+accepts `state`, `segment`, `q`, `type`, `vendor`, `no_agent`,
+`admin_ports`, `exposure`, `conflict`, `mac`, and `limit`. It is audited as
+`discovery.exported` and returns at most `SEXTANT_DISCOVERY_EXPORT_LIMIT` rows.
+`X-Discovery-Truncated: true` indicates more matches exist. JSON includes
+`total`, `returned`, `truncated`, and `devices`.
+
+### Promotion
+
+All promotion routes require operator+ and CSRF. They set the device state to
+`promoted`, write a deduplicated `promoted` discovery event, and audit
+`discovery.device_promoted`. Ignored/deleted handling follows the normal 404/409
+rules; a device without a MAC cannot create a wake target.
+
+`POST /api/discovery/devices/{id}/wake-target`
+
+```json
+{"name": "Office PC", "broadcast": "255.255.255.255", "port": 9}
+```
+
+Creates a wake target from the observed MAC/IP or reuses an existing target for
+the same MAC, links `wake_target_id`, and returns `{device, wake_target,
+duplicate}`.
+
+`POST /api/discovery/devices/{id}/link-agent`
+
+```json
+{"agent_id": "agt_…"}
+```
+
+Links an already enrolled agent when the discovered MAC matches the agent MAC.
+A mismatch or a different existing link returns `409`.
+
+`POST /api/discovery/devices/{id}/promote`
+
+```json
+{"target": "linux_agent", "name": "printer.lan", "expires_minutes": 30}
+```
+
+`target` is `wake_target`, `linux_agent`, `windows_agent`, or `existing_agent`.
+`existing_agent` requires `agent_id`. Wake-target promotion accepts
+`name`/`broadcast`/`port`. Install promotion accepts `name`/`expires_minutes`
+(5–1440) and returns:
+
+```json
+{
+  "device": {},
+  "enrollment": {
+    "id": "enr_…",
+    "token": "sextant_enroll_…",
+    "os": "linux",
+    "name": "printer.lan",
+    "address": "192.168.1.40",
+    "expires_at": "2026-11-12T09:00:00Z",
+    "install_command": "sudo …",
+    "prerequisites": ["…"],
+    "windows_plan": ""
+  }
+}
+```
+
+The token is returned **only in this response** and is stored only as a SHA-256
+hash. It is not returned by the enrollment-token list, audit log, events, or
+subsequent device reads. The install command is prefilled with the discovered
+name and address. Windows returns a manual elevated PowerShell command with a
+link to [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md); remote Windows
+install is not implemented.
+
+### Wake verification
+
+`POST /api/discovery/devices/{id}/verify` (operator+, CSRF) requires discovery
+enabled and acknowledged. It checks the neighbour table and, when
+`SEXTANT_DISCOVERY_ACTIVE_PROBES=1`, bounded TCP connect ports. It returns
+`verification.status` (`woke`, `sent`, or `failed`) and updates the device
+`wake_status`/`wake_verified_at`. A linked wake target that has been used makes
+an otherwise unreachable device `sent`; reachable means `woke`. Every check is
+audited (`discovery.wake_verified`) and emits a deduplicated `wake_verified`
+event. No ICMP or raw sockets are used.
+
 ## Docker Hosts (D1–D5)
 
 Docker is off by default. A host appears only when the Linux agent reports Docker,
