@@ -1147,3 +1147,7 @@ html[data-theme="light"] .stat-card { min-height: 108px; }
 .discovery-tabs { margin-bottom: 16px; padding: 0; }
 .discovery-tabs .tab { padding: 10px 12px; }
 .discovery-tab-panel { margin-top: 4px; }
+
+#discovery-filters { flex-wrap: wrap; justify-content: flex-start; }
+#discovery-filters .field { min-width: 150px; margin-bottom: 0; }
+#discovery-filters .checkbox-row { align-self: center; }

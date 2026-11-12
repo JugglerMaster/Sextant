@@ -4,6 +4,14 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.5.9] - 2026-11-12
+
+### Changed
+
+- The Discovery filter bar now wraps and gives the state/type/segment/vendor
+  selects a usable width, so the new **Changed** and **Conflict** state options
+  are easy to read and choose.
+
 ## [0.5.8] - 2026-11-12
 
 ### Fixed
@@ -231,6 +239,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.5.9]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.9
 [0.5.8]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.8
 [0.5.7]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.7
 [0.5.6]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.6
