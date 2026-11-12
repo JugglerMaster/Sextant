@@ -821,7 +821,7 @@
                 <label class="field"><span>User filter</span><input name="user_filter" maxlength="512" value="(sAMAccountName={username})"></label>
                 <label class="field"><span>Timeout (seconds)</span><input name="timeout" type="number" min="2" max="60"></label>
               </div>
-              <label class="checkbox-row"><input type="checkbox" name="use_ssl"><span>Use LDAPS / StartTLS (TLS)</span></label>
+              <label class="checkbox-row"><input type="checkbox" name="use_ssl"><span>Use LDAPS (TLS)</span></label>
               <label class="checkbox-row"><input type="checkbox" name="clear_bind_password"><span>Clear the saved bind password</span></label>
               <label class="field"><span>CA certificate path (optional)</span><input name="ca_cert" maxlength="1024" placeholder="/etc/ssl/certs/corp-root-ca.pem"></label>
               <div class="section-head">
@@ -836,7 +836,7 @@
               <div class="section-head">
                 <div><p class="eyebrow">Authorization</p><h3>Group to role mapping</h3></div>
               </div>
-              <label class="field"><span>Admin groups (comma or newline separated DNs)</span><textarea name="admin_groups" rows="3" maxlength="4000"></textarea></label>
+              <label class="field"><span>Admin groups (semicolon or newline separated DNs)</span><textarea name="admin_groups" rows="3" maxlength="4000"></textarea></label>
               <label class="field"><span>Operator groups</span><textarea name="operator_groups" rows="3" maxlength="4000"></textarea></label>
               <label class="field"><span>Viewer groups</span><textarea name="viewer_groups" rows="3" maxlength="4000"></textarea></label>
               <label class="field"><span>Default role</span><select name="default_role"><option value="viewer">Viewer</option><option value="operator">Operator</option><option value="admin">Admin</option></select></label>

@@ -252,6 +252,11 @@ def _derive_base_dn(domain: str) -> str:
     return ",".join(f"DC={label}" for label in labels)
 
 
+def _domain_from_base_dn(base_dn: str) -> str:
+    labels = re.findall(r"DC=([^,]+)", base_dn or "", flags=re.IGNORECASE)
+    return ".".join(label.strip() for label in labels).lower()
+
+
 def normalize_patch(
     base: Settings,
     stored: dict[str, Any] | None,
@@ -429,7 +434,9 @@ def serialize(
         },
         "domain": {
             "enabled": ldap is not None,
-            "domain": ldap.domain if ldap else str(domain_values.get("domain") or ""),
+            "domain": (ldap.domain or _domain_from_base_dn(ldap.base_dn))
+            if ldap
+            else str(domain_values.get("domain") or ""),
             "server": ldap.server if ldap else str(domain_values.get("server") or ""),
             "port": ldap.port if ldap else int(domain_values.get("port") or 389),
             "use_ssl": ldap.use_ssl if ldap else bool(domain_values.get("use_ssl")),

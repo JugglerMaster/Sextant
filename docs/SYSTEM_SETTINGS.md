@@ -46,7 +46,8 @@ attribute mapping:
 - Base DN, bind DN, write-only bind password.
 - User search filter; it must contain `{username}` exactly once.
 - Attribute names for username, display name, email, and groups.
-- Admin/operator/viewer group DNs and the default role.
+- Admin/operator/viewer group DNs and the default role. Separate multiple group
+  DNs with semicolons or newlines; commas stay part of the DN.
 
 **Test directory** performs a service bind and optional one-user lookup without
 saving. Sample attributes are shown so you can confirm the mapping. The optional
