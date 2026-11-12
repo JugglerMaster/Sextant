@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sextant"
-version = "0.5.0"
+version = "0.5.1"
 description = "Self-hosted fleet operations console with cross-platform agents"
 readme = "README.md"
 requires-python = ">=3.11"

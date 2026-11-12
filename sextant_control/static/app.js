@@ -280,7 +280,7 @@ function relativeTime(value) {
   const date = parseDate(value);
   if (!date) return "never";
   const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
-  if (seconds < 15) return "just now";
+  if (seconds < 5) return "just now";
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
@@ -834,16 +834,31 @@ function applyDashboard(data) {
   if (!data || !data.stats || !Array.isArray(data.agents)) return;
   state.dashboard = data;
   renderStats();
-  renderAgentGrid();
-  if (state.detailId) {
-    const agent = data.agents.find((item) => item.id === state.detailId);
-    if (!agent) closeDrawer();
-    else {
-      state.detailAgent = agent;
-      updateDrawerChrome();
-      if (!["remote", "history"].includes(state.detailTab)) renderTab();
-    }
+  if (!state.detailId) {
+    renderAgentGrid();
+    return;
   }
+  const agent = data.agents.find((item) => item.id === state.detailId);
+  if (!agent) {
+    closeDrawer();
+    return;
+  }
+  state.detailAgent = agent;
+  updateDrawerChrome();
+  if (!SELF_RENDERING_TABS.has(state.detailTab)) renderTabPreservingScroll();
+}
+
+const SELF_RENDERING_TABS = new Set(["remote", "history", "trends", "packages"]);
+
+function renderTabPreservingScroll() {
+  const body = $("drawer-body");
+  if (!body) {
+    renderTab();
+    return;
+  }
+  const top = body.scrollTop;
+  renderTab();
+  body.scrollTop = top;
 }
 
 function renderStats() {
@@ -1481,7 +1496,7 @@ function agentCard(agent) {
         "div",
         { class: "fact" },
         h("span", {}, "Heartbeat"),
-        h("strong", {}, agent.online ? "now" : relativeTime(agent.last_seen), stale.heartbeatStale ? h("span", { class: "tag tag-warn" }, "stale") : null),
+        h("strong", { title: localTime(agent.last_seen) }, relativeTime(agent.last_seen), stale.heartbeatStale ? h("span", { class: "tag tag-warn" }, "stale") : null),
       ),
       h(
         "div",
@@ -1551,6 +1566,7 @@ function closeDrawer() {
   document.removeEventListener("keydown", drawerTrapHandler);
   state.detailId = null;
   state.detailAgent = null;
+  if (state.dashboard) renderAgentGrid();
   if (state.drawerTrigger && typeof state.drawerTrigger.focus === "function") {
     state.drawerTrigger.focus();
   }
@@ -1675,7 +1691,7 @@ function renderOverview(body) {
         infoTile("MAC address", agent.mac),
         infoTile("Agent version", agent.agent_version),
         infoTile("Enrolled", localTime(agent.enrolled_at)),
-        infoTile("Last heartbeat", `${agent.online ? "just now" : relativeTime(agent.last_seen)}${stale.heartbeatStale ? " · stale" : ""}`),
+        infoTile("Last heartbeat", `${relativeTime(agent.last_seen)}${stale.heartbeatStale ? " · stale" : ""}`),
         infoTile(
           "Inventory updated",
           agent.service_inventory_at
@@ -2426,7 +2442,7 @@ function renderPackages(body) {
         .filter(Boolean)
         .sort()
         .pop();
-      status.textContent = `Heartbeat: ${agent.online ? "just now" : relativeTime(agent.last_seen)} · Inventory updated: ${lastInventory ? relativeTime(lastInventory) : "never"}${managers.length ? ` · Managers: ${managers.join(", ")}` : ""}`;
+      status.textContent = `Heartbeat: ${relativeTime(agent.last_seen)} · Inventory updated: ${lastInventory ? relativeTime(lastInventory) : "never"}${managers.length ? ` · Managers: ${managers.join(", ")}` : ""}`;
       renderPackageRules(rulesHost, agent, data.rules || [], data.drift || []);
       renderPackageInventory(inventoryHost, inventory);
     })
@@ -3098,7 +3114,7 @@ function renderHistory(body) {
       h(
         "div",
         { class: "section-toolbar" },
-        h("p", {}, `Retained commands. Heartbeat: ${agent.online ? "just now" : relativeTime(agent.last_seen)}.`),
+        h("p", {}, `Retained commands. Heartbeat: ${relativeTime(agent.last_seen)}.`),
         search,
         status,
         pageSize,

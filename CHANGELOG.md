@@ -4,6 +4,19 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.5.1] - 2026-11-12
+
+### Fixed
+
+- Live fleet updates no longer re-render self-managed drawer tabs (Trends,
+  History, Packages, Remote) while they are open. This stops the Trends drawer
+  from jumping back to the top and flickering on every SSE refresh.
+- Overview refreshes preserve the drawer scroll position; the fleet grid is
+  refreshed when the drawer closes instead of being rebuilt behind it.
+- Heartbeat and inventory ages now resolve to seconds after 5 seconds instead
+  of continuing to say "just now" for an entire heartbeat interval. The card
+  heartbeat value also has an absolute-time title.
+
 ## [0.5.0] - 2026-11-12
 
 ### Added
@@ -124,6 +137,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.5.1]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.1
 [0.5.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.0
 [0.4.1]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.4.1
 [0.4.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.4.0
