@@ -2818,6 +2818,42 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     throw new Error("Discovery audit link is missing");
   }
 
+  const remoteOpen = [...discoveryTable.querySelectorAll("button")].find((item) =>
+    (item.getAttribute("aria-label") || "").includes("printer.lan"),
+  );
+  if (!remoteOpen) throw new Error("Discovery device action missing for remote install");
+  remoteOpen.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  const remoteAction = findButton(window.document.getElementById("discovery-drawer-actions"), "Remote install");
+  if (!remoteAction) throw new Error("Discovery remote install action is missing");
+  remoteAction.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  if (!promoteDialog.open) throw new Error("Discovery remote install dialog did not open");
+  const remoteTarget = window.document.getElementById("discovery-promote-target");
+  if (remoteTarget.value !== "remote_install") {
+    throw new Error("Discovery remote install dialog did not select the remote target");
+  }
+  const discoveryRemoteOsSelect = window.document.getElementById("discovery-remote-os");
+  discoveryRemoteOsSelect.value = "windows";
+  discoveryRemoteOsSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(30);
+  if (window.document.querySelector('#discovery-promote-body input[name="remote_port"]').value !== "5986") {
+    throw new Error("Windows remote install did not default to WinRM port 5986");
+  }
+  if (window.document.querySelector('#discovery-promote-body input[name="remote_password"]').hidden) {
+    throw new Error("Windows remote install password field is hidden");
+  }
+  discoveryRemoteOsSelect.value = "linux";
+  discoveryRemoteOsSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(30);
+  if (window.document.querySelector('#discovery-promote-body input[name="remote_port"]').value !== "22") {
+    throw new Error("Linux remote install did not default to SSH port 22");
+  }
+  findButton(promoteDialog, "Cancel").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
+  window.document.querySelector("[data-close-discovery-drawer]").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+
   window.__discoveryDisabled = true;
   window.document.querySelector('[data-page="overview"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   window.document.querySelector('[data-page="discovery"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

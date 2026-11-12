@@ -214,6 +214,24 @@ for (const theme of THEMES) {
     await expect(page.locator("#discovery-scan-cancel")).toBeVisible();
     await page.locator("#discovery-scan-cancel").click();
     await expect(page.locator("#discovery-scan-progress")).toBeHidden();
+
+    await page.locator("#discovery-table-body").getByRole("button", { name: /printer\.lan details/ }).click();
+    await expect(page.locator("#discovery-drawer")).toBeVisible();
+    await page.locator("#discovery-drawer-actions").getByRole("button", { name: "Remote install" }).click();
+    const remoteDialog = page.locator("#discovery-promote-dialog");
+    await expect(remoteDialog).toBeVisible();
+    await expect(remoteDialog.locator("#discovery-promote-target")).toHaveValue("remote_install");
+    await expect(remoteDialog.locator("#discovery-remote-os")).toBeVisible();
+    await expect(remoteDialog.locator('input[name="remote_host"]')).toHaveValue("192.168.1.40");
+    await remoteDialog.locator("#discovery-remote-os").selectOption("windows");
+    await expect(remoteDialog.locator('input[name="remote_port"]')).toHaveValue("5986");
+    await expect(remoteDialog.locator('input[name="remote_password"]')).toBeVisible();
+    await remoteDialog.locator("#discovery-remote-os").selectOption("linux");
+    await expect(remoteDialog.locator('input[name="remote_port"]')).toHaveValue("22");
+    await expect(remoteDialog.locator('input[name="remote_password"]')).toBeHidden();
+    await remoteDialog.getByRole("button", { name: "Start remote install" }).click();
+    await expect(page.locator("#page-remote-install")).toBeVisible();
+    await expect(page.locator("#toast-region")).toContainText("Remote install started");
   });
 
   test(`Compose Files renders and opens deploy controls in the ${theme} theme`, async ({ page }) => {

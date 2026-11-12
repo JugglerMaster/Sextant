@@ -8172,6 +8172,13 @@ function renderDiscoveryDrawer() {
     `${device.ip || "no address"} · ${device.mac || "no MAC"} · ${device.vendor || "unknown vendor"}`,
   );
   clear(actions);
+  if (state.permissions.admin && device.ip) {
+    actions.append(
+      button("Remote install", "button-secondary button-small", () =>
+        openDiscoveryPromote(device, "remote_install"),
+      ),
+    );
+  }
   if (state.permissions.operate) {
     actions.append(
       button("Promote", "button-primary button-small", () => openDiscoveryPromote(device)),
@@ -8464,10 +8471,17 @@ function closeDiscoveryPromote() {
   state.discovery.promoteTrigger = null;
 }
 
+function discoveryRemoteOs(device) {
+  const text = `${device.os_guess || ""} ${device.device_type || ""} ${device.vendor || ""}`.toLowerCase();
+  if (text.includes("windows") || text.includes("microsoft")) return "windows";
+  return "linux";
+}
+
 function openDiscoveryPromote(device, initialTarget = "wake_target") {
   const dialog = $("discovery-promote-dialog");
   if (!dialog) return;
-  const target = !device.mac && initialTarget === "wake_target" ? "linux_agent" : initialTarget;
+  let target = !device.mac && initialTarget === "wake_target" ? "linux_agent" : initialTarget;
+  if (target === "remote_install" && !state.permissions.admin) target = "linux_agent";
   state.discovery.promoteTrigger = document.activeElement;
   state.discovery.promotion = { device, target };
   renderDiscoveryPromote();
@@ -8508,6 +8522,17 @@ function renderDiscoveryPromote() {
       { value: "windows_agent", selected: promotion.target === "windows_agent" },
       "Windows agent install",
     ),
+    state.permissions.admin
+      ? h(
+          "option",
+          {
+            value: "remote_install",
+            selected: promotion.target === "remote_install",
+            disabled: !device.ip,
+          },
+          "Remote install (SSH/WinRM)",
+        )
+      : null,
     h(
       "option",
       {
@@ -8539,7 +8564,9 @@ function renderDiscoveryPromote() {
         ? "Create wake target"
         : target === "existing_agent"
           ? "Link agent"
-          : "Generate install command";
+          : target === "remote_install"
+            ? "Start remote install"
+            : "Generate install command";
     clear(fields);
     if (target === "wake_target") {
       fields.append(
@@ -8563,6 +8590,105 @@ function renderDiscoveryPromote() {
           ),
         ),
         h("p", { class: "form-hint" }, "The discovered MAC must match the enrolled agent MAC."),
+      );
+    } else if (target === "remote_install") {
+      const profiles = state.profiles?.length
+        ? state.profiles
+        : [
+            { slug: "workstation", name: "Workstation" },
+            { slug: "server", name: "Server" },
+          ];
+      const osSelect = h(
+        "select",
+        { name: "remote_os", id: "discovery-remote-os" },
+        h("option", { value: "linux" }, "Linux (key-based SSH)"),
+        h("option", { value: "windows" }, "Windows (WinRM over HTTPS)"),
+      );
+      osSelect.value = discoveryRemoteOs(device);
+      const portInput = h("input", {
+        name: "remote_port",
+        type: "number",
+        min: "1",
+        max: "65535",
+        value: osSelect.value === "windows" ? "5986" : "22",
+      });
+      const userInput = h("input", {
+        name: "remote_user",
+        maxlength: "128",
+        value: osSelect.value === "windows" ? "Administrator" : "root",
+      });
+      const passwordWrap = h(
+        "label",
+        { class: "field", hidden: osSelect.value !== "windows" },
+        h("span", {}, "Windows password"),
+        h("input", {
+          name: "remote_password",
+          type: "password",
+          maxlength: "4096",
+          autocomplete: "new-password",
+          placeholder: "used only for this job",
+        }),
+      );
+      const syncRemote = () => {
+        const windows = osSelect.value === "windows";
+        passwordWrap.hidden = !windows;
+        portInput.value = windows ? "5986" : "22";
+        userInput.value = windows ? "Administrator" : "root";
+      };
+      osSelect.addEventListener("change", syncRemote);
+      fields.append(
+        h(
+          "p",
+          { class: "form-hint" },
+          `Starts a remote install job against ${device.ip}. Linux uses the configured SSH key; Windows uses WinRM over HTTPS and the password is used only for this job. Admin only.`,
+        ),
+        h("label", { class: "field" }, h("span", {}, "Target OS"), osSelect),
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, "Host"),
+          h("input", { name: "remote_host", maxlength: "255", value: device.ip, readonly: true }),
+        ),
+        h(
+          "div",
+          { class: "form-grid" },
+          h("label", { class: "field" }, h("span", {}, "Port"), portInput),
+          h("label", { class: "field" }, h("span", {}, "User"), userInput),
+        ),
+        passwordWrap,
+        h(
+          "div",
+          { class: "form-grid" },
+          h(
+            "label",
+            { class: "field" },
+            h("span", {}, "Agent name"),
+            h("input", { name: "remote_name", maxlength: "255", value: device.hostname || device.ip || "" }),
+          ),
+          h(
+            "label",
+            { class: "field" },
+            h("span", {}, "Profile"),
+            h(
+              "select",
+              { name: "remote_profile" },
+              ...profiles.map((profile) =>
+                h("option", { value: profile.slug }, `${profile.name} (${profile.slug})`),
+              ),
+            ),
+          ),
+        ),
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, "Watch services (optional)"),
+          h("input", { name: "remote_watch_services", maxlength: "1000", placeholder: "ssh, nginx" }),
+        ),
+        h(
+          "p",
+          { class: "form-hint" },
+          "The job runs in the background. The Remote install page opens with its live log.",
+        ),
       );
     } else {
       const windows = target === "windows_agent";
@@ -8625,6 +8751,35 @@ async function submitDiscoveryPromotion(form) {
   if (!promotion) return;
   const values = new FormData(form);
   const target = String(values.get("target") || promotion.target);
+  if (target === "remote_install") {
+    const osName = String(values.get("remote_os") || "linux");
+    const payload = {
+      host: String(values.get("remote_host") || promotion.device.ip || "").trim(),
+      port: Number(values.get("remote_port") || (osName === "windows" ? 5986 : 22)),
+      user: String(values.get("remote_user") || (osName === "windows" ? "Administrator" : "root")).trim(),
+      name: String(values.get("remote_name") || "").trim(),
+      profile: String(values.get("remote_profile") || "workstation"),
+      watch_services: String(values.get("remote_watch_services") || "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+      os: osName,
+      transport: osName === "windows" ? "winrm" : "ssh",
+      password: osName === "windows" ? String(values.get("remote_password") || "") : "",
+    };
+    setText("discovery-promote-error", "");
+    setText("discovery-promote-form-error", "");
+    try {
+      const job = await api("/api/remote-install", { method: "POST", body: payload });
+      closeDiscoveryPromote();
+      state.remoteJobId = job.id;
+      toast("Remote install started.");
+      navigate("remote-install");
+    } catch (error) {
+      setText("discovery-promote-form-error", error.message);
+    }
+    return;
+  }
   const body = { target };
   if (target === "existing_agent") {
     body.agent_id = String(values.get("agent_id") || "");

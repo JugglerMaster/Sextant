@@ -226,7 +226,7 @@ New **Discovery** page:
 - **Filters:** new/known/ignored/promoted, segment, device type, vendor, "no agent", "admin ports open".
 - **Device drawer:** identity, evidence (which probe found what), port/service history, first/last seen, identity conflicts, actions.
 - **Scan panel:** scope, methods, start, progress, cancellation, audit link.
-- **Promote flow:** create wake target, or generate a one-time enrollment token + OS-specific install command with the device name prefilled.
+- **Promote flow:** create wake target, generate a one-time enrollment token + OS-specific install command, link an existing agent, or start an admin **Remote install** job for the discovered IP (SSH for Linux, WinRM for Windows) and open its live log.
 - **Export** (admin) and **ignore** (operator) with confirmation.
 - Viewer sees read-only data; all mutations require operator/admin and CSRF.
 
