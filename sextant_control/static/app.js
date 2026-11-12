@@ -924,6 +924,32 @@ async function checkForUpdates(force = false) {
   }
 }
 
+async function waitForServerRestart(expectedVersion) {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    await sleep(2500);
+    try {
+      const data = await api("/api/update/status");
+      applyUpdateState(data);
+      if (!data.restart_pending && (!expectedVersion || data.current_version === expectedVersion)) {
+        state.updatesNotice = `Sextant ${data.current_version} is running. Reloading…`;
+        renderUpdateBanner();
+        renderUpdatesPanel();
+        setTimeout(() => window.location.reload(), 900);
+        return;
+      }
+      state.updatesNotice = "Waiting for the service to restart…";
+    } catch (_error) {
+      state.updatesNotice = "Waiting for the service to restart…";
+    }
+    renderUpdateBanner();
+    renderUpdatesPanel();
+  }
+  state.updatesNotice = "Restart is taking longer than expected. Reload the page to check.";
+  renderUpdateBanner();
+  renderUpdatesPanel();
+}
+
 async function applyServerUpdate() {
   const data = state.updates;
   if (!data?.apply_available || state.updatesBusy) return;
@@ -950,6 +976,7 @@ async function applyServerUpdate() {
         ? "Update staged. The service is restarting now."
         : "Update staged. Restart the sextant service to start it.");
     toast(result.restarting ? "Update staged. Restarting…" : "Update staged. Restart required.", result.restarting ? "ok" : "warn");
+    if (result.restarting) void waitForServerRestart(version);
   } catch (error) {
     state.updatesNotice = "";
     setText("updates-error", error.message);
@@ -984,6 +1011,7 @@ async function rollbackServerUpdate() {
         ? "Rollback staged. The service is restarting now."
         : "Rollback staged. Restart the sextant service to start it.");
     toast(result.restarting ? "Rollback staged. Restarting…" : "Rollback staged. Restart required.", result.restarting ? "ok" : "warn");
+    if (result.restarting) void waitForServerRestart(data.previous_version || "");
   } catch (error) {
     state.updatesNotice = "";
     setText("updates-error", error.message);

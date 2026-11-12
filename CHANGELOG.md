@@ -4,6 +4,14 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.5.4] - 2026-11-12
+
+### Fixed
+
+- After a server update or rollback, the admin UI now polls the update status
+  until the restarted service reports the new version and then reloads itself.
+  This clears the stale "Restart pending" state and loads the new static assets.
+
 ## [0.5.3] - 2026-11-12
 
 ### Changed
@@ -171,6 +179,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.5.4]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.4
 [0.5.3]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.3
 [0.5.2]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.2
 [0.5.1]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.1
