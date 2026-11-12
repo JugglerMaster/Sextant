@@ -207,7 +207,7 @@ def run_install(
     remote_name = wheel_filename if wheel_filename.endswith(".whl") else wheel.name
     if not remote_name.endswith(".whl"):
         remote_name = f"{remote_name}.whl"
-    remote_wheel = f"/tmp/sextant-{remote_name}"
+    remote_wheel = f"/tmp/{remote_name}"
     remote_unit = "/tmp/sextant-agent.service"
     log(f"Checking prerequisites on {user}@{host}:{port}")
     log(

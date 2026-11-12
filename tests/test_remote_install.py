@@ -107,7 +107,7 @@ def test_install_uses_published_wheel_filename_for_sha_blob(monkeypatch, tmp_pat
         log=lambda _line: None,
     )
     install_script = calls[-1][1]
-    assert "/tmp/sextant-sextant-1.0-py3-none-any.whl" in install_script
+    assert "/tmp/sextant-1.0-py3-none-any.whl" in install_script
     assert ".venv/bin/pip ]" in install_script
     assert "sudo -n rm -rf /opt/sextant-agent/.venv" in install_script
 
