@@ -3912,6 +3912,7 @@ function populateRemoteProfileSelect() {
 
 async function loadRemoteInstall() {
   populateRemoteProfileSelect();
+  updateRemoteInstallMode();
   try {
     const data = await api("/api/remote-install");
     state.remoteJobs = data.jobs || [];
@@ -3939,7 +3940,7 @@ function renderRemoteJobs() {
           "div",
           {},
           h("strong", {}, `${job.user}@${job.host}:${job.port}`),
-          h("p", { class: "form-hint" }, `${job.status} · ${job.profile} · ${localTime(job.created_at)}${job.error ? ` · ${job.error}` : ""}`),
+          h("p", { class: "form-hint" }, `${job.os || "linux"} · ${job.transport || "ssh"} · ${job.status} · ${job.profile} · ${localTime(job.created_at)}${job.error ? ` · ${job.error}` : ""}`),
         ),
         button("View log", "button-secondary button-small", () => showRemoteJob(job.id)),
       ),
@@ -3973,25 +3974,52 @@ async function showRemoteJob(jobId) {
   }
 }
 
+function updateRemoteInstallMode() {
+  const form = $("remote-install-form");
+  if (!form) return;
+  const windows = form.elements.os.value === "windows";
+  const port = $("remote-install-port");
+  const passwordWrap = $("remote-install-password-wrap");
+  const hint = $("remote-install-hint");
+  const windowsNote = $("remote-install-windows-note");
+  if (passwordWrap) passwordWrap.hidden = !windows;
+  if (windowsNote) windowsNote.hidden = !windows;
+  if (hint) {
+    hint.textContent = windows
+      ? "Windows uses WinRM over HTTPS (5986) with administrator credentials and certificate validation. The password is used once for this job and is never stored."
+      : "Linux uses key-based SSH for this user and requires passwordless sudo. Host-key verification is disabled for this installer; use hosts you control.";
+  }
+  if (port) {
+    const value = Number(port.value || 0);
+    port.value = windows ? (value === 22 || !value ? "5986" : String(value)) : (value === 5986 || !value ? "22" : String(value));
+  }
+}
+
 async function testRemoteInstall() {
   const form = $("remote-install-form");
   const log = $("remote-install-log");
   setText("remote-install-error", "");
+  const osName = form.elements.os.value;
   const body = {
     host: form.elements.host.value.trim(),
-    port: Number(form.elements.port.value || 22),
+    port: Number(form.elements.port.value || (osName === "windows" ? 5986 : 22)),
     user: form.elements.user.value.trim(),
     name: form.elements.name.value.trim(),
     profile: form.elements.profile.value,
     watch_services: [],
+    os: osName,
+    transport: osName === "windows" ? "winrm" : "ssh",
+    password: osName === "windows" ? form.elements.password.value : "",
   };
-  if (log) log.textContent = "Testing SSH and prerequisites…";
+  if (log) log.textContent = osName === "windows" ? "Testing WinRM, admin rights, and Python…" : "Testing SSH and prerequisites…";
   try {
     const result = await api("/api/remote-install/test", { method: "POST", body });
     if (log) log.textContent = result.output || "Connection OK.";
   } catch (error) {
     setText("remote-install-error", error.message);
     if (log) log.textContent = error.message;
+  } finally {
+    if (osName === "windows") form.elements.password.value = "";
   }
 }
 
@@ -4003,16 +4031,21 @@ async function startRemoteInstall(event) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+  const osName = form.elements.os.value;
   const body = {
     host: form.elements.host.value.trim(),
-    port: Number(form.elements.port.value || 22),
+    port: Number(form.elements.port.value || (osName === "windows" ? 5986 : 22)),
     user: form.elements.user.value.trim(),
     name: form.elements.name.value.trim(),
     profile: form.elements.profile.value,
     watch_services: watch,
+    os: osName,
+    transport: osName === "windows" ? "winrm" : "ssh",
+    password: osName === "windows" ? form.elements.password.value : "",
   };
   try {
     const job = await api("/api/remote-install", { method: "POST", body });
+    if (osName === "windows") form.elements.password.value = "";
     toast("Remote install started.");
     state.remoteJobId = job.id;
     await loadRemoteInstall();
@@ -8278,6 +8311,7 @@ function wireEvents() {
 
   $("remote-install-form").addEventListener("submit", startRemoteInstall);
   $("remote-install-test").addEventListener("click", testRemoteInstall);
+  $("remote-install-os").addEventListener("change", updateRemoteInstallMode);
 
   $("user-form").addEventListener("submit", async (event) => {
     event.preventDefault();

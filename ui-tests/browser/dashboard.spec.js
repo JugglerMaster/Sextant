@@ -446,3 +446,26 @@ test("keyboard opens the drawer, traps focus, and returns focus to the trigger",
     .poll(() => page.evaluate(() => document.activeElement?.getAttribute("aria-label")))
     .toBe("Open Studio PC details");
 });
+
+test("Windows remote install form switches to WinRM and clears the password", async ({ page }) => {
+  await login(page);
+  await page.locator('[data-page="remote-install"]').click();
+  const form = page.locator("#remote-install-form");
+  await expect(page.locator("#remote-install-password-wrap")).toBeHidden();
+  await page.locator("#remote-install-os").selectOption("windows");
+  await expect(page.locator("#remote-install-password-wrap")).toBeVisible();
+  await expect(page.locator("#remote-install-port")).toHaveValue("5986");
+  await form.locator('input[name="host"]').fill("192.168.1.10");
+  await form.locator('input[name="user"]').fill("Administrator");
+  await form.locator('input[name="name"]').fill("studio-pc");
+  await form.locator('input[name="password"]').fill("WINPASSWORD");
+  await page.locator("#remote-install-test").click();
+  await expect(page.locator("#remote-install-log")).toContainText("WinRM prerequisites OK");
+  await form.locator('input[name="password"]').fill("WINPASSWORD");
+  await form.getByRole("button", { name: "Install agent" }).click();
+  await expect(form.locator('input[name="password"]')).toHaveValue("");
+  await expect(page.locator("#remote-install-list")).toContainText("windows · winrm");
+  await expect(page.locator("#remote-install-log")).not.toContainText("WINPASSWORD");
+  await screenshot(page, "remote-install-windows-dark");
+  await scan(page, "windows remote install");
+});

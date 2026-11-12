@@ -1,6 +1,6 @@
 # Remote install over SSH
 
-**Status:** implemented for **Linux**, key-based SSH only, one job at a time. Windows/OpenSSH is not implemented.
+**Status:** implemented for **Linux** over key-based SSH and for **Windows** over WinRM/HTTPS. This page covers the Linux SSH path; see [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md) for the Windows transport. One install job runs at a time across both paths.
 
 The **Remote install** page (admin) installs the Sextant Agent on a Linux host using a single server-side SSH key. It is intended for machines you control, especially freshly rebuilt hosts where host keys change.
 

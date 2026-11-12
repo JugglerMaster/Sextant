@@ -1171,16 +1171,40 @@ Tag assignments:
 | GET | `/api/export/packages.csv?agent_id=…` | any | Export package inventory CSV (all agents if omitted) |
 | GET | `/api/export/commands.csv?agent_id=…` | any | Export filtered command history CSV (all agents if omitted) |
 
-## Remote install (admin, Linux)
+## Remote install (admin; Linux SSH and Windows WinRM)
 
 | Method | Route | Purpose |
 |---|---|---|
-| POST | `/api/remote-install/test` | SSH and prerequisite check |
+| POST | `/api/remote-install/test` | SSH or WinRM prerequisite check |
 | POST | `/api/remote-install` | Start an install job |
 | GET | `/api/remote-install` | List jobs |
 | GET | `/api/remote-install/{id}` | Job detail and log |
 
-Key-based SSH only, one job at a time. Host-key verification is disabled for rebuilt hosts. See [REMOTE_INSTALL.md](REMOTE_INSTALL.md).
+Linux jobs use key-based SSH, one job at a time, with host-key verification
+disabled for rebuilt hosts. See [REMOTE_INSTALL.md](REMOTE_INSTALL.md).
+
+Windows jobs use WinRM over HTTPS with the optional `pywinrm` extra. Request:
+
+```json
+{
+  "host": "192.168.1.40",
+  "port": 5986,
+  "user": "CORP\\Administrator",
+  "password": "one-time secret",
+  "name": "studio-pc",
+  "profile": "workstation",
+  "watch_services": ["Spooler"],
+  "os": "windows",
+  "transport": "winrm"
+}
+```
+
+The password is used only by the job thread and is never stored, logged, or
+returned. Jobs have `os` and `transport` fields; the log/audit redact the
+password and one-time token. A Windows job is successful only after an
+authenticated agent heartbeat is observed. See
+[WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md) for target and certificate
+requirements.
 
 `SEXTANT_UPDATE_FEED=github:owner/repo` or an HTTPS JSON URL enables the check. The dashboard shows an admin banner when a newer server version exists. This version does **not** apply server updates automatically.
 

@@ -41,6 +41,7 @@ Run the whole suite:
 | `tests/test_inventory.py` | Revisioned package inventory (full/delta, hash, stale-base fallback), agent payload cache, profile cadence application |
 | `tests/test_profiles.py` | Built-in/custom profiles, RBAC, create/update/reset/delete, enrollment profile selection, admin reassignment, tag assignment, heartbeat sync |
 | `tests/test_remote_install.py` | SSH host-key options, install script steps, token redaction, API job lifecycle, RBAC, missing key, one-at-a-time guard |
+| `tests/test_windows_remote_install.py` | WinRM target validation, optional-dependency absent state, connection/install scripts, chunked upload, wheel hash/installer contents, credential/token redaction, failure redaction, API password requirement, job status, and audit redaction |
 | `tests/test_exports.py` | Agents, package inventory, and filtered command-history CSV exports, including quoting and content type |
 | `tests/test_command_history.py` | Paginated command history: total counts, status/text/time filters, limit/offset/timestamp validation, and viewer/anonymous read access |
 | `tests/test_history.py` | Heartbeat-derived telemetry samples, gap-aware bucket series with explicit nulls and timestamps, point caps, viewer access, retention, disabled history, legacy schema migration |

@@ -19,7 +19,7 @@ There is no agent listener and no third-party relay.
 | Package store | `sextant_control/store.py` | Content-addressed artifact blobs, SHA-256 integrity, quotas, GC. |
 | Update checker | `sextant_control/updates.py` | Read-only server release check (GitHub or static JSON). |
 | Notifications | `sextant_control/notifications.py` | Background condition evaluator, Telegram delivery, persisted outbox, retry/backoff. |
-| Remote install | `sextant_control/remote_install.py` | Key-based SSH install for Linux, job log, one-time enrollment. |
+| Remote install | `sextant_control/remote_install.py`, `windows_remote.py` | Key-based SSH for Linux and WinRM-over-HTTPS for Windows, job log, one-time enrollment, heartbeat verification. |
 | Agent | `sextant_agent/` | Heartbeat, telemetry collectors, package inventory/actions, Docker detection/inventory, self-update, queued command execution, result posting. |
 | Docker inventory | `sextant_agent/docker.py`, server Docker routes | Local Docker CLI probe, bounded inventory, allowlisted actions/clone, one-shot exec, cleanup, drift metadata, health transitions, SQLite cache. |
 | Compose library | `sextant_control/docker_store.py` | Flat Compose files, deterministic immutable revisions, atomic writes, bundles, migration, revision retention. |
@@ -351,7 +351,7 @@ When Telegram is configured (`SEXTANT_TELEGRAM_BOT_TOKEN` and `SEXTANT_TELEGRAM_
 - Package inventory is revisioned: the agent sends a hash and revision every heartbeat, deltas (upserts + deletes) at the package cadence, and a full snapshot weekly, on first contact, or when the server requests one. The server applies deltas only when the base revision matches.
 - The server update checker is read-only: it reads `SEXTANT_UPDATE_FEED` metadata and shows an admin banner. Applying a server update is not automated in this version.
 - `POST /api/agents/{id}/packages/sync` queues one batched `package` command (at most 25 install/remove/upgrade actions). Actions execute with argv (no shell) and require both the local and server `allow_packages` flags.
-- Remote install is an admin SSH job for Linux: fixed install script, one server key, host-key verification disabled for rebuilt hosts, one job at a time, job log in SQLite.
+- Remote install is one admin job at a time. Linux uses a fixed SSH installer and one server key (host-key verification disabled for rebuilt hosts). Windows uses WinRM over HTTPS through the optional `pywinrm` extra, validates certificates, uploads the wheel + reviewed PowerShell installer, verifies SHA-256, and requires an authenticated agent heartbeat before success. Passwords/tokens are memory-only and redacted from job logs/audit; job rows store only `os`/`transport` metadata.
 - Agent self-update verifies the wheel hash/size, stages a versioned venv, health-checks it, switches the `current` link/junction, and keeps previous releases. Windows updates the `SextantAgent` task action to the stable `current` path, switches the junction, and restarts the task.
 
 ## Wake-on-LAN

@@ -28,7 +28,12 @@ semantic versioning.
   OPNsense/Proxmox/ESXi adapters. All integrations are off by default, admin-only,
   audited, and use write-only in-memory secrets that are never persisted or
   logged. Live vendor connectors are marked unverified; ESXi is fixture-only.
-  Credential-based Windows remote install remains future work.
+  Credential-based Windows remote install is implemented over WinRM/HTTPS with
+  the optional `windows-remote` (pywinrm) extra: certificate validation, a
+  one-time admin password held only in the job thread, SHA-256 wheel checks,
+  reviewed PowerShell installer, redacted logs/audit, SYSTEM scheduled task, and
+  authenticated-heartbeat success verification. OpenSSH for Windows remains a
+  future alternative, and live WinRM is fake-transport tested in CI.
 
 ### Changed
 

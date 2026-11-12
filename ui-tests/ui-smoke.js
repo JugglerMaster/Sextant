@@ -453,6 +453,7 @@ const discoverySummary = {
   conflicts: 1,
   conflict_device_ids: ["dev_printer"],
 };
+let remoteInstallJob = null;
 const discoveryIntegrations = [
   {
     kind: "snmp",
@@ -845,6 +846,30 @@ window.fetch = async (path, options = {}) => {
       savedViews.splice(index, 1);
       response = { status: 204, body: null };
     }
+  } else if (method === "POST" && key === "/api/remote-install/test") {
+    response = { status: 200, body: { ok: true, output: "WinRM prerequisites OK" } };
+  } else if (method === "POST" && key === "/api/remote-install") {
+    remoteInstallJob = {
+      id: "ri_win",
+      host: body?.host || "192.168.1.10",
+      port: body?.port || 5986,
+      user: body?.user || "Administrator",
+      os: body?.os || "linux",
+      transport: body?.transport || "ssh",
+      profile: body?.profile || "workstation",
+      name: body?.name || "",
+      status: "running",
+      log: "WinRM install started.",
+      error: "",
+      created_at: "2026-11-06T08:06:00Z",
+      started_at: "2026-11-06T08:06:01Z",
+      finished_at: null,
+    };
+    response = { status: 200, body: remoteInstallJob };
+  } else if (method === "GET" && key === "/api/remote-install") {
+    response = { status: 200, body: { jobs: remoteInstallJob ? [remoteInstallJob] : [] } };
+  } else if (method === "GET" && key === "/api/remote-install/ri_win") {
+    response = { status: 200, body: remoteInstallJob };
   } else if (method === "GET" && key === "/api/discovery/settings" && window.__discoveryDisabled) {
     response = {
       status: 200,
@@ -1636,6 +1661,49 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   await sleep(30);
   if (!window.document.getElementById("remote-install-form").textContent.includes("Install agent")) {
     throw new Error("remote install form did not render");
+  }
+  const remoteInstallForm = window.document.getElementById("remote-install-form");
+  if (!window.document.getElementById("remote-install-password-wrap").hidden) {
+    throw new Error("Windows password field should be hidden for Linux by default");
+  }
+  const remoteOs = window.document.getElementById("remote-install-os");
+  remoteOs.value = "windows";
+  remoteOs.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(20);
+  if (window.document.getElementById("remote-install-password-wrap").hidden) {
+    throw new Error("Windows password field did not appear");
+  }
+  if (window.document.getElementById("remote-install-port").value !== "5986") {
+    throw new Error("Windows install did not select the WinRM port");
+  }
+  remoteInstallForm.elements.host.value = "192.168.1.10";
+  remoteInstallForm.elements.user.value = "Administrator";
+  remoteInstallForm.elements.password.value = "WINPASSWORD";
+  remoteInstallForm.elements.name.value = "studio-pc";
+  window.document.getElementById("remote-install-test").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  const remoteTest = window.__requests.find(
+    (request) => request.method === "POST" && request.path === "/api/remote-install/test",
+  );
+  if (!remoteTest || remoteTest.body.os !== "windows" || remoteTest.body.password !== "WINPASSWORD") {
+    throw new Error("Windows remote install test was not sent");
+  }
+  if (!window.document.getElementById("remote-install-log").textContent.includes("WinRM prerequisites OK")) {
+    throw new Error("Windows remote install test output did not render");
+  }
+  remoteInstallForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(100);
+  const remoteStart = window.__requests.find(
+    (request) => request.method === "POST" && request.path === "/api/remote-install",
+  );
+  if (!remoteStart || remoteStart.body.os !== "windows" || remoteStart.body.transport !== "winrm") {
+    throw new Error("Windows remote install job was not started");
+  }
+  if (remoteInstallForm.elements.password.value !== "") {
+    throw new Error("Windows remote install password was not cleared after the job");
+  }
+  if (window.document.getElementById("remote-install-log")?.textContent.includes("WINPASSWORD")) {
+    throw new Error("Windows password leaked into the job log");
   }
   window.document.querySelector('[data-page="overview"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(20);
@@ -2611,7 +2679,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/exposure/conflicts/segments/table/drawer/edit/verify/promotion commands/token clearing/import preview/history/integration settings/secret redaction/SNMP fixture-only/server-and-agent scan source/start/cancel/relay-disabled/disabled/unacknowledged states, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/exposure/conflicts/segments/table/drawer/edit/verify/promotion commands/token clearing/import preview/history/integration settings/secret redaction/SNMP fixture-only/server-and-agent scan source/start/cancel/relay-disabled/disabled/unacknowledged states, Windows remote-install WinRM/password states, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

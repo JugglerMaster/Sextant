@@ -36,6 +36,9 @@ dependencies = [
 ldap = [
   "ldap3>=2.9,<3",
 ]
+windows-remote = [
+  "pywinrm>=0.5,<1",
+]
 dev = [
   "pytest>=8,<10",
   "httpx>=0.27,<0.28",
@@ -58,7 +61,7 @@ sextant-agent = "sextant_agent.cli:main"
 include = ["sextant_common*", "sextant_control*", "sextant_agent*"]
 
 [tool.setuptools.package-data]
-sextant_control = ["static/*"]
+sextant_control = ["static/*", "windows_install.ps1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

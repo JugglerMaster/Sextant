@@ -214,6 +214,9 @@ class Settings:
     docker_console_max_output_bytes: int = 1_048_576
     ssh_key_path: str = ""
     ssh_install_enabled: bool = True
+    windows_install_enabled: bool = True
+    windows_install_ca_file: str = ""
+    windows_install_timeout_seconds: int = 600
     discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
     extra: dict = field(default_factory=dict)
 
@@ -362,6 +365,11 @@ class Settings:
             ),
             ssh_key_path=env.get("SEXTANT_SSH_KEY_PATH", "").strip() or str(data_dir / "ssh" / "install_key"),
             ssh_install_enabled=_bool(env.get("SEXTANT_SSH_INSTALL_ENABLED"), True),
+            windows_install_enabled=_bool(env.get("SEXTANT_WINDOWS_INSTALL_ENABLED"), True),
+            windows_install_ca_file=env.get("SEXTANT_WINDOWS_INSTALL_CA_FILE", "").strip(),
+            windows_install_timeout_seconds=_int_range(
+                env.get("SEXTANT_WINDOWS_INSTALL_TIMEOUT_SECONDS"), 600, 60, 3600
+            ),
             discovery=DiscoverySettings.from_env(env),
         )
 

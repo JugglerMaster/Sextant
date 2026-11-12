@@ -294,6 +294,7 @@ CREATE TABLE IF NOT EXISTS remote_install_jobs (
     port INTEGER NOT NULL DEFAULT 22,
     ssh_user TEXT NOT NULL,
     os TEXT NOT NULL DEFAULT 'linux',
+    transport TEXT NOT NULL DEFAULT 'ssh',
     profile TEXT NOT NULL DEFAULT 'workstation',
     name TEXT NOT NULL DEFAULT '',
     watch_services TEXT NOT NULL DEFAULT '[]',
@@ -787,7 +788,7 @@ class Database:
             if old_version < 13:
                 self._ensure_discovery_profile_defaults(conn)
             conn.executescript(INDEXES)
-            conn.execute("PRAGMA user_version=15")
+            conn.execute("PRAGMA user_version=16")
             conn.execute("UPDATE agents SET profile_id = 'prof_workstation' WHERE profile_id = ''")
         try:
             self.path.chmod(0o600)
@@ -864,6 +865,8 @@ class Database:
         remote_columns = columns("remote_install_jobs")
         if remote_columns and "watch_services" not in remote_columns:
             conn.execute("ALTER TABLE remote_install_jobs ADD COLUMN watch_services TEXT NOT NULL DEFAULT '[]'")
+        if remote_columns and "transport" not in remote_columns:
+            conn.execute("ALTER TABLE remote_install_jobs ADD COLUMN transport TEXT NOT NULL DEFAULT 'ssh'")
 
         discovery_scan_columns = columns("discovery_scans")
         if discovery_scan_columns:
@@ -2474,18 +2477,22 @@ class Database:
         name: str,
         watch_services: list[str],
         actor: str,
+        os: str = "linux",
+        transport: str = "ssh",
     ) -> sqlite3.Row:
         job_id = "ri_" + secrets.token_hex(8)
         with self.transaction() as conn:
             conn.execute(
                 """INSERT INTO remote_install_jobs
-                   (id, host, port, ssh_user, os, profile, name, watch_services, status, log, error, created_by, created_at)
-                   VALUES (?, ?, ?, ?, 'linux', ?, ?, ?, 'queued', '', '', ?, ?)""",
+                   (id, host, port, ssh_user, os, transport, profile, name, watch_services, status, log, error, created_by, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', '', '', ?, ?)""",
                 (
                     job_id,
                     host,
                     int(port),
                     ssh_user,
+                    os,
+                    transport,
                     profile,
                     name,
                     dumps(watch_services),

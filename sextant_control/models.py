@@ -184,10 +184,13 @@ class ProfileTagIn(BaseModel):
 class RemoteInstallIn(BaseModel):
     host: str = Field(min_length=1, max_length=255)
     port: int = Field(default=22, ge=1, le=65535)
-    user: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
+    user: str = Field(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.@\\-]{0,127}$")
     name: str = Field(default="", max_length=255)
     profile: str = Field(default="workstation", max_length=64)
     watch_services: list[str] = Field(default_factory=list, max_length=64)
+    os: Literal["linux", "windows"] = "linux"
+    transport: Literal["ssh", "winrm"] = "ssh"
+    password: str | None = Field(default=None, max_length=4096)
 
 
 class DiskMetric(BaseModel):

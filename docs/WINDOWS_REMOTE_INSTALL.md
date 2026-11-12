@@ -1,16 +1,23 @@
 # Windows remote install — plan
 
-**Status:** proposed. Not implemented.
+**Status:** implemented with WinRM over HTTPS and an optional `pywinrm`
+dependency. The OpenSSH-for-Windows transport remains a future alternative.
 
-Sextant currently supports remote agent installation on Linux over key-based
-SSH only. The Discovery onboarding flow can generate a **manual elevated
-PowerShell** enrollment command for a discovered Windows device and links to
-this document so operators know what is and is not supported.
+Sextant's **Remote install** page now supports a credential-based Windows
+install job. The implementation uses WinRM over HTTPS (default port 5986),
+validates the target certificate, uploads the signed agent wheel and the
+reviewed PowerShell installer, verifies the wheel SHA-256, enrolls with a
+one-time token, locks down the config ACL, creates the SYSTEM scheduled task,
+starts it, and waits for an authenticated agent heartbeat before marking the job
+successful. It is admin-only and audited. Credentials and the enrollment token
+exist only in the job request/thread and are redacted from logs/errors/audit.
 
-This document is a concrete plan for a future, credential-based Windows remote
-install path. It is deliberately separate from the existing outbound-only agent
-model: the installer initiates the connection from the Sextant server to the
-target, and the target must explicitly allow that management channel.
+The Discovery onboarding flow still generates a **manual elevated PowerShell**
+enrollment command for a discovered Windows device. That path does not require
+the optional dependency and is useful when WinRM is not enabled.
+
+The installer still initiates the connection from the Sextant server to the
+target, so the target must explicitly allow that management channel.
 
 ---
 
@@ -112,14 +119,69 @@ scheduled task.
 
 ### Which to choose
 
-Prefer **WinRM over HTTPS** for a Windows-first environment with certificate
-management already in place. Choose **OpenSSH** when the fleet already uses
-centralized SSH keys and host-key pinning for Windows.
-
-Do not implement both in the first release. Ship one transport behind an
-explicit setting, with the other as a later adapter.
+**WinRM over HTTPS is the implemented transport.** OpenSSH for Windows remains
+a future adapter. Choose WinRM when the target can be configured with a trusted
+management certificate and TCP 5986 from the Sextant server.
 
 ---
+
+## Implemented details
+
+Install the optional extra on the Sextant server:
+
+```bash
+/opt/sextant/.venv/bin/pip install 'sextant[windows-remote]'
+```
+
+Environment:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SEXTANT_WINDOWS_INSTALL_ENABLED` | `1` | Enable the Windows remote-install job path |
+| `SEXTANT_WINDOWS_INSTALL_CA_FILE` | empty | Optional CA bundle when the pywinrm build supports `ca_trust_path`; otherwise install the CA in the server trust store |
+| `SEXTANT_WINDOWS_INSTALL_TIMEOUT_SECONDS` | `600` | Job operation timeout (60–3600) |
+
+Target requirements:
+
+- WinRM enabled on HTTPS 5986 with a certificate whose hostname/IP SAN matches
+  the target and which chains to a trusted CA.
+- Firewall allows TCP 5986 from the Sextant server.
+- An administrative local or domain account. Domain users may be supplied as
+  `DOMAIN\user` or UPN.
+- Python 3.11+ already installed and available as `py -3` or `python`.
+- A published `sextant-agent` `agent-wheel` release in the package store.
+
+API request:
+
+```json
+{
+  "host": "192.168.1.40",
+  "port": 5986,
+  "user": "CORP\\Administrator",
+  "password": "one-time secret",
+  "name": "studio-pc",
+  "profile": "workstation",
+  "watch_services": ["Spooler"],
+  "os": "windows",
+  "transport": "winrm"
+}
+```
+
+The password is never written to SQLite, the job row, logs, audit rows, or
+subsequent API responses. The one-time enrollment token is stored only as a
+SHA-256 hash and is redacted from job logs/errors. A job succeeds only after the
+server observes an authenticated agent heartbeat.
+
+Known limitations of this implementation:
+
+- Live WinRM behavior depends on the optional `pywinrm` package and the target's
+  WinRM/certificate configuration. It is fixture/fake-transport tested in CI.
+- Custom CA files require a pywinrm build exposing `ca_trust_path`; otherwise the
+  CA must be in the server trust store. There is no insecure/skip-validation
+  switch.
+- The password is used once for the job. Retrying after a failure requires
+  re-entering it.
+- OpenSSH for Windows is not implemented.
 
 ## Credential handling
 

@@ -610,17 +610,20 @@
       <section class="page" id="page-remote-install" hidden>
         <div class="panel-grid">
           <article class="panel">
-            <div class="panel-head"><div><p class="eyebrow">SSH</p><h2>Install an agent</h2></div></div>
+            <div class="panel-head"><div><p class="eyebrow">Remote install</p><h2>Install an agent</h2></div></div>
             <form id="remote-install-form" class="form-stack">
               <div class="form-grid">
+                <label class="field"><span>Target OS</span><select name="os" id="remote-install-os"><option value="linux">Linux (key-based SSH)</option><option value="windows">Windows (WinRM over HTTPS)</option></select></label>
                 <label class="field"><span>Host</span><input name="host" required maxlength="255" placeholder="192.0.2.50"></label>
-                <label class="field"><span>SSH port</span><input name="port" type="number" min="1" max="65535" value="22"></label>
-                <label class="field"><span>SSH user</span><input name="user" required maxlength="64" placeholder="root"></label>
+                <label class="field"><span>Port</span><input name="port" id="remote-install-port" type="number" min="1" max="65535" value="22"></label>
+                <label class="field"><span>User</span><input name="user" required maxlength="128" placeholder="root"></label>
+                <label class="field" id="remote-install-password-wrap" hidden><span>Windows password</span><input name="password" type="password" maxlength="4096" autocomplete="new-password" placeholder="used only for this job"></label>
                 <label class="field"><span>Display name</span><input name="name" maxlength="255" placeholder="fileserver-01"></label>
                 <label class="field"><span>Profile</span><select name="profile" id="remote-install-profile"></select></label>
                 <label class="field"><span>Watch services</span><input name="watch_services" maxlength="1000" placeholder="ssh,nginx"></label>
               </div>
-              <p class="form-hint">Linux only. The target must accept key-based SSH for this user and allow passwordless <code>sudo</code>. Host-key verification is disabled, so this is intended for hosts you control and frequently rebuild.</p>
+              <p class="form-hint" id="remote-install-hint">Linux uses key-based SSH for this user and requires passwordless <code>sudo</code>. Host-key verification is disabled for this installer; use hosts you control.</p>
+              <p class="form-hint" id="remote-install-windows-note" hidden>Windows uses WinRM over HTTPS (5986) with certificate validation and the optional <code>windows-remote</code> extra. The password is held only in the job thread and is never stored or logged. See <code>docs/WINDOWS_REMOTE_INSTALL.md</code>.</p>
               <p class="form-error" id="remote-install-error" role="alert"></p>
               <div class="section-toolbar">
                 <button class="button button-secondary" type="button" id="remote-install-test">Test connection</button>

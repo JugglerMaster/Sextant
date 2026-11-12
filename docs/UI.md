@@ -20,7 +20,7 @@ D6 adds an admin-only **Import** panel (format, file/paste, preview counts, conf
 - **Container console** (D4) — operator Console action on running containers, setup for shell/user/workdir, warning banner, ANSI-cleaned terminal output, keystroke forwarding and input row, paste/copy, resize, idle countdown, explicit close confirmation, focus return, and mobile layout. No transcript is retained.
 - **Packages** — inventory with interactive table, **desired-state rule editor** (admin), drift summary, Sync now.
 - **Profiles** — create/edit/reset/delete profiles, modules, action gates, cadences, tag assignments.
-- **Remote install** — Linux SSH install jobs with test/install/log.
+- **Remote install** — Linux key-based SSH and Windows WinRM-over-HTTPS install jobs with OS-aware prerequisite test, one-time password field (Windows), install/log/history, and admin-only access.
 - **Wake targets**, **Enrollment**, **Users**, **Audit**, **Security**.
 - Update banner, toasts, native dialogs, dark theme, responsive breakpoints.
 

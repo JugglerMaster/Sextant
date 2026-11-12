@@ -29,6 +29,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import __version__
 from . import remote_install
 from . import updates
+from . import windows_remote
 from .config import Settings
 from .db import Database, DEFAULT_PROFILES, dumps, loads, parse_iso, utcnow, utcnow_iso
 from .discovery import (
@@ -420,6 +421,8 @@ def _public_settings(settings: Settings) -> dict[str, Any]:
         "offline_after_seconds": settings.offline_after_seconds,
         "offline_command_policy": settings.offline_command_policy,
         "max_queued_commands_per_agent": settings.max_queued_commands_per_agent,
+        "ssh_install_enabled": settings.ssh_install_enabled,
+        "windows_install_enabled": settings.windows_install_enabled,
         "version": __version__,
         "public_url": settings.public_url,
         "notifications": {
@@ -7715,20 +7718,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         payload: RemoteInstallIn,
         request: Request,
         user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
         config: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
-        del request, user
-        if not config.ssh_install_enabled:
-            raise HTTPException(status_code=404, detail="Remote install is disabled.")
-        try:
-            output = remote_install.test_connection(
-                key_path=config.ssh_key_path,
-                host=payload.host,
-                port=payload.port,
-                user=payload.user,
-            )
-        except remote_install.RemoteInstallError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+        if payload.os == "windows":
+            if not config.windows_install_enabled:
+                raise HTTPException(status_code=404, detail="Windows remote install is disabled.")
+            if not payload.password:
+                raise HTTPException(status_code=400, detail="A Windows password is required.")
+            try:
+                output = windows_remote.test_connection(
+                    host=payload.host,
+                    port=payload.port,
+                    user=payload.user,
+                    password=payload.password,
+                    ca_file=config.windows_install_ca_file,
+                    timeout=min(120, config.windows_install_timeout_seconds),
+                )
+            except windows_remote.WindowsRemoteError as exc:
+                database.audit(
+                    actor=user["username"],
+                    action="remote_install.test_failed",
+                    detail={"host": payload.host, "os": "windows", "error": str(exc)[:500]},
+                    ip=client_ip(request, config.trust_proxy),
+                )
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+        else:
+            if not config.ssh_install_enabled:
+                raise HTTPException(status_code=404, detail="Remote install is disabled.")
+            try:
+                output = remote_install.test_connection(
+                    key_path=config.ssh_key_path,
+                    host=payload.host,
+                    port=payload.port,
+                    user=payload.user,
+                )
+            except remote_install.RemoteInstallError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+        database.audit(
+            actor=user["username"],
+            action="remote_install.tested",
+            detail={"host": payload.host, "os": payload.os, "transport": payload.transport},
+            ip=client_ip(request, config.trust_proxy),
+        )
         return {"ok": True, "output": output}
 
     @app.post("/api/remote-install")
@@ -7740,7 +7772,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         config: Settings = Depends(get_settings),
         store: ArtifactStore = Depends(get_store),
     ) -> dict[str, Any]:
-        if not config.ssh_install_enabled:
+        is_windows = payload.os == "windows"
+        if is_windows:
+            if not config.windows_install_enabled:
+                raise HTTPException(status_code=404, detail="Windows remote install is disabled.")
+            if not payload.password:
+                raise HTTPException(status_code=400, detail="A Windows password is required.")
+            if payload.transport != "winrm":
+                raise HTTPException(status_code=400, detail="Windows remote install uses the WinRM transport.")
+        elif not config.ssh_install_enabled:
             raise HTTPException(status_code=404, detail="Remote install is disabled.")
         profile = database.get_profile_by_slug(payload.profile) or database.get_profile_by_id(payload.profile)
         if profile is None:
@@ -7751,10 +7791,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         wheel_path = store.blob_path(release["sha256"])
         if not wheel_path.is_file():
             raise HTTPException(status_code=400, detail="The agent wheel blob is missing from the store.")
-        try:
-            remote_install._key_check(config.ssh_key_path)
-        except remote_install.RemoteInstallError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+        if not is_windows:
+            try:
+                remote_install._key_check(config.ssh_key_path)
+            except remote_install.RemoteInstallError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
         if database.running_remote_install_jobs() > 0:
             raise HTTPException(status_code=409, detail="Another remote install is already running. Wait for it to finish.")
         name = (payload.name or payload.host).strip()[:255]
@@ -7766,6 +7807,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             name=name,
             watch_services=[str(item)[:255] for item in payload.watch_services if str(item).strip()][:64],
             actor=user["username"],
+            os=payload.os,
+            transport="winrm" if is_windows else "ssh",
         )
         token = _issue_remote_enrollment_token(database, user["username"], f"remote-install:{payload.host}")
         server_url = config.public_url or str(request.base_url).rstrip("/")
@@ -7773,12 +7816,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             actor=user["username"],
             action="remote_install.created",
             target=job["id"],
-            detail={"host": payload.host, "user": payload.user, "profile": profile["slug"]},
+            detail={
+                "host": payload.host,
+                "user": payload.user,
+                "profile": profile["slug"],
+                "os": payload.os,
+                "transport": "winrm" if is_windows else "ssh",
+            },
             ip=client_ip(request, config.trust_proxy),
         )
         threading.Thread(
             target=_run_remote_install_job,
-            args=(config, job["id"], token, str(wheel_path), server_url),
+            args=(
+                config,
+                job["id"],
+                token,
+                str(wheel_path),
+                server_url,
+                payload.password if is_windows else "",
+            ),
             daemon=True,
         ).start()
         return _remote_job_dict(job)
@@ -8276,6 +8332,7 @@ def _remote_job_dict(row: Any) -> dict[str, Any]:
         "port": row["port"],
         "user": row["ssh_user"],
         "os": row["os"],
+        "transport": row["transport"] if "transport" in row.keys() else ("winrm" if row["os"] == "windows" else "ssh"),
         "profile": row["profile"],
         "name": row["name"],
         "status": row["status"],
@@ -8317,46 +8374,112 @@ def _issue_remote_enrollment_token(database: Database, actor: str, label: str) -
     return token
 
 
+def _redact_remote_text(text: Any, secrets: list[str]) -> str:
+    value = str(text or "")
+    for secret in secrets:
+        if secret:
+            value = value.replace(secret, "***")
+    return value[:20_000]
+
+
+def _wait_for_remote_agent_heartbeat(
+    database: Database, *, host: str, name: str, timeout_seconds: int = 60
+) -> bool:
+    deadline = time.monotonic() + max(5, min(300, int(timeout_seconds)))
+    while time.monotonic() < deadline:
+        with database.connection() as conn:
+            row = conn.execute(
+                """SELECT last_seen FROM agents
+                   WHERE last_seen IS NOT NULL
+                     AND (hostname = ? COLLATE NOCASE OR name = ? COLLATE NOCASE OR ip = ?)
+                   ORDER BY last_seen DESC LIMIT 1""",
+                (name, name, host),
+            ).fetchone()
+        if row is not None and row["last_seen"]:
+            return True
+        time.sleep(2)
+    return False
+
+
 def _run_remote_install_job(
     settings: Settings,
     job_id: str,
     token: str,
     wheel_path: str,
     server_url: str,
+    password: str = "",
 ) -> None:
     database = Database(settings.database_path)
     row = database.get_remote_install_job(job_id)
     if row is None:
         return
+    secrets_to_redact = [token, password]
+
+    def log_line(line: str) -> None:
+        database.update_remote_install_job(
+            job_id, log_append=_redact_remote_text(line, secrets_to_redact)
+        )
+
     database.update_remote_install_job(
         job_id,
         status="running",
         started=True,
-        log_append=f"Starting remote install on {row['ssh_user']}@{row['host']}:{row['port']}",
+        log_append=_redact_remote_text(
+            f"Starting {row['os']} remote install on {row['ssh_user']}@{row['host']}:{row['port']}",
+            secrets_to_redact,
+        ),
     )
     try:
-        remote_install.run_install(
-            key_path=settings.ssh_key_path,
-            host=row["host"],
-            port=row["port"],
-            user=row["ssh_user"],
-            server_url=server_url,
-            token=token,
-            name=row["name"],
-            profile=row["profile"],
-            watch_services=loads(row["watch_services"], []),
-            wheel_path=wheel_path,
-            log=lambda line: database.update_remote_install_job(job_id, log_append=line),
-        )
+        if row["os"] == "windows":
+            windows_remote.run_install(
+                host=row["host"],
+                port=row["port"],
+                user=row["ssh_user"],
+                password=password,
+                server_url=server_url,
+                token=token,
+                name=row["name"],
+                profile=row["profile"],
+                watch_services=loads(row["watch_services"], []),
+                wheel_path=wheel_path,
+                ca_file=settings.windows_install_ca_file,
+                timeout=settings.windows_install_timeout_seconds,
+                log=log_line,
+            )
+            if not _wait_for_remote_agent_heartbeat(
+                database,
+                host=row["host"],
+                name=row["name"],
+                timeout_seconds=min(120, settings.windows_install_timeout_seconds),
+            ):
+                raise windows_remote.WindowsRemoteError(
+                    "Windows install finished but no authenticated agent heartbeat was observed. "
+                    "Check the target's SextantAgent task and agent.log."
+                )
+        else:
+            remote_install.run_install(
+                key_path=settings.ssh_key_path,
+                host=row["host"],
+                port=row["port"],
+                user=row["ssh_user"],
+                server_url=server_url,
+                token=token,
+                name=row["name"],
+                profile=row["profile"],
+                watch_services=loads(row["watch_services"], []),
+                wheel_path=wheel_path,
+                log=log_line,
+            )
     except Exception as exc:  # job boundary: always record the failure
+        error = _redact_remote_text(exc, secrets_to_redact)
         database.update_remote_install_job(
             job_id,
             status="failed",
-            error=str(exc)[:4000],
-            log_append=f"Remote install failed: {str(exc)[:4000]}",
+            error=error[:4000],
+            log_append=f"Remote install failed: {error}",
             finished=True,
         )
-        database.audit("system", "remote_install.failed", job_id, {"error": str(exc)[:1000]})
+        database.audit("system", "remote_install.failed", job_id, {"error": error[:1000]})
         return
     database.update_remote_install_job(
         job_id,
@@ -8364,7 +8487,12 @@ def _run_remote_install_job(
         log_append="Remote install succeeded.",
         finished=True,
     )
-    database.audit("system", "remote_install.completed", job_id, {})
+    database.audit(
+        "system",
+        "remote_install.completed",
+        job_id,
+        {"os": row["os"], "transport": row["transport"]},
+    )
 
 
 def _package_actions(packages: list[dict[str, Any]], rules: list[Any]) -> list[dict[str, str]]:

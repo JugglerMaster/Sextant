@@ -517,7 +517,7 @@ The agent reports installed packages on the profile's package cadence (24h works
 
 The server update check is configured with `SEXTANT_UPDATE_FEED` (for example `github:owner/repo`) and shows an admin banner when a newer release exists. It does not apply the server update automatically.
 
-## 4.7 Remote install over SSH (optional, Linux)
+## 4.7 Remote install over SSH (Linux) and WinRM (Windows)
 
 Admins can install an agent on a Linux host from **Remote install** in the dashboard. Requirements:
 
@@ -528,6 +528,14 @@ Admins can install an agent on a Linux host from **Remote install** in the dashb
 - Python 3.11+ and `python3-venv` on the target.
 
 Host-key verification is disabled because rebuilt PCs change host keys. Use this only on a trusted admin network/VPN. One install job runs at a time. See [REMOTE_INSTALL.md](REMOTE_INSTALL.md) for key setup, API, and troubleshooting.
+
+Windows remote install uses WinRM over HTTPS (default port 5986) and the optional `pywinrm` extra:
+
+```bash
+/opt/sextant/.venv/bin/pip install 'sextant[windows-remote]'
+```
+
+Target requirements include WinRM on HTTPS 5986 with a trusted certificate, an admin account, Python 3.11+, and outbound HTTPS to the console. The admin supplies a one-time password in the Remote install page; Sextant never stores or logs it. A job succeeds only after an authenticated agent heartbeat. Set `SEXTANT_WINDOWS_INSTALL_ENABLED=0` to disable this path, `SEXTANT_WINDOWS_INSTALL_CA_FILE` for a custom CA when supported by pywinrm, and `SEXTANT_WINDOWS_INSTALL_TIMEOUT_SECONDS` to bound the job. See [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md).
 
 ## 5. Verify end to end
 

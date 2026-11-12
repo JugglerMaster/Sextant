@@ -669,6 +669,7 @@ const discoverySummary = {
   conflicts: 1,
   conflict_device_ids: ["dev_printer"],
 };
+let remoteInstallJob = null;
 const discoveryIntegrations = [
   {
     kind: "snmp",
@@ -1112,7 +1113,34 @@ function createApi(session) {
     if (key === "/api/profiles") return { status: 200, body: profilesPayload };
     if (key === "/api/profile-tags") return { status: 200, body: { assignments: [] } };
     if (key === "/api/saved-views") return { status: 200, body: { views: [] } };
-    if (key === "/api/remote-install") return { status: 200, body: { jobs: [] } };
+    if (method === "POST" && key === "/api/remote-install/test") {
+      return { status: 200, body: { ok: true, output: "WinRM prerequisites OK" } };
+    }
+    if (method === "POST" && key === "/api/remote-install") {
+      remoteInstallJob = {
+        id: "ri_win",
+        host: body?.host || "192.168.1.10",
+        port: body?.port || 5986,
+        user: body?.user || "Administrator",
+        os: body?.os || "linux",
+        transport: body?.transport || "ssh",
+        profile: body?.profile || "workstation",
+        name: body?.name || "",
+        status: "running",
+        log: "WinRM install started.",
+        error: "",
+        created_at: "2026-11-06T08:06:00Z",
+        started_at: "2026-11-06T08:06:01Z",
+        finished_at: null,
+      };
+      return { status: 200, body: remoteInstallJob };
+    }
+    if (method === "GET" && key === "/api/remote-install") {
+      return { status: 200, body: { jobs: remoteInstallJob ? [remoteInstallJob] : [] } };
+    }
+    if (method === "GET" && key === "/api/remote-install/ri_win") {
+      return { status: 200, body: remoteInstallJob };
+    }
     if (key === "/api/agents/agt_demo") {
       return { status: 200, body: { agent: demoAgent, commands: historyCommands.slice(0, 2) } };
     }
