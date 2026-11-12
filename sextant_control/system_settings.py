@@ -12,13 +12,17 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import pwd
 import re
 import subprocess
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+try:  # POSIX only; the Windows server still accepts every other setting.
+    import pwd
+except ImportError:  # pragma: no cover - exercised on Windows CI
+    pwd = None  # type: ignore[assignment]
 
 from .config import LdapSettings, Settings
 
@@ -95,6 +99,8 @@ def _managed_key_path(settings: Settings) -> Path:
 
 
 def _home_for_user(username: str) -> Path:
+    if pwd is None:
+        return Path.home()
     try:
         return Path(pwd.getpwnam(username).pw_dir)
     except KeyError:
@@ -104,7 +110,11 @@ def _home_for_user(username: str) -> Path:
 def resolve_ssh_key_path(settings: Settings) -> str:
     explicit = str(settings.ssh_key_path or "").strip()
     managed = str(_managed_key_path(settings))
-    if settings.ssh_key_source != "system_user" or not settings.ssh_system_user:
+    if (
+        settings.ssh_key_source != "system_user"
+        or not settings.ssh_system_user
+        or pwd is None
+    ):
         return explicit or managed
     home = _home_for_user(settings.ssh_system_user)
     if explicit and explicit != managed:
@@ -120,7 +130,11 @@ def resolve_ssh_config_path(settings: Settings) -> str:
     explicit = str(settings.ssh_config_path or "").strip()
     if explicit:
         return str(Path(explicit).expanduser())
-    if settings.ssh_key_source != "system_user" or not settings.ssh_system_user:
+    if (
+        settings.ssh_key_source != "system_user"
+        or not settings.ssh_system_user
+        or pwd is None
+    ):
         return ""
     candidate = _home_for_user(settings.ssh_system_user) / ".ssh" / "config"
     return str(candidate) if candidate.exists() else ""
@@ -376,6 +390,10 @@ def normalize_patch(
         merged["ssh"]["source"] = source
         merged["ssh"]["system_user"] = str(merged["ssh"].get("system_user") or "").strip()
         if source == "system_user":
+            if pwd is None:
+                raise ValueError(
+                    "System-user SSH configuration is only available on Linux and macOS."
+                )
             if not merged["ssh"]["system_user"]:
                 raise ValueError("Choose the system user whose SSH configuration to use.")
             try:

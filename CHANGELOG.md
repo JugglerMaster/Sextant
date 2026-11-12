@@ -4,6 +4,14 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.6.4] - 2026-11-12
+
+### Fixed
+
+- The settings module imports cleanly on Windows, where the POSIX `pwd`
+  module is unavailable. System-user SSH configuration is explicitly
+  Linux/macOS-only; every other setting remains available.
+
 ## [0.6.3] - 2026-11-12
 
 ### Changed
@@ -294,6 +302,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.6.4]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.4
 [0.6.3]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.3
 [0.6.2]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.2
 [0.6.1]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.1
