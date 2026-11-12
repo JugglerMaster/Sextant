@@ -554,9 +554,128 @@ const dashboardPayload = {
   agents,
 };
 
+const discoverySettings = {
+  enabled: true,
+  acknowledged: true,
+  acknowledged_at: "2026-11-06T07:00:00Z",
+  acknowledged_by: "admin",
+  acknowledgement_text: "I am authorized to scan these networks",
+  cidrs: ["192.168.1.0/24"],
+  cidr_errors: [],
+  exclude: [],
+  methods: ["neigh", "dns", "oui", "ssdp", "tcp"],
+  probe_ports: [22, 80, 443, 8006],
+  active_probes: true,
+  interval_hours: 0,
+  max_hosts: 1024,
+  concurrency: 32,
+  timeout_ms: 600,
+  retention_days: 90,
+  agent_relay: false,
+  export_limit: 10000,
+  disabled_reasons: [],
+};
+const discoveryDevices = [
+  {
+    id: "dev_printer",
+    first_seen: "2026-11-06T07:00:00Z",
+    last_seen: "2026-11-06T08:00:00Z",
+    mac: "b8:27:eb:11:22:33",
+    ip: "192.168.1.40",
+    hostname: "printer.lan",
+    vendor: "Raspberry Pi Foundation",
+    device_type: "printer",
+    os_guess: "Embedded",
+    confidence: 0.9,
+    source: "server",
+    segment: "192.168.1.0/24",
+    open_ports: [22, 80, 631],
+    services: {
+      "22": { protocol: "ssh", banner: "SSH-2.0-OpenSSH_9.6", product: "OpenSSH", version: "9.6" },
+      "80": { protocol: "http", status: 200, server: "nginx/1.24", title: "Printer" },
+    },
+    mdns: {},
+    ssdp: {},
+    evidence: { methods: ["neigh", "dns", "oui", "ssdp"], neighbor: true, reverse_dns: true, ssdp: false, tcp: true },
+    state: "new",
+    agent_id: null,
+    wake_target_id: null,
+    tags: ["office"],
+    notes: "",
+    mac_randomized: false,
+  },
+  {
+    id: "dev_esxi",
+    first_seen: "2026-11-06T07:05:00Z",
+    last_seen: "2026-11-06T07:55:00Z",
+    mac: "00:50:56:aa:bb:cc",
+    ip: "192.168.1.50",
+    hostname: "esxi.lan",
+    vendor: "VMware",
+    device_type: "hypervisor",
+    os_guess: "Hypervisor",
+    confidence: 0.85,
+    source: "server",
+    segment: "192.168.1.0/24",
+    open_ports: [443, 8006],
+    services: { "443": { protocol: "tls", subject: "esxi.lan", issuer: "Lab CA", san: ["esxi.lan"] } },
+    mdns: {},
+    ssdp: {},
+    evidence: { methods: ["neigh", "dns", "oui", "tcp"], neighbor: true, reverse_dns: true, ssdp: false, tcp: true },
+    state: "known",
+    agent_id: "agt_demo",
+    wake_target_id: null,
+    tags: [],
+    notes: "VM host",
+    mac_randomized: false,
+  },
+];
+const discoverySummary = {
+  total: 2,
+  new: 1,
+  states: { new: 1, known: 1, ignored: 0, promoted: 0 },
+  types: [
+    { type: "printer", count: 1 },
+    { type: "hypervisor", count: 1 },
+  ],
+  segments: [{ segment: "192.168.1.0/24", count: 2 }],
+  vendors: [
+    { vendor: "Raspberry Pi Foundation", count: 1 },
+    { vendor: "VMware", count: 1 },
+  ],
+  no_agent: 1,
+};
+const discoveryEvents = [
+  { id: 2, at: "2026-11-06T07:50:00Z", device_id: "dev_printer", kind: "new_port", detail: { port: 631 } },
+  { id: 1, at: "2026-11-06T07:00:00Z", device_id: "dev_printer", kind: "new_device", detail: { ip: "192.168.1.40" } },
+];
+const discoveryScans = [
+  {
+    id: "dsc_demo",
+    started_at: "2026-11-06T07:00:00Z",
+    finished_at: "2026-11-06T07:01:00Z",
+    scope: ["192.168.1.0/24"],
+    methods: ["neigh", "dns", "oui", "ssdp"],
+    initiated_by: "admin",
+    status: "succeeded",
+    hosts_found: 2,
+    error: "",
+    progress: 100,
+    hosts_scanned: 254,
+    cancel_requested: false,
+  },
+];
 function createApi(session) {
   let dockerCommand = null;
   let dockerDetailReads = 0;
+  const discoveryDeviceState = discoveryDevices.map((device) => ({
+    ...device,
+    open_ports: [...device.open_ports],
+    tags: [...device.tags],
+    services: { ...device.services },
+    evidence: { ...device.evidence },
+  }));
+  let activeScan = null;
   return function respond(url, method, body = null) {
     const key = url.pathname;
     if (key === "/api/auth/config") {
@@ -576,6 +695,124 @@ function createApi(session) {
       return { status: 204, body: null };
     }
     if (key === "/api/dashboard") return { status: 200, body: dashboardPayload };
+    if (key === "/api/discovery/settings") {
+      if (method === "PATCH") {
+        session.discoveryAcknowledged = Boolean(body?.acknowledged);
+      }
+      const acknowledged =
+        session.discoveryAcknowledged === undefined
+          ? discoverySettings.acknowledged
+          : Boolean(session.discoveryAcknowledged);
+      return {
+        status: 200,
+        body: {
+          ...discoverySettings,
+          enabled: !session.discoveryDisabled,
+          acknowledged,
+          acknowledged_at: acknowledged ? discoverySettings.acknowledged_at : null,
+          disabled_reasons: session.discoveryDisabled
+            ? ["SEXTANT_DISCOVERY_ENABLED is 0."]
+            : [],
+        },
+      };
+    }
+    if (key === "/api/discovery/devices") {
+      let filtered = [...discoveryDeviceState];
+      const state = url.searchParams.get("state") || "";
+      const type = url.searchParams.get("type") || "";
+      const segment = url.searchParams.get("segment") || "";
+      const vendor = url.searchParams.get("vendor") || "";
+      if (state) filtered = filtered.filter((device) => device.state === state);
+      if (type) filtered = filtered.filter((device) => device.device_type === type);
+      if (segment) filtered = filtered.filter((device) => device.segment === segment);
+      if (vendor) filtered = filtered.filter((device) => device.vendor === vendor);
+      if (url.searchParams.get("no_agent") === "true") {
+        filtered = filtered.filter((device) => !device.agent_id);
+      }
+      if (url.searchParams.get("admin_ports") === "true") {
+        filtered = filtered.filter((device) =>
+          device.open_ports.some((port) => [22, 3389, 5900, 5985, 5986].includes(port)),
+        );
+      }
+      return {
+        status: 200,
+        body: { devices: filtered, total: filtered.length, limit: 50, offset: 0, summary: discoverySummary },
+      };
+    }
+    if (method === "GET" && key.startsWith("/api/discovery/devices/")) {
+      const id = key.slice("/api/discovery/devices/".length);
+      const device = discoveryDeviceState.find((item) => item.id === id);
+      return device
+        ? {
+            status: 200,
+            body: {
+              device,
+              events: id === "dev_printer" ? discoveryEvents : [],
+              agent: device.agent_id ? demoAgent : null,
+              wake_target: null,
+            },
+          }
+        : { status: 404, body: { detail: "Discovered device not found." } };
+    }
+    if (method === "PATCH" && key.startsWith("/api/discovery/devices/")) {
+      const id = key.slice("/api/discovery/devices/".length);
+      const index = discoveryDeviceState.findIndex((item) => item.id === id);
+      if (index < 0) return { status: 404, body: { detail: "Discovered device not found." } };
+      const current = discoveryDeviceState[index];
+      const next = {
+        ...current,
+        ...(body?.tags !== undefined ? { tags: body.tags } : {}),
+        ...(body?.notes !== undefined ? { notes: body.notes } : {}),
+        ...(body?.state !== undefined ? { state: body.state } : {}),
+      };
+      discoveryDeviceState[index] = next;
+      return { status: 200, body: { device: next, events: id === "dev_printer" ? discoveryEvents : [] } };
+    }
+    if (method === "DELETE" && key.startsWith("/api/discovery/devices/")) {
+      const id = key.slice("/api/discovery/devices/".length);
+      const index = discoveryDeviceState.findIndex((item) => item.id === id);
+      if (index >= 0) discoveryDeviceState.splice(index, 1);
+      return { status: 204, body: null };
+    }
+    if (key === "/api/discovery/scans") {
+      return {
+        status: 200,
+        body: {
+          scans: activeScan ? [activeScan, ...discoveryScans] : discoveryScans,
+          total: activeScan ? discoveryScans.length + 1 : discoveryScans.length,
+          limit: 50,
+          offset: 0,
+          active_scan_id: activeScan?.status === "running" ? activeScan.id : null,
+        },
+      };
+    }
+    if (method === "POST" && key === "/api/discovery/scan") {
+      activeScan = {
+        id: "dsc_live",
+        started_at: "2026-11-06T08:05:00Z",
+        finished_at: null,
+        scope: body?.scope || ["192.168.1.0/24"],
+        methods: body?.methods || ["neigh"],
+        initiated_by: "admin",
+        status: "running",
+        hosts_found: 0,
+        error: "",
+        progress: 12,
+        hosts_scanned: 30,
+        cancel_requested: false,
+      };
+      return { status: 200, body: { scan: activeScan } };
+    }
+    if (method === "POST" && /^\/api\/discovery\/scans\/[^/]+\/cancel$/.test(key)) {
+      if (activeScan) {
+        activeScan = {
+          ...activeScan,
+          status: "cancelled",
+          finished_at: "2026-11-06T08:06:00Z",
+        };
+      }
+      return { status: 200, body: { scan: activeScan } };
+    }
     if (key === "/api/update/status") {
       return {
         status: 200,

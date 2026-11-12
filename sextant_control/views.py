@@ -579,6 +579,61 @@ def store_release_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def discovered_device_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "first_seen": row["first_seen"],
+        "last_seen": row["last_seen"],
+        "mac": row["mac"],
+        "ip": row["ip"],
+        "hostname": row["hostname"],
+        "vendor": row["vendor"],
+        "device_type": row["device_type"],
+        "os_guess": row["os_guess"],
+        "confidence": round(float(row["confidence"] or 0), 2),
+        "source": row["source"],
+        "segment": row["segment"],
+        "open_ports": loads(row["open_ports"], []),
+        "services": loads(row["services"], {}),
+        "mdns": loads(row["mdns"], {}),
+        "ssdp": loads(row["ssdp"], {}),
+        "evidence": loads(row["evidence"], {}),
+        "state": row["state"],
+        "agent_id": row["agent_id"],
+        "wake_target_id": row["wake_target_id"],
+        "tags": loads(row["tags"], []),
+        "notes": row["notes"],
+        "mac_randomized": bool(row["mac_randomized"]),
+    }
+
+
+def discovery_scan_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "scope": loads(row["scope"], []),
+        "methods": loads(row["methods"], []),
+        "initiated_by": row["initiated_by"],
+        "status": row["status"],
+        "hosts_found": int(row["hosts_found"] or 0),
+        "error": row["error"],
+        "progress": int(row["progress"] or 0),
+        "hosts_scanned": int(row["hosts_scanned"] or 0),
+        "cancel_requested": bool(row["cancel_requested"]),
+    }
+
+
+def discovery_event_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "at": row["at"],
+        "device_id": row["device_id"],
+        "kind": row["kind"],
+        "detail": loads(row["detail"], {}),
+    }
+
+
 def bounded_json(value: Any, limit: int = 10_000) -> str:
     encoded = dumps(value)
     if len(encoded) <= limit:

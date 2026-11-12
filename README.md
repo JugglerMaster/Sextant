@@ -69,6 +69,7 @@ way.
 - **Active Directory / Samba AD** — optional LDAP(S) bind authentication with group-to-role mapping and per-user provisioning.
 - **Cross-platform agents** — Linux and Windows agents with outbound-only heartbeat/command polling and stable machine identity.
 - **Wake-on-LAN** — server-side magic packets for agents (using their reported MAC) and for saved agent-less targets.
+- **Discovery (D1–D2)** — default-off, CIDR-scoped inventory of unmanaged devices. Operators record an audited authorization acknowledgement, choose an allowlisted private scope, and run passive neighbour/DNS/OUI/SSDP collection plus opt-in TCP/banner/TLS fingerprinting. The page shows fleet counts, device types, open ports, linked agents/wake targets, and deduplicated new-device/new-port/service/identity/went-dark events. Scans run in a bounded background worker with a host cap, rate limit, progress, and cancellation. Agent-relayed scans, export, promotion, and integrations remain future phases.
 - **Live health** — online/offline status, CPU, memory, uptime, disks, NVIDIA GPU utilization/VRAM/temperature, GPU compute processes, service states, and startup entries.
 - **Docker Hosts** — Linux agents report Docker engine/Compose versions and a bounded inventory of containers, images, volumes, and networks. Select one host to inspect its environment, run allowlisted lifecycle/rename/update/remove/clone actions, view logs, use one-shot exec or the interactive console, and run cached cleanup previews with confirmed prune actions. The selected host refreshes automatically while visible; Compose config-hash drift is badged in Containers, Stacks, and deployment history.
 - **Compose Files** — a server-side flat Compose library under a configurable directory with immutable revisions, `.env` redaction for non-admins, deploy/update/down/rollback to one or up to 20 Docker hosts with per-host results, deployment history/logs, and external-vs-managed project display. Image-based Compose only; build contexts and recreate-in-place from a full inspect spec are not implemented.
@@ -171,9 +172,9 @@ npx playwright install chromium
 npm run test:visual
 ```
 
-The Python suite has **295 tests** (294 run on Linux; one Windows-only junction test is skipped there and runs on the Windows CI job). It covers password/session/CSRF security, the API RBAC and authentication contract, local and AD login, session revocation, user disable/reset, failed-login audit, enrollment, heartbeat, command dispatch/idempotency/cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication, WoL, audit logging, agent parsers, executor behavior, config handling, the Tier 0 package store, server update checks, agent self-update on Linux and Windows, package inventory/desired-state sync, agent profiles, revisioned inventory, Docker detection/inventory/actions/exec/console/clone/cleanup/API gating, multi-host deploy partial failure, Compose storage/revisions/deploy/bundle/gating, config-hash drift, health-event deduplication, Telegram notification evaluation/deduplication/retry, and key-based SSH remote install.
+The Python suite has **347 tests** (346 run on Linux; one Windows-only junction test is skipped there and runs on the Windows CI job). It covers password/session/CSRF security, the API RBAC and authentication contract, local and AD login, session revocation, user disable/reset, failed-login audit, enrollment, heartbeat, command dispatch/idempotency/cancel/retry/expiry, queue caps, offline policy, agent policy, re-enrollment deduplication, WoL, audit logging, agent parsers, executor behavior, config handling, the Tier 0 package store, server update checks, agent self-update on Linux and Windows, package inventory/desired-state sync, agent profiles, revisioned inventory, Docker detection/inventory/actions/exec/console/clone/cleanup/API gating, multi-host deploy partial failure, Compose storage/revisions/deploy/bundle/gating, config-hash drift, health-event deduplication, Telegram notification evaluation/deduplication/retry, key-based SSH remote install, and discovery CIDR/scope validation, merge/classification/event deduplication, scan lifecycle/cancellation, RBAC/CSRF, acknowledgement auditing, and retention.
 
-The jsdom smoke test loads the real dashboard and verifies the fleet, live SSE fallback, drawer, paginated history, trends, timeline, alert lifecycle, bulk actions, saved views, policy/user/session dialogs, GPU process list, remote terminal, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect, logs, exec, console open/input/close, clone validation/warning, remove, cleanup, offline-disabled, and Compose Files list/editor/revisions/multi-host-deploy/per-host-summary/deployment-history states. The **18 Playwright + axe-core tests** cover dark/light themes at desktop and mobile widths, login, dashboard, drawer tabs, command-palette keyboard flow, focus trap/return, Docker Hosts fast refresh/drift/safe clone dialog, inspect/cleanup confirmation, Compose Files deploy controls, interactive console open/output/close, and serious/critical accessibility violations.
+The jsdom smoke test loads the real dashboard and verifies the fleet, live SSE fallback, drawer, paginated history, trends, timeline, alert lifecycle, bulk actions, saved views, policy/user/session dialogs, GPU process list, remote terminal, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect, logs, exec, console open/input/close, clone validation/warning, remove, cleanup, offline-disabled, and Compose Files list/editor/revisions/multi-host-deploy/per-host-summary/deployment-history states, and Discovery summary/filters/table/drawer/edit/scan start/cancel/disabled/unacknowledged states. The **22 Playwright + axe-core tests** cover dark/light themes at desktop and mobile widths, login, dashboard, drawer tabs, command-palette keyboard flow, focus trap/return, Docker Hosts fast refresh/drift/safe clone dialog, inspect/cleanup confirmation, Compose Files deploy controls, interactive console open/output/close, Discovery inventory/drawer/scan/disabled states, and serious/critical accessibility violations.
 
 A real end-to-end server/agent smoke test is described in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#validation), and the Raspberry Pi run is recorded in [docs/TESTING.md](docs/TESTING.md#manual-live-validation). See [docs/TESTING.md](docs/TESTING.md) for the full coverage gaps.
 
@@ -208,6 +209,19 @@ All server configuration is environment variables. The common ones:
 | `SEXTANT_AUDIT_RETENTION_DAYS` | `365` | Retention for audit rows |
 | `SEXTANT_TELEMETRY_HISTORY` | `1` | Store bounded per-heartbeat telemetry history |
 | `SEXTANT_TELEMETRY_RETENTION_DAYS` | `7` | Telemetry history retention (1–365 days) |
+| `SEXTANT_DISCOVERY_ENABLED` | `0` | Master discovery switch; also requires the audited acknowledgement |
+| `SEXTANT_DISCOVERY_CIDRS` | unset | Private CIDR allowlist for scans (RFC1918/ULA only) |
+| `SEXTANT_DISCOVERY_EXCLUDE` | unset | CIDRs never scanned |
+| `SEXTANT_DISCOVERY_METHODS` | `neigh,dns,oui,ssdp` | Enabled methods; add `tcp` for fingerprinting |
+| `SEXTANT_DISCOVERY_PROBE_PORTS` | v1 port set | TCP fingerprint ports |
+| `SEXTANT_DISCOVERY_ACTIVE_PROBES` | `0` | Enable opt-in TCP connect/banner/TLS probes |
+| `SEXTANT_DISCOVERY_INTERVAL_HOURS` | `0` | Scheduled scans; `0` disables |
+| `SEXTANT_DISCOVERY_MAX_HOSTS` | `1024` | Per-scan expansion cap |
+| `SEXTANT_DISCOVERY_CONCURRENCY` | `32` | Probe worker cap |
+| `SEXTANT_DISCOVERY_TIMEOUT_MS` | `600` | Per-probe timeout |
+| `SEXTANT_DISCOVERY_RETENTION_DAYS` | `90` | Scan/event retention |
+| `SEXTANT_DISCOVERY_AGENT_RELAY` | `0` | Reserved for D3 agent-relayed scans |
+| `SEXTANT_DISCOVERY_EXPORT_LIMIT` | `10000` | Reserved for D4 bounded export |
 | `SEXTANT_DOCKER_ENABLED` | `1` | Enable the Docker Hosts API/page; agent Docker access still requires local/profile opt-in |
 | `SEXTANT_DOCKER_INVENTORY_MAX_BYTES` | `2000000` | Maximum Docker inventory upload size |
 | `SEXTANT_DOCKER_INVENTORY_STALE_SECONDS` | `900` | Docker inventory stale badge threshold |
@@ -240,7 +254,7 @@ See [deploy/sextant.env.example](deploy/sextant.env.example) for a deployment te
 - [Architecture](docs/ARCHITECTURE.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Agent installation and operation](docs/AGENTS.md)
-- [Discovery plan](docs/DISCOVERY.md)
+- [Discovery plan — D1–D2 implemented](docs/DISCOVERY.md)
 - [Docker management plan — D1–D5 implemented](docs/DOCKER_MANAGEMENT.md)
 - [Package management plan](docs/PACKAGE_MANAGEMENT.md)
 - [Package store plan](docs/PACKAGE_STORE.md)
@@ -261,6 +275,7 @@ See [deploy/sextant.env.example](deploy/sextant.env.example) for a deployment te
 - **Docker management is D1–D5.** Docker Hosts supports allowlisted container actions, inspect/logs, one-shot exec, interactive console, safe clone, image/volume/network removal, cleanup, live refresh, and drift badges. Compose Files supports image-based Compose stacks, immutable revisions, deploy/update/down/rollback to one or up to 20 hosts, and deployment history. Health transitions are stored as deduplicated `docker.health` events but are not yet alert rows. Recreate-in-place from a full inspect spec, build contexts, and Docker health notifications are not implemented. Docker is Linux-only; Windows agents report `unsupported_os` and never appear as Docker hosts.
 - **Console state is in-memory and single-worker.** Live stdin/stdout and session queues are process-local; a server restart closes open consoles. Keystrokes and terminal output are not persisted in SQLite or the audit log.
 - **Wake-on-LAN is layer-2 local.** A server packet reaches its own broadcast domain. Use a directed broadcast or a separate relay for other VLANs; agents do not act as WoL relays.
+- **Discovery is D1–D2 and server-side.** It sees the server's own L2 segment/neighbour table. Agent-relayed multi-VLAN scans, CSV/JSON export, promotion to wake target/enrollment, and DHCP/AP/hypervisor/SNMP integrations are D3–D6. It is off by default and only scans administrator-allowlisted private CIDRs after an audited acknowledgement.
 - **AD group mapping checks direct `memberOf` membership.** Nested group expansion is not implemented.
 - **Single node.** SQLite and the in-process login limiter target a home/lab/small-office deployment, not a multi-region cluster.
 - **Charts are inline SVG.** The dashboard has 24-hour sparklines and gap-aware 24h/7d detail charts with a persistent state-change timeline and a What changed summary; it does not embed a charting library.

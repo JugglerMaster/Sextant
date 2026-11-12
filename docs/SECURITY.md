@@ -137,6 +137,37 @@ There is no pixel-level remote desktop or input injection in this version. “Re
 - **GitHub is not an app source.** App packages are uploaded to the store by an admin or CI; agents never download apps from GitHub.
 - **Remote install is admin-only and key-based.** One private key is stored on the server filesystem (`SEXTANT_SSH_KEY_PATH`, mode 0600), not in SQLite. No SSH passwords, no agent forwarding, no forwarding, fixed install script, validated inputs, one job at a time, full audit. Host-key verification is intentionally disabled for rebuilt hosts, so use SSH only on a trusted admin network/VPN.
 
+## Network discovery (D1–D2)
+
+Discovery is a network-scanning capability and is therefore **off by default**.
+
+- `SEXTANT_DISCOVERY_ENABLED=1` is necessary but not sufficient. An admin must
+  also store the exact acknowledgement **"I am authorized to scan these
+  networks"**. The actor, IP, and time are audited; clearing it is audited too.
+- Every scan scope must be a subnet of a configured `SEXTANT_DISCOVERY_CIDRS`
+  entry. Public, loopback, link-local, multicast, unspecified, reserved,
+  documentation, and overly broad ranges are rejected. Individual host scopes
+  are rejected unless they are an exact allowlisted CIDR. `SEXTANT_DISCOVERY_EXCLUDE`
+  is applied after expansion.
+- The per-scan host cap, concurrency, timeout, one-active-scan rule, queue cap,
+  and start rate limit are enforced before or during queueing. The UI and API
+  can cancel a queued or running scan; cancellation stops further host work.
+- The server uses only unprivileged stdlib sockets plus `ip neigh`/`arp -a`.
+  There are no raw sockets, packet captures, exploit modules, default-credential
+  checks, brute force, or arbitrary host/URL targets. TCP probing is opt-in via
+  `SEXTANT_DISCOVERY_ACTIVE_PROBES=1` and limited to the configured port set.
+- Scan start/finish/cancel, acknowledgement changes, and device edit/delete are
+  audited. Viewer reads are allowed; operator+ is required for scans and device
+  metadata; admin is required for the acknowledgement and deletion.
+- Discovery data can contain personal data (MAC, hostname, open ports). Scans
+  and events are pruned after `SEXTANT_DISCOVERY_RETENTION_DAYS`; devices remain
+  until an operator ignores them or an admin deletes them. Export is not
+  implemented in D1–D2.
+- The scan worker is a bounded daemon thread with a cancellation event and a
+  clean lifespan shutdown. It never blocks the FastAPI event loop.
+- Agent-relayed discovery (D3) is not implemented. `SEXTANT_DISCOVERY_AGENT_RELAY`
+  is parsed only so the future path can be gated explicitly.
+
 ## Docker inventory and actions (D1–D5)
 
 - **Docker access is local and opt-in.** The Linux agent's `allow_docker` flag

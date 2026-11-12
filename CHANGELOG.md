@@ -4,6 +4,19 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [Unreleased]
+
+### Added
+
+- CIDR-scoped network discovery (D1–D2): default-off with an audited
+  authorization acknowledgement, private CIDR allowlists/excludes, neighbour
+  table + reverse DNS + bundled OUI + passive SSDP collection, opt-in TCP
+  connect/banner/TLS fingerprinting, device classification, MAC/IP/hostname
+  merging, deduplicated change events, a cancellable bounded scan worker, and a
+  Discovery page with filters, device drawer, scan progress/history, and
+  disabled/unacknowledged states. Agent-relayed discovery, export, promotion,
+  and integrations remain future phases.
+
 ## [0.4.1] - 2026-11-11
 
 ### Fixed

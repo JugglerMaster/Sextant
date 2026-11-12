@@ -707,6 +707,30 @@ svg { display: block; }
 .data-table tr:last-child td { border-bottom: 0; }
 .data-table td strong { color: var(--text); font-weight: 600; }
 .data-table .mono { font-size: 10px; }
+.discovery-table td:last-child,
+.discovery-table th:last-child { text-align: right; }
+.discovery-methods { margin: 0; padding: 0; border: 0; }
+.discovery-methods legend {
+  margin-bottom: 6px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.discovery-progress { display: grid; gap: 6px; margin-top: 10px; }
+.discovery-progress progress {
+  width: 100%;
+  height: 7px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--progress-track);
+  overflow: hidden;
+  appearance: none;
+}
+.discovery-progress progress::-webkit-progress-bar { background: var(--progress-track); border-radius: 999px; }
+.discovery-progress progress::-webkit-progress-value { border-radius: 999px; background: var(--accent); }
+.discovery-progress progress::-moz-progress-bar { border-radius: 999px; background: var(--accent); }
 .table-empty { padding: 28px 10px; color: var(--text-dim); text-align: center; }
 .detail-list { display: grid; grid-template-columns: auto 1fr; gap: 7px 16px; margin: 0; }
 .detail-list dt { color: var(--text-dim); font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; }

@@ -339,6 +339,119 @@ const composeDeployments = [
   },
 ];
 
+const discoverySettings = {
+  enabled: true,
+  acknowledged: true,
+  acknowledged_at: "2026-11-06T07:00:00Z",
+  acknowledged_by: "admin",
+  acknowledgement_text: "I am authorized to scan these networks",
+  cidrs: ["192.168.1.0/24"],
+  cidr_errors: [],
+  exclude: [],
+  methods: ["neigh", "dns", "oui", "ssdp", "tcp"],
+  probe_ports: [22, 80, 443, 8006],
+  active_probes: true,
+  interval_hours: 0,
+  max_hosts: 1024,
+  concurrency: 32,
+  timeout_ms: 600,
+  retention_days: 90,
+  agent_relay: false,
+  export_limit: 10000,
+  disabled_reasons: [],
+};
+const discoveryDevices = [
+  {
+    id: "dev_printer",
+    first_seen: "2026-11-06T07:00:00Z",
+    last_seen: "2026-11-06T08:00:00Z",
+    mac: "b8:27:eb:11:22:33",
+    ip: "192.168.1.40",
+    hostname: "printer.lan",
+    vendor: "Raspberry Pi Foundation",
+    device_type: "printer",
+    os_guess: "Embedded",
+    confidence: 0.9,
+    source: "server",
+    segment: "192.168.1.0/24",
+    open_ports: [22, 80, 631],
+    services: {
+      "22": { protocol: "ssh", banner: "SSH-2.0-OpenSSH_9.6", product: "OpenSSH", version: "9.6" },
+      "80": { protocol: "http", status: 200, server: "nginx/1.24", title: "Printer" },
+    },
+    mdns: {},
+    ssdp: {},
+    evidence: { methods: ["neigh", "dns", "oui", "ssdp"], neighbor: true, reverse_dns: true, ssdp: false, tcp: true },
+    state: "new",
+    agent_id: null,
+    wake_target_id: null,
+    tags: ["office"],
+    notes: "",
+    mac_randomized: false,
+  },
+  {
+    id: "dev_esxi",
+    first_seen: "2026-11-06T07:05:00Z",
+    last_seen: "2026-11-06T07:55:00Z",
+    mac: "00:50:56:aa:bb:cc",
+    ip: "192.168.1.50",
+    hostname: "esxi.lan",
+    vendor: "VMware",
+    device_type: "hypervisor",
+    os_guess: "Hypervisor",
+    confidence: 0.85,
+    source: "server",
+    segment: "192.168.1.0/24",
+    open_ports: [443, 8006],
+    services: { "443": { protocol: "tls", subject: "esxi.lan", issuer: "Lab CA", san: ["esxi.lan"] } },
+    mdns: {},
+    ssdp: {},
+    evidence: { methods: ["neigh", "dns", "oui", "tcp"], neighbor: true, reverse_dns: true, ssdp: false, tcp: true },
+    state: "known",
+    agent_id: "agt_demo",
+    wake_target_id: null,
+    tags: [],
+    notes: "VM host",
+    mac_randomized: false,
+  },
+];
+const discoverySummary = {
+  total: 2,
+  new: 1,
+  states: { new: 1, known: 1, ignored: 0, promoted: 0 },
+  types: [
+    { type: "printer", count: 1 },
+    { type: "hypervisor", count: 1 },
+  ],
+  segments: [{ segment: "192.168.1.0/24", count: 2 }],
+  vendors: [
+    { vendor: "Raspberry Pi Foundation", count: 1 },
+    { vendor: "VMware", count: 1 },
+  ],
+  no_agent: 1,
+};
+const discoveryEvents = [
+  { id: 2, at: "2026-11-06T07:50:00Z", device_id: "dev_printer", kind: "new_port", detail: { port: 631 } },
+  { id: 1, at: "2026-11-06T07:00:00Z", device_id: "dev_printer", kind: "new_device", detail: { ip: "192.168.1.40" } },
+];
+const discoveryScans = [
+  {
+    id: "dsc_demo",
+    started_at: "2026-11-06T07:00:00Z",
+    finished_at: "2026-11-06T07:01:00Z",
+    scope: ["192.168.1.0/24"],
+    methods: ["neigh", "dns", "oui", "ssdp"],
+    initiated_by: "admin",
+    status: "succeeded",
+    hosts_found: 2,
+    error: "",
+    progress: 100,
+    hosts_scanned: 254,
+    cancel_requested: false,
+  },
+];
+let discoveryActiveScan = null;
+
 const responses = {
   "/api/auth/config": { status: 200, body: { ldap_enabled: false, version: "0.3.0", public_url: "" } },
   "/api/me": { status: 401, body: { detail: "Authentication required." } },
@@ -462,6 +575,19 @@ const responses = {
     },
   },
   "/api/remote-install": { status: 200, body: { jobs: [] } },
+  "/api/discovery/settings": { status: 200, body: discoverySettings },
+  "/api/discovery/devices": {
+    status: 200,
+    body: { devices: discoveryDevices, total: discoveryDevices.length, limit: 50, offset: 0, summary: discoverySummary },
+  },
+  "/api/discovery/devices/dev_printer": {
+    status: 200,
+    body: { device: discoveryDevices[0], events: discoveryEvents, agent: null, wake_target: null },
+  },
+  "/api/discovery/scans": {
+    status: 200,
+    body: { scans: discoveryScans, total: discoveryScans.length, limit: 50, offset: 0, active_scan_id: discoveryActiveScan?.id || null },
+  },
   "/api/profiles": {
     status: 200,
     body: {
@@ -612,6 +738,108 @@ window.fetch = async (path, options = {}) => {
       savedViews.splice(index, 1);
       response = { status: 204, body: null };
     }
+  } else if (method === "GET" && key === "/api/discovery/settings" && window.__discoveryDisabled) {
+    response = {
+      status: 200,
+      body: {
+        ...discoverySettings,
+        enabled: false,
+        disabled_reasons: ["SEXTANT_DISCOVERY_ENABLED is 0."],
+      },
+    };
+  } else if (method === "PATCH" && key === "/api/discovery/settings") {
+    discoverySettings.acknowledged = Boolean(body?.acknowledged);
+    discoverySettings.acknowledged_at = body?.acknowledged ? "2026-11-06T08:05:00Z" : null;
+    response = { status: 200, body: discoverySettings };
+  } else if (method === "GET" && key === "/api/discovery/devices") {
+    const params = new URLSearchParams(url.split("?")[1] || "");
+    let filtered = [...discoveryDevices];
+    const state = params.get("state") || "";
+    const type = params.get("type") || "";
+    const segment = params.get("segment") || "";
+    const vendor = params.get("vendor") || "";
+    if (state) filtered = filtered.filter((device) => device.state === state);
+    if (type) filtered = filtered.filter((device) => device.device_type === type);
+    if (segment) filtered = filtered.filter((device) => device.segment === segment);
+    if (vendor) filtered = filtered.filter((device) => device.vendor === vendor);
+    if (params.get("no_agent") === "true") filtered = filtered.filter((device) => !device.agent_id);
+    if (params.get("admin_ports") === "true") {
+      filtered = filtered.filter((device) => device.open_ports.some((port) => [22, 3389, 5900, 5985, 5986].includes(port)));
+    }
+    response = {
+      status: 200,
+      body: { devices: filtered, total: filtered.length, limit: 50, offset: 0, summary: discoverySummary },
+    };
+  } else if (method === "GET" && key.startsWith("/api/discovery/devices/")) {
+    const id = key.slice("/api/discovery/devices/".length);
+    const device = discoveryDevices.find((item) => item.id === id);
+    const events = id === "dev_printer" ? discoveryEvents : [];
+    response = device
+      ? { status: 200, body: { device, events, agent: device.agent_id ? agent : null, wake_target: null } }
+      : { status: 404, body: { detail: "Discovered device not found." } };
+  } else if (method === "PATCH" && key.startsWith("/api/discovery/devices/")) {
+    const id = key.slice("/api/discovery/devices/".length);
+    const index = discoveryDevices.findIndex((item) => item.id === id);
+    if (index < 0) {
+      response = { status: 404, body: { detail: "Discovered device not found." } };
+    } else {
+      const current = discoveryDevices[index];
+      const next = {
+        ...current,
+        ...(body?.tags !== undefined ? { tags: body.tags } : {}),
+        ...(body?.notes !== undefined ? { notes: body.notes } : {}),
+        ...(body?.state !== undefined ? { state: body.state } : {}),
+      };
+      discoveryDevices[index] = next;
+      if (id === "dev_printer") {
+        discoveryEvents.unshift({
+          id: discoveryEvents.length + 3,
+          at: "2026-11-06T08:05:00Z",
+          device_id: id,
+          kind: next.state === "ignored" ? "promoted" : "new_device",
+          detail: { state: next.state },
+        });
+      }
+      response = { status: 200, body: { device: next, events: id === "dev_printer" ? discoveryEvents : [] } };
+    }
+  } else if (method === "DELETE" && key.startsWith("/api/discovery/devices/")) {
+    const id = key.slice("/api/discovery/devices/".length);
+    const index = discoveryDevices.findIndex((item) => item.id === id);
+    if (index >= 0) discoveryDevices.splice(index, 1);
+    response = { status: 204, body: null };
+  } else if (method === "GET" && key === "/api/discovery/scans") {
+    response = {
+      status: 200,
+      body: {
+        scans: discoveryActiveScan ? [discoveryActiveScan, ...discoveryScans] : discoveryScans,
+        total: discoveryActiveScan ? discoveryScans.length + 1 : discoveryScans.length,
+        limit: 50,
+        offset: 0,
+        active_scan_id: discoveryActiveScan?.status === "running" ? discoveryActiveScan.id : null,
+      },
+    };
+  } else if (method === "POST" && key === "/api/discovery/scan") {
+    const scan = {
+      id: "dsc_live",
+      started_at: "2026-11-06T08:05:00Z",
+      finished_at: null,
+      scope: body?.scope || ["192.168.1.0/24"],
+      methods: body?.methods || ["neigh"],
+      initiated_by: "admin",
+      status: "running",
+      hosts_found: 0,
+      error: "",
+      progress: 12,
+      hosts_scanned: 30,
+      cancel_requested: false,
+    };
+    discoveryActiveScan = scan;
+    response = { status: 200, body: { scan } };
+  } else if (method === "POST" && /^\/api\/discovery\/scans\/[^/]+\/cancel$/.test(key)) {
+    if (discoveryActiveScan) {
+      discoveryActiveScan = { ...discoveryActiveScan, status: "cancelled", finished_at: "2026-11-06T08:06:00Z" };
+    }
+    response = { status: 200, body: { scan: discoveryActiveScan } };
   } else if (method === "GET" && key === "/api/agents/agt_demo/commands") {
     const params = new URLSearchParams(url.split("?")[1] || "");
     const status = params.get("status") || "all";
@@ -1692,6 +1920,117 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (window.document.getElementById("compose-empty").hidden) throw new Error("Compose empty state did not render");
   window.__composeEmpty = false;
 
+  // Discovery page: summary, filters, drawer, scan panel, acknowledgement,
+  // cancel, disabled state, and audit link.
+  window.document.querySelector('[data-page="discovery"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(120);
+  if (window.document.getElementById("page-discovery").hidden) throw new Error("Discovery page did not open");
+  const discoverySummaryNode = window.document.getElementById("discovery-summary");
+  if (discoverySummaryNode.hidden || !discoverySummaryNode.textContent.includes("Discovered devices")) {
+    throw new Error("Discovery summary did not render");
+  }
+  const discoveryTable = window.document.getElementById("discovery-table-body");
+  if (!discoveryTable.textContent.includes("printer.lan") || !discoveryTable.textContent.includes("VMware")) {
+    throw new Error("Discovery table did not render devices");
+  }
+  if (!discoveryTable.textContent.includes("Raspberry Pi Foundation")) {
+    throw new Error("Discovery table is missing vendor data");
+  }
+  const discoveryStateFilter = window.document.getElementById("discovery-filter-state");
+  discoveryStateFilter.value = "new";
+  discoveryStateFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(60);
+  if (discoveryTable.textContent.includes("esxi.lan") || !discoveryTable.textContent.includes("printer.lan")) {
+    throw new Error("Discovery state filter did not narrow the table");
+  }
+  window.document.getElementById("discovery-filter-clear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  if (!discoveryTable.textContent.includes("esxi.lan")) throw new Error("Discovery filter clear did not restore devices");
+
+  const discoveryOpen = [...discoveryTable.querySelectorAll("button")].find((item) =>
+    (item.getAttribute("aria-label") || "").includes("printer.lan"),
+  );
+  if (!discoveryOpen) throw new Error("Discovery device action missing");
+  discoveryOpen.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  const discoveryDrawer = window.document.getElementById("discovery-drawer");
+  if (discoveryDrawer.hidden) throw new Error("Discovery device drawer did not open");
+  const discoveryDrawerBody = window.document.getElementById("discovery-drawer-body");
+  for (const expected of ["Device record", "What found this device", "Ports and services", "Change events", "Linked records"]) {
+    if (!discoveryDrawerBody.textContent.includes(expected)) {
+      throw new Error(`Discovery drawer is missing ${expected}`);
+    }
+  }
+  if (!discoveryDrawerBody.textContent.includes("OpenSSH")) {
+    throw new Error("Discovery drawer is missing service evidence");
+  }
+  const discoveryForm = discoveryDrawerBody.querySelector("form");
+  discoveryForm.elements.tags.value = "office, shelf";
+  discoveryForm.elements.notes.value = "checked by operator";
+  discoveryForm.elements.state.value = "known";
+  discoveryForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(100);
+  const discoveryPatch = window.__requests.find(
+    (request) => request.method === "PATCH" && request.path === "/api/discovery/devices/dev_printer",
+  );
+  if (!discoveryPatch || !discoveryPatch.body.tags.includes("shelf") || discoveryPatch.body.state !== "known") {
+    throw new Error("Discovery device edit was not sent");
+  }
+  discoveryDrawer.querySelector("[data-close-discovery-drawer]").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  if (!discoveryDrawer.hidden) throw new Error("Discovery drawer did not close");
+
+  const discoveryStart = window.document.getElementById("discovery-scan-start");
+  window.document.getElementById("discovery-scan-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(100);
+  const scanRequest = window.__requests.find(
+    (request) => request.method === "POST" && request.path === "/api/discovery/scan",
+  );
+  if (!scanRequest || scanRequest.body.scope[0] !== "192.168.1.0/24") {
+    throw new Error("Discovery scan was not started with the allowlisted scope");
+  }
+  if (!discoveryStart.disabled) throw new Error("Discovery start should disable while a scan runs");
+  if (window.document.getElementById("discovery-scan-progress").hidden) {
+    throw new Error("Discovery scan progress did not appear");
+  }
+  window.document.getElementById("discovery-scan-cancel").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(100);
+  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/discovery/scans/dsc_live/cancel")) {
+    throw new Error("Discovery scan cancel was not sent");
+  }
+  if (!window.document.getElementById("discovery-scan-progress").hidden) {
+    throw new Error("Discovery progress should hide after cancellation");
+  }
+  if (!findButton(window.document.getElementById("discovery-scan-panel"), "Audit log")) {
+    throw new Error("Discovery audit link is missing");
+  }
+
+  window.__discoveryDisabled = true;
+  window.document.querySelector('[data-page="overview"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  window.document.querySelector('[data-page="discovery"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  const discoveryDisabled = window.document.getElementById("discovery-disabled");
+  if (discoveryDisabled.hidden || !discoveryDisabled.textContent.includes("SEXTANT_DISCOVERY_ENABLED")) {
+    throw new Error("Discovery disabled state is missing the environment flag explanation");
+  }
+  window.__discoveryDisabled = false;
+  discoverySettings.acknowledged = false;
+  window.document.querySelector('[data-page="overview"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  window.document.querySelector('[data-page="discovery"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  if (window.document.getElementById("discovery-ack-panel").hidden) {
+    throw new Error("Discovery acknowledgement panel did not appear");
+  }
+  window.document.getElementById("discovery-ack-checkbox").checked = true;
+  window.document.getElementById("discovery-ack-button").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(120);
+  if (!window.__requests.some((request) => request.method === "PATCH" && request.path === "/api/discovery/settings")) {
+    throw new Error("Discovery acknowledgement was not sent");
+  }
+  if (!window.document.getElementById("discovery-ack-panel").hidden) {
+    throw new Error("Discovery acknowledgement panel should hide after authorization");
+  }
+
   const themeToggle = window.document.getElementById("theme-toggle");
   if (!themeToggle) throw new Error("theme toggle missing");
   if (window.document.documentElement.dataset.theme !== "dark") throw new Error("dark theme should be the default");
@@ -1761,7 +2100,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/table/drawer/edit/scan-start/cancel/disabled/unacknowledged states, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

@@ -51,6 +51,107 @@ class LdapSettings:
         return 636 if self.use_ssl and self.port == 389 else self.port
 
 
+DISCOVERY_METHODS = ("neigh", "dns", "oui", "ssdp", "tcp")
+DISCOVERY_DEFAULT_PORTS = (
+    22,
+    53,
+    80,
+    139,
+    443,
+    445,
+    631,
+    1883,
+    3389,
+    5900,
+    5985,
+    5986,
+    8006,
+    8080,
+    8443,
+    9100,
+    32400,
+)
+
+
+def _int_range(value: str | None, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value) if value is not None else default
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _ports(value: str | None) -> tuple[int, ...]:
+    if value is None:
+        return DISCOVERY_DEFAULT_PORTS
+    ports: list[int] = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            port = int(part)
+        except ValueError:
+            continue
+        if 1 <= port <= 65535 and port not in ports:
+            ports.append(port)
+    return tuple(ports)
+
+
+@dataclass(frozen=True)
+class DiscoverySettings:
+    enabled: bool = False
+    cidrs: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+    methods: tuple[str, ...] = ("neigh", "dns", "oui", "ssdp")
+    probe_ports: tuple[int, ...] = DISCOVERY_DEFAULT_PORTS
+    active_probes: bool = False
+    interval_hours: int = 0
+    max_hosts: int = 1024
+    concurrency: int = 32
+    timeout_ms: int = 600
+    retention_days: int = 90
+    agent_relay: bool = False
+    export_limit: int = 10000
+
+    @classmethod
+    def from_env(cls, env: dict[str, str]) -> "DiscoverySettings":
+        methods = tuple(
+            item
+            for item in (part.strip().lower() for part in _split_csv(env.get("SEXTANT_DISCOVERY_METHODS")))
+            if item in DISCOVERY_METHODS
+        )
+        if not methods:
+            methods = ("neigh", "dns", "oui", "ssdp")
+        return cls(
+            enabled=_bool(env.get("SEXTANT_DISCOVERY_ENABLED"), False),
+            cidrs=_split_csv(env.get("SEXTANT_DISCOVERY_CIDRS")),
+            exclude=_split_csv(env.get("SEXTANT_DISCOVERY_EXCLUDE")),
+            methods=methods,
+            probe_ports=_ports(env.get("SEXTANT_DISCOVERY_PROBE_PORTS")),
+            active_probes=_bool(env.get("SEXTANT_DISCOVERY_ACTIVE_PROBES"), False),
+            interval_hours=_int_range(
+                env.get("SEXTANT_DISCOVERY_INTERVAL_HOURS"), 0, 0, 168
+            ),
+            max_hosts=_int_range(
+                env.get("SEXTANT_DISCOVERY_MAX_HOSTS"), 1024, 1, 65536
+            ),
+            concurrency=_int_range(
+                env.get("SEXTANT_DISCOVERY_CONCURRENCY"), 32, 1, 128
+            ),
+            timeout_ms=_int_range(
+                env.get("SEXTANT_DISCOVERY_TIMEOUT_MS"), 600, 100, 5000
+            ),
+            retention_days=_int_range(
+                env.get("SEXTANT_DISCOVERY_RETENTION_DAYS"), 90, 1, 3650
+            ),
+            agent_relay=_bool(env.get("SEXTANT_DISCOVERY_AGENT_RELAY"), False),
+            export_limit=_int_range(
+                env.get("SEXTANT_DISCOVERY_EXPORT_LIMIT"), 10000, 1, 100000
+            ),
+        )
+
+
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path
@@ -113,6 +214,7 @@ class Settings:
     docker_console_max_output_bytes: int = 1_048_576
     ssh_key_path: str = ""
     ssh_install_enabled: bool = True
+    discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
     extra: dict = field(default_factory=dict)
 
     @property
@@ -260,6 +362,7 @@ class Settings:
             ),
             ssh_key_path=env.get("SEXTANT_SSH_KEY_PATH", "").strip() or str(data_dir / "ssh" / "install_key"),
             ssh_install_enabled=_bool(env.get("SEXTANT_SSH_INSTALL_ENABLED"), True),
+            discovery=DiscoverySettings.from_env(env),
         )
 
 

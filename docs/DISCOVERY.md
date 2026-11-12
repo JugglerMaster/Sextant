@@ -1,8 +1,12 @@
 # Discovery — plan
 
-**Status:** proposed, not implemented.
+**Status:** D1–D2 implemented in 0.5.0. D3–D6 remain proposed.
 
 **Scope:** find, identify, and analyze devices on the networks this console is authorized to manage, then offer a path from "found" to "managed" (wake target or enrolled agent).
+
+**Implemented now:** CIDR-scoped server-side discovery with allowlists and excludes, neighbour-table/PTR/OUI/SSDP collection, opt-in TCP connect and banner/TLS fingerprinting, classification, MAC/IP/hostname merging, deduplicated change events, a bounded background scan worker with cancellation, a read/write API, and a Discovery page. See [Implementation notes](#implementation-notes-d1d2) at the end of this document for the exact route and data-model decisions.
+
+**Not implemented yet:** agent-relayed scans (D3), analysis/reporting and export (D4), promotion/onboarding (D5), and DHCP/AP/hypervisor/SNMP integrations (D6).
 
 Discovery is a separate concern from remote control. It answers *what is on the network*; control remains the existing agent path (queued shell, service management, power actions, WoL). Discovery does not add RDP/VNC/SSH/PTY support.
 
@@ -253,8 +257,8 @@ Non-negotiable:
 
 | Phase | Deliverable | Effort | Risk | Acceptance criteria |
 |---|---|---|---|---|
-| **D1** | Schema + engine skeleton; server-side neighbor/PTR/OUI/SSDP; Discovery page read-only; API; audit; default off | M | low | A scan of an allowlisted CIDR returns devices with IP/MAC/vendor; no packets sent when disabled; viewer can read, operator can scan |
-| **D2** | Opt-in TCP fingerprint + banners + classifier + drift/new-device events | M | medium | New device/new port events are deduplicated; scan is rate-limited and cancellable; unknown stays unknown |
+| **D1** ✅ | Schema + engine skeleton; server-side neighbor/PTR/OUI/SSDP; Discovery page read-only; API; audit; default off | M | low | A scan of an allowlisted CIDR returns devices with IP/MAC/vendor; no packets sent when disabled; viewer can read, operator can scan |
+| **D2** ✅ | Opt-in TCP fingerprint + banners + classifier + drift/new-device events | M | medium | New device/new port events are deduplicated; scan is rate-limited and cancellable; unknown stays unknown |
 | **D3** | Agent-relayed discovery for other VLANs (dedicated job channel, `allow_discovery`) | M | medium | An agent scans its own subnet and reports; server policy can disable; no inbound port opened |
 | **D4** | Analysis: exposure report, identity conflicts, wake verification, CSV/JSON export | S–M | low | False-positive rate acceptable on a test LAN; exports are bounded and audited |
 | **D5** | Onboarding: promote to wake target; enrollment token + install command; link to agent | S | low | Promoted device is marked and auditable; no duplicate wake targets |
@@ -406,3 +410,74 @@ These are alternatives to the hybrid recommendation, not additions to it. Choose
 - [Roadmap](ROADMAP.md) — alerting, history/charts, approval workflow, agent lifecycle.
 - [API](API.md) — existing routes and conventions.
 - [Agents](AGENTS.md) — agent config, policy, and execution behavior.
+
+---
+
+# Implementation notes (D1–D2)
+
+## Configuration
+
+| Variable | Default | Implemented behavior |
+|---|---|---|
+| `SEXTANT_DISCOVERY_ENABLED` | `0` | Master switch. Scans are refused while it is `0`, even if the acknowledgement exists. |
+| `SEXTANT_DISCOVERY_CIDRS` | unset | Comma-separated allowlist. Each entry must validate as a private RFC1918/ULA CIDR. Public, documentation, loopback, link-local, multicast, unspecified, reserved, and overly broad (`< /8` IPv4, `< /48` IPv6) ranges are rejected. |
+| `SEXTANT_DISCOVERY_EXCLUDE` | unset | Comma-separated CIDRs removed after expansion. Excludes may be inside or outside an allowlisted range. |
+| `SEXTANT_DISCOVERY_METHODS` | `neigh,dns,oui,ssdp` | Enabled methods. `tcp` must also be listed here and requires active probes. Unknown method names are ignored at startup. |
+| `SEXTANT_DISCOVERY_PROBE_PORTS` | v1 port set | Comma-separated TCP ports. Invalid and out-of-range values are dropped. |
+| `SEXTANT_DISCOVERY_ACTIVE_PROBES` | `0` | Enables TCP connect/banner fingerprinting. Passive methods stay available while this is off. |
+| `SEXTANT_DISCOVERY_INTERVAL_HOURS` | `0` | `0` disables scheduled scans. A non-zero value schedules an allowlisted scan from the worker after a stored acknowledgement exists. |
+| `SEXTANT_DISCOVERY_MAX_HOSTS` | `1024` | Hard per-scan expansion cap (1–65536). A scope larger than the cap is rejected before any packet is sent. |
+| `SEXTANT_DISCOVERY_CONCURRENCY` | `32` | Probe worker cap (1–128), also bounded by the number of targets. |
+| `SEXTANT_DISCOVERY_TIMEOUT_MS` | `600` | Per-connect/banner timeout (100–5000 ms). |
+| `SEXTANT_DISCOVERY_RETENTION_DAYS` | `90` | Scans and discovery events older than this are pruned at startup and after each scan. Devices are retained until deleted or ignored. |
+| `SEXTANT_DISCOVERY_AGENT_RELAY` | `0` | Parsed and exposed for the future D3 path; D3 scan routes are not implemented. |
+| `SEXTANT_DISCOVERY_EXPORT_LIMIT` | `10000` | Parsed and exposed for the future D4 export; export is not implemented. |
+
+## Safety model
+
+- Discovery is off by default. `POST /api/discovery/scan` requires both `SEXTANT_DISCOVERY_ENABLED=1` and an admin-stored acknowledgement of **"I am authorized to scan these networks"**. The acknowledgement is audited with actor and IP.
+- Every requested scope must be a subnet of a configured allowlist CIDR. Individual host scopes, out-of-scope ranges, oversized scopes, and excluded-only scopes are rejected before queueing.
+- The server uses only unprivileged stdlib sockets and `ip neigh`/`arp -a`; there are no raw sockets, packet captures, exploit modules, credential checks, or arbitrary-target/URL inputs.
+- One scan runs at a time. Submissions are bounded by a small in-process queue and a five-second start rate limit; the UI can cancel a queued or running scan.
+- The scan worker is a daemon thread started by the FastAPI lifespan and stopped on shutdown. Cancellation is checked between hosts and futures. No work runs on the event loop.
+- DNS, neighbour, SSDP, and TCP work is best-effort. A failed host or port never aborts the scan or the worker.
+
+## Data model
+
+- `discovered_devices` stores identity, classifier output, source/segment, bounded JSON evidence (`open_ports`, `services`, `mdns`, `ssdp`, `evidence`), operator metadata, and agent/wake-target links.
+- `discovery_scans` stores the requested scope/methods, initiator, status (`queued`, `running`, `succeeded`, `failed`, `cancelled`), host count, progress, and cancellation flag.
+- `discovery_events` stores `new_device`, `new_port`, `service_changed`, `identity_conflict`, `went_dark`, and reserved `promoted` rows. Events are deduplicated by `(device_id, kind, detail)`.
+- Merge order is MAC → stable IP when the MAC is unknown → hostname when no MAC/IP match exists. Two different known MACs are never merged; the existing row receives an `identity_conflict` event and a new device row is created.
+- A locally-administered MAC bit is labelled `mac_randomized`. Randomized MACs still merge by IP/hostname and lose ten confidence points.
+- `went_dark` is emitted once per device and `last_seen` value when a device in a scanned segment has not been seen for 24 hours.
+
+## API
+
+| Method | Route | Role | Notes |
+|---|---|---|---|
+| GET | `/api/discovery/devices` | viewer+ | Filters: `state`, `segment`, `q`, `type`, `vendor`, `no_agent`, `admin_ports`, `mac`, `limit`, `offset`. Returns `summary`. |
+| GET | `/api/discovery/devices/{id}` | viewer+ | Device, events, linked agent, linked wake target. |
+| PATCH | `/api/discovery/devices/{id}` | operator+ | `tags`, `notes`, `state`; audited. |
+| DELETE | `/api/discovery/devices/{id}` | admin | Removes the device and its events; audited. |
+| GET | `/api/discovery/scans` | viewer+ | Paginated history and `active_scan_id`. |
+| GET | `/api/discovery/scans/{id}` | viewer+ | Status and progress. |
+| POST | `/api/discovery/scan` | operator+ | CSRF + acknowledgement + allowlist validation + host cap; returns the queued scan. |
+| POST | `/api/discovery/scans/{id}/cancel` | operator+ | Requests cancellation; audited. |
+| GET | `/api/discovery/settings` | viewer+ | Effective allowlist, methods, caps, acknowledgement state, and disabled reasons. |
+| PATCH | `/api/discovery/settings` | admin | Stores or clears the audited acknowledgement. |
+
+Audit actions: `discovery.acknowledged`, `discovery.acknowledgement_cleared`, `discovery.scan_started`, `discovery.scan_finished`, `discovery.scan_cancel_requested`, `discovery.scan_cancelled`, `discovery.device_updated`, and `discovery.device_deleted`.
+
+When a discovered MAC matches an enrolled agent, first discovery and new ports also create an `agent_events` row with kind `discovery`, so the new-device/new-port signal appears in that agent's History/What-changed timeline as well as the Discovery page.
+
+## UI
+
+The top-level **Discovery** page is available to every signed-in user. It renders disabled/unacknowledged explanations, fleet summary counts, segmented/typed/vendor filters, an inventory table, a device drawer with evidence/ports/events/correlations, and a scan panel with scope, methods, progress, cancellation, history, and an audit link. Operators can tag, annotate, ignore, and mark devices known; admins can delete. No inline styles are used, focus is trapped in the drawer, and the page is covered by the jsdom and Playwright/axe suites.
+
+## Known limitations
+
+- Server-side discovery only sees the server's own L2 segment and its neighbour table. Agent-relayed multi-VLAN coverage is D3.
+- Passive SSDP requires the server to be able to bind UDP 1900; otherwise SSDP collection returns no results without failing the scan.
+- Reverse DNS depends on the host resolver and is best-effort.
+- TLS subject/SAN extraction uses the CPython stdlib X.509 test decoder; platforms that omit it still report an open TLS port but no certificate names.
+- There is no CSV/JSON export, promotion, or automatic alert delivery yet (D4/D5 and the alerting work).

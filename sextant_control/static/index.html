@@ -81,6 +81,10 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
           <span>Fleet</span>
         </button>
+        <button class="nav-item" data-page="discovery" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 4v2M12 18v2M4 12h2M18 12h2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <span>Discovery</span>
+        </button>
         <button class="nav-item" data-page="wake" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9M7 6.5a8 8 0 1 0 10 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
           <span>Wake targets</span>
@@ -241,6 +245,96 @@
           <h3>No machines yet</h3>
           <p>Enroll your first Linux or Windows agent to start collecting telemetry.</p>
           <button class="button button-primary nav-admin" data-page="enroll" type="button">Create enrollment token</button>
+        </div>
+      </section>
+
+      <section class="page" id="page-discovery" hidden>
+        <div class="callout" id="discovery-disabled" role="status" hidden></div>
+
+        <section class="panel" id="discovery-ack-panel" hidden>
+          <div class="panel-head">
+            <div><p class="eyebrow">Authorization</p><h2>Enable network discovery</h2></div>
+          </div>
+          <p class="form-hint" id="discovery-ack-message"></p>
+          <label class="checkbox-row">
+            <input type="checkbox" id="discovery-ack-checkbox">
+            <span>I am authorized to scan these networks</span>
+          </label>
+          <p class="form-hint">This acknowledgement is stored with your username and the time it was recorded. Every scan is audited. Discovery only targets the CIDRs in <code>SEXTANT_DISCOVERY_CIDRS</code>; public, loopback, link-local, and multicast ranges are always rejected.</p>
+          <p class="form-error" id="discovery-ack-error" role="alert"></p>
+          <button class="button button-primary" id="discovery-ack-button" type="button">Record authorization</button>
+        </section>
+
+        <div class="stats-grid" id="discovery-summary" hidden></div>
+
+        <div class="panel-grid">
+          <article class="panel" id="discovery-scan-panel" hidden>
+            <div class="panel-head">
+              <div><p class="eyebrow">Server-side</p><h2>Scan the allowlist</h2></div>
+            </div>
+            <form id="discovery-scan-form" class="form-stack">
+              <label class="field"><span>Scope</span><select id="discovery-scan-scope" required></select></label>
+              <fieldset class="field discovery-methods">
+                <legend>Methods</legend>
+                <div class="checkbox-grid" id="discovery-methods"></div>
+              </fieldset>
+              <p class="form-hint" id="discovery-scan-hint"></p>
+              <p class="form-error" id="discovery-scan-error" role="alert"></p>
+              <div class="section-toolbar">
+                <button class="button button-primary" id="discovery-scan-start" type="submit">Start scan</button>
+                <button class="button button-danger" id="discovery-scan-cancel" type="button" hidden>Cancel scan</button>
+              </div>
+              <div id="discovery-scan-progress" class="discovery-progress" hidden>
+                <progress id="discovery-progress-bar" max="100" value="0" aria-label="Scan progress"></progress>
+                <p class="form-hint" id="discovery-progress-label" aria-live="polite"></p>
+              </div>
+            </form>
+            <div class="panel-head panel-head-spaced">
+              <div><p class="eyebrow">History</p><h3>Recent scans</h3></div>
+              <button class="button button-ghost button-small nav-admin" data-page="audit" type="button">Audit log</button>
+            </div>
+            <div id="discovery-scan-history" class="list-stack"></div>
+          </article>
+
+          <article class="panel panel-span" id="discovery-devices-panel" hidden>
+            <div class="panel-head">
+              <div><p class="eyebrow">Inventory</p><h2>Discovered devices</h2></div>
+              <span class="form-hint" id="discovery-count" aria-live="polite"></span>
+            </div>
+            <div class="section-toolbar" id="discovery-filters">
+              <label class="field"><span>State</span><select id="discovery-filter-state"><option value="">All states</option><option value="new">New</option><option value="known">Known</option><option value="ignored">Ignored</option><option value="promoted">Promoted</option></select></label>
+              <label class="field"><span>Type</span><select id="discovery-filter-type"><option value="">All types</option></select></label>
+              <label class="field"><span>Segment</span><select id="discovery-filter-segment"><option value="">All segments</option></select></label>
+              <label class="field"><span>Vendor</span><select id="discovery-filter-vendor"><option value="">All vendors</option></select></label>
+              <label class="checkbox-row"><input type="checkbox" id="discovery-filter-no-agent"><span>No agent</span></label>
+              <label class="checkbox-row"><input type="checkbox" id="discovery-filter-admin-ports"><span>Admin ports open</span></label>
+              <button class="button button-ghost button-small" id="discovery-filter-clear" type="button">Clear filters</button>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table discovery-table">
+                <thead>
+                  <tr>
+                    <th scope="col">State</th>
+                    <th scope="col">IP</th>
+                    <th scope="col">MAC / vendor</th>
+                    <th scope="col">Hostname</th>
+                    <th scope="col">Type</th>
+                    <th scope="col">Open ports</th>
+                    <th scope="col">Last seen</th>
+                    <th scope="col">Agent</th>
+                    <th scope="col">Tags</th>
+                    <th scope="col"><span class="sr-only">Actions</span></th>
+                  </tr>
+                </thead>
+                <tbody id="discovery-table-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="discovery-empty" hidden>
+              <span class="empty-icon" aria-hidden="true">⌁</span>
+              <h3>No devices match</h3>
+              <p id="discovery-empty-text">Run a scan or clear the filters to see discovered devices.</p>
+            </div>
+          </article>
         </div>
       </section>
 
@@ -517,6 +611,22 @@
         </div>
       </section>
     </main>
+  </div>
+
+  <div class="drawer" id="discovery-drawer" hidden>
+    <div class="drawer-backdrop" data-close-discovery-drawer></div>
+    <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="discovery-drawer-title">
+      <header class="drawer-head">
+        <div class="drawer-title-wrap">
+          <p class="eyebrow" id="discovery-drawer-eyebrow">Discovered device</p>
+          <h2 id="discovery-drawer-title">Device</h2>
+          <p class="drawer-meta" id="discovery-drawer-meta"></p>
+        </div>
+        <button class="icon-button" type="button" data-close-discovery-drawer aria-label="Close discovered device details">×</button>
+      </header>
+      <div class="drawer-actions" id="discovery-drawer-actions"></div>
+      <div class="drawer-body" id="discovery-drawer-body"></div>
+    </aside>
   </div>
 
   <div class="drawer" id="agent-drawer" hidden>

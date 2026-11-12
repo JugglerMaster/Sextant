@@ -29,6 +29,19 @@ from . import remote_install
 from . import updates
 from .config import Settings
 from .db import Database, DEFAULT_PROFILES, dumps, loads, parse_iso, utcnow, utcnow_iso
+from .discovery import (
+    ACKNOWLEDGEMENT,
+    DiscoveryBusy,
+    DiscoveryError,
+    DiscoveryManager,
+    DiscoveryRateLimited,
+    expand_targets,
+    parse_scope,
+    validate_allowlist,
+    validate_excludes,
+    validate_methods,
+    validate_network,
+)
 from .docker_console import ConsoleBroker, ConsoleError
 from .docker_rules import DOCKER_MUTATION_ACTIONS
 from .docker_store import ComposeLibrary, DockerStoreError
@@ -57,6 +70,9 @@ from .models import (
     DockerExecIn,
     DockerInventoryIn,
     DockerSettingsIn,
+    DiscoveryDevicePatchIn,
+    DiscoveryScanIn,
+    DiscoverySettingsIn,
     DockerStackIn,
     DockerStackPatchIn,
     EnrollmentTokenIn,
@@ -102,6 +118,9 @@ from .views import (
     docker_stack_revision_to_dict,
     docker_stack_to_dict,
     docker_volume_to_dict,
+    discovered_device_to_dict,
+    discovery_event_to_dict,
+    discovery_scan_to_dict,
     role_at_least,
     session_to_dict,
     store_package_to_dict,
@@ -624,15 +643,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _ensure_bootstrap_admin(settings, db)
     if settings.telemetry_history:
         db.prune_telemetry(settings.telemetry_retention_days)
+    db.prune_discovery(settings.discovery.retention_days)
 
     notification_service = NotificationService(db, settings)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> Any:
         await notification_service.start()
+        _app.state.discovery_manager.start()
         try:
             yield
         finally:
+            _app.state.discovery_manager.stop()
             await notification_service.stop()
 
     app = FastAPI(
@@ -690,6 +712,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def notify_dashboard() -> None:
         dashboard_state.notify()
+
+    discovery_manager = DiscoveryManager(
+        db,
+        settings.discovery,
+        on_change=notify_dashboard,
+    )
+    app.state.discovery_manager = discovery_manager
 
     def _security_headers(response: Response, path: str) -> Response:
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -4033,6 +4062,355 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for row in rows
             ]
         }
+
+    # ---- Discovery (D1-D2) -------------------------------------------
+
+    def discovery_settings_payload(
+        database: Database, config: Settings
+    ) -> dict[str, Any]:
+        allowed: list[str] = []
+        cidr_errors: list[str] = []
+        for value in config.discovery.cidrs:
+            try:
+                allowed.append(str(validate_network(value)))
+            except DiscoveryError as exc:
+                cidr_errors.append(str(exc))
+        acknowledgement = database.get_discovery_settings()
+        acknowledged = bool(
+            acknowledgement is not None and acknowledgement["acknowledged_at"]
+        )
+        reasons: list[str] = []
+        if not config.discovery.enabled:
+            reasons.append("SEXTANT_DISCOVERY_ENABLED is 0.")
+        if not acknowledged:
+            reasons.append("The authorization acknowledgement has not been stored.")
+        if not allowed:
+            reasons.append("SEXTANT_DISCOVERY_CIDRS has no valid private ranges.")
+        return {
+            "enabled": config.discovery.enabled,
+            "acknowledged": acknowledged,
+            "acknowledged_at": acknowledgement["acknowledged_at"]
+            if acknowledgement is not None
+            else None,
+            "acknowledged_by": acknowledgement["acknowledged_by"]
+            if acknowledgement is not None
+            else "",
+            "acknowledgement_text": ACKNOWLEDGEMENT,
+            "cidrs": allowed,
+            "cidr_errors": cidr_errors,
+            "exclude": list(config.discovery.exclude),
+            "methods": list(config.discovery.methods),
+            "probe_ports": list(config.discovery.probe_ports),
+            "active_probes": config.discovery.active_probes,
+            "interval_hours": config.discovery.interval_hours,
+            "max_hosts": config.discovery.max_hosts,
+            "concurrency": config.discovery.concurrency,
+            "timeout_ms": config.discovery.timeout_ms,
+            "retention_days": config.discovery.retention_days,
+            "agent_relay": config.discovery.agent_relay,
+            "export_limit": config.discovery.export_limit,
+            "disabled_reasons": reasons,
+        }
+
+    @app.get("/api/discovery/settings")
+    def get_discovery_settings(
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        del user
+        return discovery_settings_payload(database, config)
+
+    @app.patch("/api/discovery/settings")
+    def update_discovery_settings(
+        payload: DiscoverySettingsIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if payload.acknowledged:
+            if payload.acknowledgement.strip() != ACKNOWLEDGEMENT:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f'Acknowledgement text must be exactly: "{ACKNOWLEDGEMENT}"',
+                )
+            database.set_discovery_acknowledgement(
+                user["username"], ACKNOWLEDGEMENT
+            )
+            action = "discovery.acknowledged"
+        else:
+            database.clear_discovery_acknowledgement()
+            action = "discovery.acknowledgement_cleared"
+        database.audit(
+            actor=user["username"],
+            action=action,
+            detail={"acknowledgement": ACKNOWLEDGEMENT},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return discovery_settings_payload(database, config)
+
+    @app.get("/api/discovery/devices")
+    def list_discovery_devices(
+        state: str = "",
+        segment: str = "",
+        q: str = "",
+        type: str = "",
+        vendor: str = "",
+        no_agent: bool = False,
+        admin_ports: bool = False,
+        mac: str = "",
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        del user
+        normalized_state = state.strip().lower()
+        if normalized_state and normalized_state not in {
+            "new",
+            "known",
+            "ignored",
+            "promoted",
+        }:
+            raise HTTPException(status_code=400, detail="Invalid device state.")
+        normalized_segment = segment.strip()
+        if normalized_segment == "unsegmented":
+            normalized_segment = ""
+        rows, total = database.list_discovered_devices(
+            state=normalized_state or None,
+            segment=normalized_segment or None,
+            query=q.strip() or None,
+            device_type=type.strip() or None,
+            vendor=vendor.strip() or None,
+            no_agent=no_agent,
+            admin_ports=admin_ports,
+            mac=mac.strip() or None,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "devices": [discovered_device_to_dict(row) for row in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "summary": database.discovery_summary(),
+        }
+
+    @app.get("/api/discovery/devices/{device_id}")
+    def get_discovery_device(
+        device_id: str,
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        del user
+        row = database.get_discovered_device(device_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Discovered device not found.")
+        device = discovered_device_to_dict(row)
+        events = [
+            discovery_event_to_dict(event)
+            for event in database.discovery_device_events(device_id)
+        ]
+        agent = None
+        if device["agent_id"]:
+            with database.connection() as conn:
+                agent_row = conn.execute(
+                    "SELECT * FROM agents WHERE id = ?", (device["agent_id"],)
+                ).fetchone()
+            if agent_row is not None:
+                agent = agent_to_dict(agent_row, config)
+        wake_target = None
+        if device["wake_target_id"]:
+            target_row = database.get_wake_target(device["wake_target_id"])
+            if target_row is not None:
+                wake_target = wake_target_to_dict(target_row)
+        return {"device": device, "events": events, "agent": agent, "wake_target": wake_target}
+
+    @app.patch("/api/discovery/devices/{device_id}")
+    def update_discovery_device(
+        device_id: str,
+        payload: DiscoveryDevicePatchIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        existing = database.get_discovered_device(device_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Discovered device not found.")
+        if payload.tags is None and payload.notes is None and payload.state is None:
+            raise HTTPException(status_code=400, detail="No device changes were supplied.")
+        row = database.update_discovered_device(
+            device_id,
+            tags=payload.tags,
+            notes=payload.notes,
+            state=payload.state,
+        )
+        database.audit(
+            actor=user["username"],
+            action="discovery.device_updated",
+            target=device_id,
+            detail={
+                "from_state": existing["state"],
+                "to_state": row["state"] if row is not None else existing["state"],
+                "tags": payload.tags is not None,
+                "notes": payload.notes is not None,
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        notify_dashboard()
+        return {
+            "device": discovered_device_to_dict(row) if row is not None else None,
+            "events": [
+                discovery_event_to_dict(event)
+                for event in database.discovery_device_events(device_id)
+            ],
+        }
+
+    @app.delete("/api/discovery/devices/{device_id}")
+    def delete_discovery_device(
+        device_id: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> Response:
+        existing = database.get_discovered_device(device_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Discovered device not found.")
+        database.delete_discovered_device(device_id)
+        database.audit(
+            actor=user["username"],
+            action="discovery.device_deleted",
+            target=device_id,
+            detail={
+                "ip": existing["ip"],
+                "mac": existing["mac"],
+                "hostname": existing["hostname"],
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        notify_dashboard()
+        return Response(status_code=204)
+
+    @app.get("/api/discovery/scans")
+    def list_discovery_scans(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        del user
+        rows, total = database.list_discovery_scans(limit=limit, offset=offset)
+        active = database.active_discovery_scan()
+        return {
+            "scans": [discovery_scan_to_dict(row) for row in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "active_scan_id": active["id"] if active is not None else None,
+        }
+
+    @app.get("/api/discovery/scans/{scan_id}")
+    def get_discovery_scan(
+        scan_id: str,
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        del user
+        row = database.get_discovery_scan(scan_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Discovery scan not found.")
+        return {"scan": discovery_scan_to_dict(row)}
+
+    @app.post("/api/discovery/scan")
+    def start_discovery_scan(
+        payload: DiscoveryScanIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if not config.discovery.enabled:
+            raise HTTPException(
+                status_code=403,
+                detail="Discovery is disabled. Set SEXTANT_DISCOVERY_ENABLED=1 first.",
+            )
+        acknowledgement = database.get_discovery_settings()
+        if acknowledgement is None or not acknowledgement["acknowledged_at"]:
+            raise HTTPException(
+                status_code=403,
+                detail="Discovery authorization acknowledgement is required.",
+            )
+        try:
+            allowlist = validate_allowlist(config.discovery.cidrs)
+            excludes = validate_excludes(config.discovery.exclude)
+            scope = parse_scope(payload.scope, allowlist)
+            methods = validate_methods(config.discovery, payload.methods)
+            targets = expand_targets(scope, excludes, config.discovery.max_hosts)
+        except DiscoveryError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+        if not targets:
+            raise HTTPException(
+                status_code=400, detail="The selected scope has no scan targets."
+            )
+        scan = database.create_discovery_scan(
+            [str(network) for network in scope], methods, user["username"]
+        )
+        manager: DiscoveryManager = request.app.state.discovery_manager
+        try:
+            manager.submit(str(scan["id"]))
+        except (DiscoveryBusy, DiscoveryRateLimited) as exc:
+            database.update_discovery_scan(
+                str(scan["id"]),
+                status="failed",
+                finished_at=utcnow_iso(),
+                error=str(exc),
+            )
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=str(exc),
+                headers={"Retry-After": "5"},
+            ) from None
+        database.audit(
+            actor=user["username"],
+            action="discovery.scan_started",
+            target=str(scan["id"]),
+            detail={
+                "scope": [str(network) for network in scope],
+                "methods": methods,
+                "targets": len(targets),
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return {"scan": discovery_scan_to_dict(scan)}
+
+    @app.post("/api/discovery/scans/{scan_id}/cancel")
+    def cancel_discovery_scan(
+        scan_id: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        row = database.get_discovery_scan(scan_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Discovery scan not found.")
+        if row["status"] not in {"queued", "running"}:
+            raise HTTPException(status_code=409, detail="The scan is already finished.")
+        manager: DiscoveryManager = request.app.state.discovery_manager
+        manager.cancel(scan_id)
+        database.audit(
+            actor=user["username"],
+            action="discovery.scan_cancel_requested",
+            target=scan_id,
+            detail={"status": row["status"]},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        updated = database.get_discovery_scan(scan_id)
+        return {"scan": discovery_scan_to_dict(updated) if updated is not None else None}
 
     @app.post("/api/agents/{agent_id}/rotate-token")
     def rotate_agent_token(

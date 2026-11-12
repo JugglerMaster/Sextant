@@ -46,6 +46,7 @@ async function preparePage(page, { theme = "dark" } = {}) {
     },
     { selectedTheme: theme, fixedNow: FIXED_NOW },
   );
+  page.__apiSession = session;
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());

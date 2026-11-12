@@ -66,6 +66,20 @@ const state = {
   paletteItems: [],
   paletteIndex: 0,
   paletteTrigger: null,
+  discovery: {
+    settings: null,
+    devices: [],
+    summary: null,
+    scans: [],
+    activeScanId: null,
+    detail: null,
+    selectedId: null,
+    filters: { state: "", type: "", segment: "", vendor: "", no_agent: false, admin_ports: false },
+    methods: [],
+    loading: false,
+    pollTimer: null,
+    trigger: null,
+  },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -80,6 +94,7 @@ const ADMIN_PAGES = ["enroll", "audit", "users", "profiles", "remote-install"];
 const THEME_KEY = "sextant.theme";
 const PAGE_META = {
   overview: ["Fleet", "Live machines and health at a glance."],
+  discovery: ["Discovery", "Find devices on authorized networks and review their evidence."],
   wake: ["Wake targets", "Send Wake-on-LAN packets to machines without agents."],
   "docker-hosts": ["Docker Hosts", "Select a host to inspect its cached Docker inventory."],
   "compose-files": ["Compose Files", "Compose stack files, immutable revisions, and deployments."],
@@ -760,8 +775,13 @@ function navigate(page, load = true) {
     stopDockerRefreshPoll();
     stopDockerAutoRefresh();
   }
+  if (page !== "discovery") {
+    stopDiscoveryPoll();
+    closeDiscoveryDrawer();
+  }
   if (!load) return;
   if (page === "overview") loadDashboard();
+  if (page === "discovery") loadDiscovery();
   if (page === "wake") loadWakeTargets();
   if (page === "docker-hosts") {
     loadDockerHosts();
@@ -6199,6 +6219,798 @@ async function deleteSavedView() {
   toast(`Deleted saved view "${name}".`);
 }
 
+function discoveryReady() {
+  const settings = state.discovery.settings;
+  return Boolean(
+    settings &&
+      settings.enabled &&
+      settings.acknowledged &&
+      Array.isArray(settings.cidrs) &&
+      settings.cidrs.length,
+  );
+}
+
+function discoveryDisabledMessage(settings) {
+  if (!settings) return "Discovery settings are unavailable.";
+  if (!settings.enabled) {
+    return "Network discovery is off. An administrator must set SEXTANT_DISCOVERY_ENABLED=1, add private ranges to SEXTANT_DISCOVERY_CIDRS, and record the authorization acknowledgement.";
+  }
+  if (!settings.acknowledged) {
+    return "Discovery is enabled and allowlisted, but no authorization acknowledgement is stored. An administrator must confirm they are authorized to scan these networks before any scan can run.";
+  }
+  if (!Array.isArray(settings.cidrs) || !settings.cidrs.length) {
+    return "Discovery is enabled but SEXTANT_DISCOVERY_CIDRS does not contain any valid private ranges. Only allowlisted RFC1918 or ULA ranges can be scanned.";
+  }
+  const errors = settings.cidr_errors || [];
+  return errors.length
+    ? `Discovery is disabled by configuration: ${errors.join(" ")}`
+    : "Discovery is not ready.";
+}
+
+function discoveryStat(label, value, detail, className = "") {
+  return h(
+    "article",
+    { class: `stat-card ${className}` },
+    h("span", { class: "stat-label" }, label),
+    h("strong", { class: "stat-value" }, String(value)),
+    h("span", { class: "stat-detail" }, detail),
+  );
+}
+
+function renderDiscovery() {
+  const discovery = state.discovery;
+  const settings = discovery.settings;
+  const ready = discoveryReady();
+  const disabled = $("discovery-disabled");
+  const ackPanel = $("discovery-ack-panel");
+  const ackEligible = Boolean(
+    settings && settings.enabled && settings.acknowledged === false && state.permissions.admin,
+  );
+
+  if (disabled) {
+    disabled.hidden = ready;
+    disabled.textContent = ready ? "" : discoveryDisabledMessage(settings);
+  }
+  if (ackPanel) ackPanel.hidden = !ackEligible;
+  if (settings && settings.enabled && settings.acknowledged === false) {
+    setText(
+      "discovery-ack-message",
+      "Discovery will not send any probes until this acknowledgement is recorded. It is audited with your username and the current time.",
+    );
+  }
+
+  for (const id of ["discovery-summary", "discovery-scan-panel", "discovery-devices-panel"]) {
+    const node = $(id);
+    if (node) node.hidden = !ready;
+  }
+  if (!ready) {
+    setText("discovery-count", "");
+    return;
+  }
+  renderDiscoverySummary();
+  renderDiscoveryFilters();
+  renderDiscoveryMethods();
+  renderDiscoveryScanHistory();
+  renderDiscoveryTable();
+}
+
+function renderDiscoverySummary() {
+  const container = $("discovery-summary");
+  if (!container) return;
+  const summary = state.discovery.summary || {
+    total: 0,
+    new: 0,
+    no_agent: 0,
+    states: {},
+    types: [],
+    segments: [],
+  };
+  clear(container);
+  container.append(
+    discoveryStat("Discovered devices", summary.total, `${summary.no_agent || 0} without an enrolled agent`),
+    discoveryStat("New", summary.new || 0, "Not yet marked known", "stat-warn"),
+    discoveryStat("Known", summary.states?.known || 0, `${summary.states?.ignored || 0} ignored`, "stat-good"),
+    discoveryStat(
+      "Segments",
+      Array.isArray(summary.segments) ? summary.segments.length : 0,
+      `${Array.isArray(summary.types) ? summary.types.length : 0} device types`,
+      "stat-info",
+    ),
+  );
+}
+
+function fillDiscoverySelect(id, values, selected, allLabel) {
+  const select = $(id);
+  if (!select) return;
+  clear(select);
+  select.append(h("option", { value: "" }, allLabel));
+  for (const value of values) {
+    const label = value.label || value;
+    select.append(h("option", { value: value.value || value }, label));
+  }
+  select.value = selected || "";
+}
+
+function renderDiscoveryFilters() {
+  const summary = state.discovery.summary || {};
+  const filters = state.discovery.filters;
+  fillDiscoverySelect(
+    "discovery-filter-type",
+    (summary.types || []).map((item) => ({ value: item.type, label: `${item.type} (${item.count})` })),
+    filters.type,
+    "All types",
+  );
+  fillDiscoverySelect(
+    "discovery-filter-segment",
+    (summary.segments || []).map((item) => ({
+      value: item.segment || "unsegmented",
+      label: `${item.segment || "unsegmented"} (${item.count})`,
+    })),
+    filters.segment,
+    "All segments",
+  );
+  fillDiscoverySelect(
+    "discovery-filter-vendor",
+    (summary.vendors || []).map((item) => ({ value: item.vendor, label: `${item.vendor} (${item.count})` })),
+    filters.vendor,
+    "All vendors",
+  );
+  const stateSelect = $("discovery-filter-state");
+  if (stateSelect) stateSelect.value = filters.state || "";
+  const noAgent = $("discovery-filter-no-agent");
+  if (noAgent) noAgent.checked = Boolean(filters.no_agent);
+  const adminPorts = $("discovery-filter-admin-ports");
+  if (adminPorts) adminPorts.checked = Boolean(filters.admin_ports);
+}
+
+function renderDiscoveryMethods() {
+  const container = $("discovery-methods");
+  if (!container) return;
+  const settings = state.discovery.settings || { methods: [] };
+  const configured = Array.isArray(settings.methods) ? settings.methods : [];
+  if (!state.discovery.methods.length) {
+    state.discovery.methods = configured.filter((method) => method !== "tcp" || settings.active_probes);
+  }
+  const labels = {
+    neigh: "Neighbour table",
+    dns: "Reverse DNS",
+    oui: "OUI vendor lookup",
+    ssdp: "Passive SSDP",
+    tcp: "TCP fingerprint",
+  };
+  clear(container);
+  for (const method of configured) {
+    const active = method !== "tcp" || settings.active_probes;
+    const input = h("input", {
+      type: "checkbox",
+      value: method,
+      checked: state.discovery.methods.includes(method) && active,
+      disabled: !active,
+    });
+    input.addEventListener("change", () => {
+      const selected = new Set(state.discovery.methods);
+      if (input.checked) selected.add(method);
+      else selected.delete(method);
+      state.discovery.methods = [...selected];
+    });
+    container.append(
+      h(
+        "label",
+        { class: "checkbox-row" },
+        input,
+        h("span", {}, labels[method] || method),
+        active ? null : h("small", { class: "form-hint" }, "requires SEXTANT_DISCOVERY_ACTIVE_PROBES=1"),
+      ),
+    );
+  }
+  const scope = $("discovery-scan-scope");
+  if (scope) {
+    const current = scope.value;
+    clear(scope);
+    for (const cidr of settings.cidrs || []) scope.append(h("option", { value: cidr }, cidr));
+    if (current) scope.value = current;
+  }
+  setText(
+    "discovery-scan-hint",
+    settings.active_probes
+      ? "Active TCP fingerprinting is enabled for the configured v1 port set. Scans are capped, rate-limited, and cancellable."
+      : "Passive discovery is enabled. TCP fingerprinting stays off until SEXTANT_DISCOVERY_ACTIVE_PROBES=1.",
+  );
+}
+
+function discoveryStateKind(value) {
+  return value === "new" ? "warning" : value === "promoted" ? "online" : value === "ignored" ? "offline" : "neutral";
+}
+
+function discoveryDeviceName(device) {
+  return device.hostname || device.ip || device.mac || device.id;
+}
+
+function renderDiscoveryTable() {
+  const body = $("discovery-table-body");
+  if (!body) return;
+  const devices = state.discovery.devices || [];
+  clear(body);
+  const empty = $("discovery-empty");
+  if (empty) {
+    empty.hidden = devices.length > 0;
+    setText(
+      "discovery-empty-text",
+      state.discovery.settings?.cidrs?.length
+        ? "Run a scan or clear the filters to see discovered devices."
+        : "Add an allowlisted CIDR before scanning.",
+    );
+  }
+  setText(
+    "discovery-count",
+    `${devices.length} shown${state.discovery.summary ? ` · ${state.discovery.summary.total} total` : ""}`,
+  );
+  for (const device of devices) {
+    const agent = (state.dashboard?.agents || []).find((item) => item.id === device.agent_id);
+    const ports = (device.open_ports || []).join(", ") || "—";
+    const tags = (device.tags || []).map((tag) => h("span", { class: "tag" }, tag));
+    const action = h(
+      "button",
+      {
+        class: "button button-ghost button-small",
+        type: "button",
+        "aria-label": `Open ${discoveryDeviceName(device)} details`,
+        onClick: () => openDiscoveryDevice(device.id),
+      },
+      "Open",
+    );
+    body.append(
+      h(
+        "tr",
+        {},
+        h("td", {}, statusPill(device.state, discoveryStateKind(device.state))),
+        h("td", { class: "mono" }, device.ip || "—"),
+        h(
+          "td",
+          {},
+          h("div", { class: "mono" }, device.mac || "no MAC"),
+          h(
+            "div",
+            { class: "form-hint" },
+            `${device.vendor || "unknown vendor"}${device.mac_randomized ? " · randomized MAC" : ""}`,
+          ),
+        ),
+        h("td", {}, device.hostname || "—"),
+        h("td", {}, device.device_type || "unknown", h("div", { class: "form-hint" }, device.os_guess || "")),
+        h("td", { class: "mono" }, ports),
+        h("td", { title: device.last_seen || "" }, relativeTime(device.last_seen)),
+        h("td", {}, agent ? agent.name : device.agent_id ? "linked" : "—"),
+        h("td", {}, tags.length ? h("div", { class: "tag-row" }, ...tags) : "—"),
+        h("td", {}, action),
+      ),
+    );
+  }
+}
+
+function renderDiscoveryScanHistory() {
+  const container = $("discovery-scan-history");
+  if (!container) return;
+  clear(container);
+  const scans = state.discovery.scans || [];
+  if (!scans.length) {
+    container.append(h("div", { class: "empty-inline" }, "No scans yet."));
+  }
+  const active = scans.find((scan) => scan.status === "queued" || scan.status === "running");
+  state.discovery.activeScanId = active ? active.id : null;
+  for (const scan of scans.slice(0, 8)) {
+    const statusClass =
+      scan.status === "succeeded"
+        ? "online"
+        : scan.status === "failed"
+          ? "critical"
+          : scan.status === "cancelled"
+            ? "offline"
+            : "warning";
+    container.append(
+      h(
+        "div",
+        { class: "list-row" },
+        h(
+          "div",
+          { class: "list-row-main" },
+          h("strong", {}, `${(scan.scope || []).join(", ") || "no scope"}`),
+          h(
+            "small",
+            {},
+            `${(scan.methods || []).join(", ")} · ${localTime(scan.started_at)} · ${scan.initiated_by}`,
+          ),
+          scan.error ? h("small", {}, scan.error) : null,
+        ),
+        h(
+          "div",
+          { class: "list-row-actions" },
+          statusPill(scan.status, statusClass),
+          h("span", { class: "form-hint" }, `${scan.hosts_found} found`),
+        ),
+      ),
+    );
+  }
+  const progress = $("discovery-scan-progress");
+  const bar = $("discovery-progress-bar");
+  const cancel = $("discovery-scan-cancel");
+  const start = $("discovery-scan-start");
+  if (progress) progress.hidden = !active;
+  if (cancel) cancel.hidden = !active;
+  if (start) start.disabled = Boolean(active);
+  if (bar && active) bar.value = String(Math.max(0, Math.min(100, Number(active.progress || 0))));
+  if (active) {
+    setText(
+      "discovery-progress-label",
+      `Scanning ${(active.scope || []).join(", ")} · ${active.progress || 0}% · ${active.hosts_scanned || 0} hosts checked`,
+    );
+  }
+}
+
+async function loadDiscovery() {
+  const discovery = state.discovery;
+  if (discovery.loading) return;
+  discovery.loading = true;
+  try {
+    discovery.settings = await api("/api/discovery/settings");
+    renderDiscovery();
+    if (!discoveryReady()) return;
+    await Promise.all([loadDiscoveryDevices(), loadDiscoveryScans()]);
+    renderDiscovery();
+    armDiscoveryPoll();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    discovery.loading = false;
+  }
+}
+
+function discoveryFilterQuery() {
+  const filters = state.discovery.filters;
+  const params = new URLSearchParams();
+  if (filters.state) params.set("state", filters.state);
+  if (filters.type) params.set("type", filters.type);
+  if (filters.segment) params.set("segment", filters.segment);
+  if (filters.vendor) params.set("vendor", filters.vendor);
+  if (filters.no_agent) params.set("no_agent", "true");
+  if (filters.admin_ports) params.set("admin_ports", "true");
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+async function loadDiscoveryDevices() {
+  const data = await api(`/api/discovery/devices${discoveryFilterQuery()}`);
+  state.discovery.devices = data.devices || [];
+  state.discovery.summary = data.summary || null;
+  renderDiscoverySummary();
+  renderDiscoveryFilters();
+  renderDiscoveryTable();
+}
+
+async function loadDiscoveryScans() {
+  const data = await api("/api/discovery/scans");
+  state.discovery.scans = data.scans || [];
+  state.discovery.activeScanId = data.active_scan_id || null;
+  renderDiscoveryScanHistory();
+}
+
+function stopDiscoveryPoll() {
+  if (state.discovery.pollTimer) {
+    clearInterval(state.discovery.pollTimer);
+    state.discovery.pollTimer = null;
+  }
+}
+
+function armDiscoveryPoll() {
+  if (!state.discovery.activeScanId) {
+    stopDiscoveryPoll();
+    return;
+  }
+  if (state.discovery.pollTimer) return;
+  state.discovery.pollTimer = setInterval(async () => {
+    if (state.page !== "discovery") {
+      stopDiscoveryPoll();
+      return;
+    }
+    const wasActive = state.discovery.activeScanId;
+    try {
+      await loadDiscoveryScans();
+      if (!state.discovery.activeScanId) {
+        stopDiscoveryPoll();
+        if (wasActive) await loadDiscoveryDevices();
+      }
+    } catch (_error) {
+      stopDiscoveryPoll();
+    }
+  }, 1500);
+}
+
+async function startDiscoveryScan(event) {
+  event.preventDefault();
+  const scope = $("discovery-scan-scope")?.value || "";
+  const methods = [...state.discovery.methods];
+  setText("discovery-scan-error", "");
+  if (!scope) {
+    setText("discovery-scan-error", "Choose an allowlisted scope.");
+    return;
+  }
+  if (!methods.length) {
+    setText("discovery-scan-error", "Select at least one discovery method.");
+    return;
+  }
+  const start = $("discovery-scan-start");
+  if (start) start.disabled = true;
+  try {
+    await api("/api/discovery/scan", {
+      method: "POST",
+      body: { scope: [scope], methods },
+    });
+    toast("Discovery scan queued.");
+    await loadDiscoveryScans();
+    armDiscoveryPoll();
+  } catch (error) {
+    setText("discovery-scan-error", error.message);
+    if (start) start.disabled = false;
+  }
+}
+
+async function cancelDiscoveryScan() {
+  const scanId = state.discovery.activeScanId;
+  if (!scanId) return;
+  try {
+    await api(`/api/discovery/scans/${scanId}/cancel`, { method: "POST", body: {} });
+    toast("Cancellation requested.");
+    await loadDiscoveryScans();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function acknowledgeDiscovery() {
+  const checkbox = $("discovery-ack-checkbox");
+  setText("discovery-ack-error", "");
+  if (!checkbox?.checked) {
+    setText("discovery-ack-error", "Confirm the authorization statement first.");
+    return;
+  }
+  const button = $("discovery-ack-button");
+  if (button) button.disabled = true;
+  try {
+    const settings = state.discovery.settings;
+    await api("/api/discovery/settings", {
+      method: "PATCH",
+      body: {
+        acknowledged: true,
+        acknowledgement: settings?.acknowledgement_text || "I am authorized to scan these networks",
+      },
+    });
+    toast("Discovery authorization recorded.");
+    await loadDiscovery();
+  } catch (error) {
+    setText("discovery-ack-error", error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function discoveryServiceSummary(port, service) {
+  if (!service || typeof service !== "object") return "Open TCP port";
+  if (service.protocol === "ssh") {
+    return [service.product, service.version, service.banner].filter(Boolean).join(" · ");
+  }
+  if (service.protocol === "http") {
+    return [
+      service.status ? `HTTP ${service.status}` : "",
+      service.server || "",
+      service.title ? `“${service.title}”` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  if (service.protocol === "tls") {
+    return [
+      service.subject ? `CN ${service.subject}` : "",
+      service.issuer ? `issuer ${service.issuer}` : "",
+      Array.isArray(service.san) && service.san.length ? `SAN ${service.san.join(", ")}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  return service.protocol ? String(service.protocol) : "Open TCP port";
+}
+
+function discoveryEventLabel(kind) {
+  return (
+    {
+      new_device: "New device",
+      new_port: "New port",
+      service_changed: "Service changed",
+      identity_conflict: "Identity conflict",
+      went_dark: "Went dark",
+      promoted: "Promoted",
+    }[kind] || kind
+  );
+}
+
+function renderDiscoveryDrawer() {
+  const detail = state.discovery.detail;
+  const body = $("discovery-drawer-body");
+  const actions = $("discovery-drawer-actions");
+  if (!body || !detail) return;
+  const device = detail.device;
+  const name = discoveryDeviceName(device);
+  setText("discovery-drawer-title", name);
+  setText("discovery-drawer-eyebrow", `${device.device_type || "unknown"} · ${device.state}`);
+  setText(
+    "discovery-drawer-meta",
+    `${device.ip || "no address"} · ${device.mac || "no MAC"} · ${device.vendor || "unknown vendor"}`,
+  );
+  clear(actions);
+  if (state.permissions.operate) {
+    if (device.state !== "ignored") {
+      actions.append(
+        button("Ignore", "button-secondary button-small", () => updateDiscoveryState("ignored")),
+      );
+    }
+    if (device.state !== "known") {
+      actions.append(
+        button("Mark known", "button-secondary button-small", () => updateDiscoveryState("known")),
+      );
+    }
+  }
+  if (state.permissions.admin) {
+    actions.append(button("Delete", "button-ghost button-small", () => deleteDiscoveryDevice(device)));
+  }
+
+  clear(body);
+  body.append(
+    section(
+      "Identity",
+      "Device record",
+      h(
+        "div",
+        { class: "info-grid" },
+        infoTile("IP address", device.ip),
+        infoTile("MAC address", device.mac || "not observed"),
+        infoTile("Vendor", device.vendor || "unknown"),
+        infoTile("Hostname", device.hostname || "unknown"),
+        infoTile("Type", device.device_type || "unknown"),
+        infoTile("OS guess", device.os_guess || "unknown"),
+        infoTile("Confidence", `${Math.round((device.confidence || 0) * 100)}%`),
+        infoTile("Segment", device.segment || "unsegmented"),
+        infoTile("Source", device.source || "server"),
+        infoTile("First seen", localTime(device.first_seen)),
+        infoTile("Last seen", localTime(device.last_seen)),
+        infoTile("Randomized MAC", device.mac_randomized ? "yes" : "no"),
+      ),
+    ),
+  );
+
+  const evidence = device.evidence || {};
+  body.append(
+    section(
+      "Evidence",
+      "What found this device",
+      h(
+        "div",
+        { class: "info-grid" },
+        infoTile("Methods", (evidence.methods || []).join(", ") || "unknown"),
+        infoTile("Neighbour table", evidence.neighbor ? "yes" : "no"),
+        infoTile("Reverse DNS", evidence.reverse_dns ? "yes" : "no"),
+        infoTile("SSDP", evidence.ssdp ? "yes" : "no"),
+        infoTile("TCP fingerprint", evidence.tcp ? "yes" : "no"),
+      ),
+    ),
+  );
+
+  const services = device.services && typeof device.services === "object" ? device.services : {};
+  const ports = [...new Set([...(device.open_ports || []).map(String), ...Object.keys(services)])]
+    .map(Number)
+    .filter((port) => Number.isFinite(port))
+    .sort((left, right) => left - right);
+  const portBody = h("tbody");
+  if (!ports.length) {
+    portBody.append(h("tr", {}, h("td", { colspan: "2" }, "No open ports recorded.")));
+  }
+  for (const port of ports) {
+    portBody.append(
+      h(
+        "tr",
+        {},
+        h("td", { class: "mono" }, String(port)),
+        h("td", {}, discoveryServiceSummary(port, services[String(port)])),
+      ),
+    );
+  }
+  body.append(
+    section(
+      "Ports and services",
+      `${ports.length} open port${ports.length === 1 ? "" : "s"}`,
+      h(
+        "div",
+        { class: "table-wrap" },
+        h(
+          "table",
+          { class: "data-table" },
+          h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Port"), h("th", { scope: "col" }, "Evidence"))),
+          portBody,
+        ),
+      ),
+    ),
+  );
+
+  const events = detail.events || [];
+  const eventList = h("div", { class: "list-stack" });
+  if (!events.length) eventList.append(h("div", { class: "empty-inline" }, "No change events yet."));
+  for (const event of events) {
+    eventList.append(
+      h(
+        "div",
+        { class: "list-row" },
+        h(
+          "div",
+          { class: "list-row-main" },
+          h("strong", {}, discoveryEventLabel(event.kind)),
+          h("small", {}, JSON.stringify(event.detail || {})),
+        ),
+        h("span", { class: "form-hint" }, localTime(event.at)),
+      ),
+    );
+  }
+  body.append(section("History", "Change events", eventList));
+
+  body.append(
+    section(
+      "Correlation",
+      "Linked records",
+      h(
+        "div",
+        { class: "info-grid" },
+        infoTile("Enrolled agent", detail.agent?.name || device.agent_id || "not linked"),
+        infoTile(
+          "Agent status",
+          detail.agent ? (detail.agent.online ? "online" : "offline") : "—",
+        ),
+        infoTile("Wake target", detail.wake_target?.name || device.wake_target_id || "not linked"),
+        infoTile("Wake MAC", detail.wake_target?.mac || "—"),
+      ),
+    ),
+  );
+
+  const form = h(
+    "form",
+    { class: "form-stack" },
+    h("label", { class: "field" }, h("span", {}, "Tags"), h("input", { name: "tags", maxlength: "2000", value: (device.tags || []).join(", "), placeholder: "office, lab" })),
+    h("label", { class: "field" }, h("span", {}, "Notes"), h("textarea", { name: "notes", maxlength: "2000", rows: "3" }, device.notes || "")),
+    h(
+      "label",
+      { class: "field" },
+      h("span", {}, "State"),
+      h(
+        "select",
+        { name: "state" },
+        ...["new", "known", "ignored", "promoted"].map((value) =>
+          h("option", { value, selected: value === device.state }, value),
+        ),
+      ),
+    ),
+    h("p", { class: "form-error", id: "discovery-edit-error", role: "alert" }),
+    h("button", { class: "button button-primary", type: "submit", disabled: !state.permissions.operate }, "Save changes"),
+  );
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!state.permissions.operate) return;
+    const values = new FormData(form);
+    setText("discovery-edit-error", "");
+    try {
+      const data = await api(`/api/discovery/devices/${device.id}`, {
+        method: "PATCH",
+        body: {
+          tags: splitList(values.get("tags")),
+          notes: String(values.get("notes") || "").trim(),
+          state: String(values.get("state") || device.state),
+        },
+      });
+      state.discovery.detail = { ...detail, device: data.device, events: data.events };
+      renderDiscoveryDrawer();
+      await loadDiscoveryDevices();
+      toast("Device record updated.");
+    } catch (error) {
+      setText("discovery-edit-error", error.message);
+    }
+  });
+  body.append(section("Operator metadata", "Tags and notes", form));
+}
+
+async function openDiscoveryDevice(deviceId) {
+  state.discovery.trigger = document.activeElement;
+  try {
+    const detail = await api(`/api/discovery/devices/${deviceId}`);
+    state.discovery.selectedId = deviceId;
+    state.discovery.detail = detail;
+    renderDiscoveryDrawer();
+    $("discovery-drawer").hidden = false;
+    document.body.classList.add("drawer-open");
+    document.addEventListener("keydown", discoveryDrawerTrapHandler);
+    const first = $("discovery-drawer").querySelector("button, input, select, textarea, [tabindex]:not([tabindex='-1'])");
+    if (first) first.focus();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function discoveryDrawerTrapHandler(event) {
+  const drawer = $("discovery-drawer");
+  if (!drawer || drawer.hidden) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeDiscoveryDrawer();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = [...drawer.querySelectorAll("button, input, select, textarea, a[href], [tabindex]:not([tabindex='-1'])")].filter(
+    (element) => !element.disabled && element.offsetParent !== null,
+  );
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+async function updateDiscoveryState(nextState) {
+  const device = state.discovery.detail?.device;
+  if (!device) return;
+  try {
+    const data = await api(`/api/discovery/devices/${device.id}`, {
+      method: "PATCH",
+      body: { state: nextState },
+    });
+    state.discovery.detail = { ...state.discovery.detail, device: data.device, events: data.events };
+    renderDiscoveryDrawer();
+    await loadDiscoveryDevices();
+    toast(`Device marked ${nextState}.`);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function deleteDiscoveryDevice(device) {
+  if (!state.permissions.admin) return;
+  const confirmed = await confirmAction(
+    `Delete ${discoveryDeviceName(device)}?`,
+    "This removes the discovered device and its change history. An enrolled agent, wake target, and audit rows are not deleted.",
+    "Delete device",
+  );
+  if (!confirmed) return;
+  try {
+    await api(`/api/discovery/devices/${device.id}`, { method: "DELETE" });
+    closeDiscoveryDrawer();
+    await loadDiscoveryDevices();
+    toast("Discovered device deleted.");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function closeDiscoveryDrawer() {
+  const drawer = $("discovery-drawer");
+  if (!drawer || drawer.hidden) return;
+  drawer.hidden = true;
+  document.body.classList.remove("drawer-open");
+  document.removeEventListener("keydown", discoveryDrawerTrapHandler);
+  state.discovery.selectedId = null;
+  state.discovery.detail = null;
+  if (state.discovery.trigger && typeof state.discovery.trigger.focus === "function") {
+    state.discovery.trigger.focus();
+  }
+  state.discovery.trigger = null;
+}
+
 async function init() {
   loadTheme();
   loadFleetFilters();
@@ -6306,6 +7118,38 @@ function wireEvents() {
       renderDockerTab();
     });
   });
+  $("discovery-ack-button")?.addEventListener("click", acknowledgeDiscovery);
+  $("discovery-scan-form")?.addEventListener("submit", startDiscoveryScan);
+  $("discovery-scan-cancel")?.addEventListener("click", cancelDiscoveryScan);
+  document.querySelectorAll("[data-close-discovery-drawer]").forEach((el) => {
+    el.addEventListener("click", closeDiscoveryDrawer);
+  });
+  const discoveryFilters = {
+    "discovery-filter-state": "state",
+    "discovery-filter-type": "type",
+    "discovery-filter-segment": "segment",
+    "discovery-filter-vendor": "vendor",
+  };
+  for (const [id, key] of Object.entries(discoveryFilters)) {
+    $(id)?.addEventListener("change", (event) => {
+      state.discovery.filters[key] = event.target.value;
+      loadDiscoveryDevices().catch((error) => toast(error.message, "error"));
+    });
+  }
+  $("discovery-filter-no-agent")?.addEventListener("change", (event) => {
+    state.discovery.filters.no_agent = event.target.checked;
+    loadDiscoveryDevices().catch((error) => toast(error.message, "error"));
+  });
+  $("discovery-filter-admin-ports")?.addEventListener("change", (event) => {
+    state.discovery.filters.admin_ports = event.target.checked;
+    loadDiscoveryDevices().catch((error) => toast(error.message, "error"));
+  });
+  $("discovery-filter-clear")?.addEventListener("click", () => {
+    state.discovery.filters = { state: "", type: "", segment: "", vendor: "", no_agent: false, admin_ports: false };
+    renderDiscoveryFilters();
+    loadDiscoveryDevices().catch((error) => toast(error.message, "error"));
+  });
+
   $("compose-new")?.addEventListener("click", newComposeStackDialog);
   $("compose-close")?.addEventListener("click", closeComposeStack);
   $("compose-deploy-current")?.addEventListener("click", () => {

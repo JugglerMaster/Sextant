@@ -478,6 +478,67 @@ CREATE TABLE IF NOT EXISTS docker_deployments (
     error TEXT NOT NULL DEFAULT '',
     log TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS discovery_settings (
+    id TEXT PRIMARY KEY CHECK (id = 'discovery'),
+    acknowledged_at TEXT,
+    acknowledged_by TEXT NOT NULL DEFAULT '',
+    acknowledgement TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS discovered_devices (
+    id TEXT PRIMARY KEY,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    mac TEXT NOT NULL DEFAULT '',
+    ip TEXT NOT NULL DEFAULT '',
+    hostname TEXT NOT NULL DEFAULT '',
+    vendor TEXT NOT NULL DEFAULT '',
+    device_type TEXT NOT NULL DEFAULT 'unknown',
+    os_guess TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'server',
+    segment TEXT NOT NULL DEFAULT '',
+    open_ports TEXT NOT NULL DEFAULT '[]',
+    services TEXT NOT NULL DEFAULT '[]',
+    mdns TEXT NOT NULL DEFAULT '{}',
+    ssdp TEXT NOT NULL DEFAULT '{}',
+    evidence TEXT NOT NULL DEFAULT '{}',
+    state TEXT NOT NULL DEFAULT 'new'
+        CHECK (state IN ('new', 'known', 'ignored', 'promoted')),
+    agent_id TEXT,
+    wake_target_id TEXT,
+    tags TEXT NOT NULL DEFAULT '[]',
+    notes TEXT NOT NULL DEFAULT '',
+    mac_randomized INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS discovery_scans (
+    id TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    scope TEXT NOT NULL DEFAULT '[]',
+    methods TEXT NOT NULL DEFAULT '[]',
+    initiated_by TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued'
+        CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+    hosts_found INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    progress INTEGER NOT NULL DEFAULT 0,
+    hosts_scanned INTEGER NOT NULL DEFAULT 0,
+    cancel_requested INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS discovery_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    kind TEXT NOT NULL
+        CHECK (kind IN ('new_device', 'new_port', 'service_changed',
+                        'identity_conflict', 'went_dark', 'promoted')),
+    detail TEXT NOT NULL DEFAULT '{}'
+);
 """
 
 INDEXES = """
@@ -519,6 +580,18 @@ CREATE INDEX IF NOT EXISTS idx_docker_deployments_active ON docker_deployments(a
 CREATE INDEX IF NOT EXISTS idx_docker_deployments_command ON docker_deployments(command_id);
 CREATE INDEX IF NOT EXISTS idx_docker_console_agent ON docker_console_sessions(agent_id, status);
 CREATE INDEX IF NOT EXISTS idx_docker_console_last_seen ON docker_console_sessions(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_discovered_devices_mac ON discovered_devices(mac);
+CREATE INDEX IF NOT EXISTS idx_discovered_devices_ip ON discovered_devices(ip);
+CREATE INDEX IF NOT EXISTS idx_discovered_devices_hostname ON discovered_devices(hostname);
+CREATE INDEX IF NOT EXISTS idx_discovered_devices_state ON discovered_devices(state);
+CREATE INDEX IF NOT EXISTS idx_discovered_devices_segment ON discovered_devices(segment);
+CREATE INDEX IF NOT EXISTS idx_discovered_devices_last_seen ON discovered_devices(last_seen);
+CREATE INDEX IF NOT EXISTS idx_discovered_devices_type ON discovered_devices(device_type);
+CREATE INDEX IF NOT EXISTS idx_discovery_scans_started ON discovery_scans(started_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_scans_status ON discovery_scans(status);
+CREATE INDEX IF NOT EXISTS idx_discovery_events_at ON discovery_events(at);
+CREATE INDEX IF NOT EXISTS idx_discovery_events_device_at ON discovery_events(device_id, at);
+CREATE INDEX IF NOT EXISTS idx_discovery_events_kind ON discovery_events(kind, at);
 """
 
 DEFAULT_PROFILES = [
@@ -689,7 +762,7 @@ class Database:
             if old_version < 7:
                 self._ensure_docker_profile_defaults(conn)
             conn.executescript(INDEXES)
-            conn.execute("PRAGMA user_version=11")
+            conn.execute("PRAGMA user_version=12")
             conn.execute("UPDATE agents SET profile_id = 'prof_workstation' WHERE profile_id = ''")
         try:
             self.path.chmod(0o600)
@@ -3319,3 +3392,408 @@ class Database:
             return
         with self.connection() as own:
             own.execute(sql, params)
+
+    # ---- Discovery ------------------------------------------------------
+
+    def get_discovery_settings(self) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM discovery_settings WHERE id = 'discovery'"
+            ).fetchone()
+
+    def set_discovery_acknowledgement(
+        self,
+        actor: str,
+        acknowledgement: str,
+        *,
+        at: str | None = None,
+    ) -> sqlite3.Row:
+        now = at or utcnow_iso()
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT INTO discovery_settings
+                   (id, acknowledged_at, acknowledged_by, acknowledgement, updated_at)
+                   VALUES ('discovery', ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     acknowledged_at = excluded.acknowledged_at,
+                     acknowledged_by = excluded.acknowledged_by,
+                     acknowledgement = excluded.acknowledgement,
+                     updated_at = excluded.updated_at""",
+                (now, actor[:255], acknowledgement[:500], now),
+            )
+            return conn.execute(
+                "SELECT * FROM discovery_settings WHERE id = 'discovery'"
+            ).fetchone()
+
+    def clear_discovery_acknowledgement(self) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE discovery_settings
+                   SET acknowledged_at = NULL, acknowledged_by = '',
+                       acknowledgement = '', updated_at = ?
+                   WHERE id = 'discovery'""",
+                (utcnow_iso(),),
+            )
+
+    def create_discovery_scan(
+        self,
+        scope: list[str],
+        methods: list[str],
+        initiated_by: str,
+        *,
+        status: str = "queued",
+    ) -> sqlite3.Row:
+        scan_id = "dsc_" + secrets.token_hex(8)
+        now = utcnow_iso()
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT INTO discovery_scans
+                   (id, started_at, scope, methods, initiated_by, status)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (scan_id, now, dumps(scope), dumps(methods), initiated_by[:255], status),
+            )
+            return conn.execute(
+                "SELECT * FROM discovery_scans WHERE id = ?", (scan_id,)
+            ).fetchone()
+
+    def get_discovery_scan(self, scan_id: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM discovery_scans WHERE id = ?", (scan_id,)
+            ).fetchone()
+
+    def list_discovery_scans(
+        self, limit: int = 50, offset: int = 0
+    ) -> tuple[list[sqlite3.Row], int]:
+        limit = max(1, min(200, int(limit)))
+        offset = max(0, int(offset))
+        with self.connection() as conn:
+            total = int(
+                conn.execute("SELECT COUNT(*) AS n FROM discovery_scans").fetchone()["n"]
+            )
+            rows = conn.execute(
+                """SELECT * FROM discovery_scans
+                   ORDER BY started_at DESC, rowid DESC LIMIT ? OFFSET ?""",
+                (limit, offset),
+            ).fetchall()
+        return list(rows), total
+
+    def active_discovery_scan(self) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                """SELECT * FROM discovery_scans
+                   WHERE status IN ('queued', 'running')
+                   ORDER BY started_at DESC LIMIT 1"""
+            ).fetchone()
+
+    def update_discovery_scan(
+        self,
+        scan_id: str,
+        *,
+        status: str | None = None,
+        finished_at: str | None = None,
+        hosts_found: int | None = None,
+        error: str | None = None,
+        progress: int | None = None,
+        hosts_scanned: int | None = None,
+        cancel_requested: bool | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        fields: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("status", status),
+            ("finished_at", finished_at),
+            ("hosts_found", hosts_found),
+            ("error", error),
+            ("progress", progress),
+            ("hosts_scanned", hosts_scanned),
+            ("cancel_requested", None if cancel_requested is None else int(cancel_requested)),
+        ):
+            if value is not None:
+                fields.append(f"{column} = ?")
+                params.append(value)
+        if not fields:
+            return
+        params.append(scan_id)
+
+        def apply(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                f"UPDATE discovery_scans SET {', '.join(fields)} WHERE id = ?",
+                params,
+            )
+
+        if conn is not None:
+            apply(conn)
+            return
+        with self.connection() as own:
+            apply(own)
+
+    def request_discovery_scan_cancel(self, scan_id: str) -> bool:
+        with self.connection() as conn:
+            cur = conn.execute(
+                """UPDATE discovery_scans SET cancel_requested = 1
+                   WHERE id = ? AND status IN ('queued', 'running')""",
+                (scan_id,),
+            )
+            return bool(cur.rowcount)
+
+    def list_discovered_devices(
+        self,
+        *,
+        state: str | None = None,
+        segment: str | None = None,
+        query: str | None = None,
+        device_type: str | None = None,
+        vendor: str | None = None,
+        no_agent: bool = False,
+        admin_ports: bool = False,
+        mac: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[sqlite3.Row], int]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if state:
+            clauses.append("state = ?")
+            params.append(state)
+        if segment:
+            clauses.append("segment = ?")
+            params.append(segment)
+        if device_type:
+            clauses.append("device_type = ?")
+            params.append(device_type)
+        if vendor:
+            clauses.append("vendor = ?")
+            params.append(vendor)
+        if mac:
+            clauses.append("mac = ? COLLATE NOCASE")
+            params.append(mac)
+        if no_agent:
+            clauses.append("(agent_id IS NULL OR agent_id = '')")
+        if admin_ports:
+            ports = ("22", "3389", "5900", "5985", "5986")
+            clauses.append(
+                "(" + " OR ".join("open_ports LIKE ?" for _ in ports) + ")"
+            )
+            params.extend(f'%"{port}"%' for port in ports)
+        if query:
+            pattern = f"%{query}%"
+            clauses.append(
+                """(ip LIKE ? OR mac LIKE ? OR hostname LIKE ? OR vendor LIKE ?
+                    OR tags LIKE ? OR notes LIKE ?)"""
+            )
+            params.extend([pattern] * 6)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        limit = max(1, min(500, int(limit)))
+        offset = max(0, int(offset))
+        with self.connection() as conn:
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS n FROM discovered_devices{where}", params
+                ).fetchone()["n"]
+            )
+            rows = conn.execute(
+                f"""SELECT * FROM discovered_devices{where}
+                    ORDER BY last_seen DESC, first_seen DESC
+                    LIMIT ? OFFSET ?""",
+                [*params, limit, offset],
+            ).fetchall()
+        return list(rows), total
+
+    def get_discovered_device(self, device_id: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM discovered_devices WHERE id = ?", (device_id,)
+            ).fetchone()
+
+    def get_discovered_device_by_mac(self, mac: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                """SELECT * FROM discovered_devices
+                   WHERE mac = ? COLLATE NOCASE AND mac != ''
+                   ORDER BY last_seen DESC LIMIT 1""",
+                (mac,),
+            ).fetchone()
+
+    def discovery_summary(self) -> dict[str, Any]:
+        with self.connection() as conn:
+            states = {
+                str(row["state"]): int(row["n"])
+                for row in conn.execute(
+                    "SELECT state, COUNT(*) AS n FROM discovered_devices GROUP BY state"
+                ).fetchall()
+            }
+            total = sum(states.values())
+            types = [
+                {"type": row["device_type"], "count": int(row["n"])}
+                for row in conn.execute(
+                    """SELECT device_type, COUNT(*) AS n
+                       FROM discovered_devices GROUP BY device_type
+                       ORDER BY n DESC, device_type"""
+                ).fetchall()
+            ]
+            segments = [
+                {"segment": row["segment"], "count": int(row["n"])}
+                for row in conn.execute(
+                    """SELECT segment, COUNT(*) AS n
+                       FROM discovered_devices GROUP BY segment
+                       ORDER BY segment"""
+                ).fetchall()
+            ]
+            vendors = [
+                {"vendor": row["vendor"], "count": int(row["n"])}
+                for row in conn.execute(
+                    """SELECT vendor, COUNT(*) AS n
+                       FROM discovered_devices WHERE vendor != ''
+                       GROUP BY vendor ORDER BY n DESC, vendor LIMIT 50"""
+                ).fetchall()
+            ]
+            no_agent = int(
+                conn.execute(
+                    """SELECT COUNT(*) AS n FROM discovered_devices
+                       WHERE agent_id IS NULL OR agent_id = ''"""
+                ).fetchone()["n"]
+            )
+        return {
+            "total": total,
+            "new": states.get("new", 0),
+            "states": {name: states.get(name, 0) for name in ("new", "known", "ignored", "promoted")},
+            "types": types,
+            "segments": segments,
+            "vendors": vendors,
+            "no_agent": no_agent,
+        }
+
+    def update_discovered_device(
+        self,
+        device_id: str,
+        *,
+        tags: list[str] | None = None,
+        notes: str | None = None,
+        state: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> sqlite3.Row | None:
+        fields: list[str] = []
+        params: list[Any] = []
+        if tags is not None:
+            fields.append("tags = ?")
+            params.append(dumps(list(dict.fromkeys(str(tag)[:64] for tag in tags))[:32]))
+        if notes is not None:
+            fields.append("notes = ?")
+            params.append(notes[:2000])
+        if state is not None:
+            fields.append("state = ?")
+            params.append(state)
+        if not fields:
+            return self.get_discovered_device(device_id)
+        params.append(device_id)
+
+        def apply(connection: sqlite3.Connection) -> sqlite3.Row | None:
+            connection.execute(
+                f"UPDATE discovered_devices SET {', '.join(fields)} WHERE id = ?", params
+            )
+            return connection.execute(
+                "SELECT * FROM discovered_devices WHERE id = ?", (device_id,)
+            ).fetchone()
+
+        if conn is not None:
+            return apply(conn)
+        with self.connection() as own:
+            return apply(own)
+
+    def delete_discovered_device(self, device_id: str) -> bool:
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM discovery_events WHERE device_id = ?", (device_id,))
+            cur = conn.execute("DELETE FROM discovered_devices WHERE id = ?", (device_id,))
+            return bool(cur.rowcount)
+
+    def discovery_device_events(self, device_id: str, limit: int = 200) -> list[sqlite3.Row]:
+        limit = max(1, min(500, int(limit)))
+        with self.connection() as conn:
+            return list(
+                conn.execute(
+                    """SELECT * FROM discovery_events WHERE device_id = ?
+                       ORDER BY at DESC, id DESC LIMIT ?""",
+                    (device_id, limit),
+                ).fetchall()
+            )
+
+    def record_discovery_event(
+        self,
+        device_id: str,
+        kind: str,
+        detail: Any = None,
+        *,
+        at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+        dedupe: bool = True,
+    ) -> int | None:
+        encoded = dumps(detail or {})
+        stamp = at or utcnow_iso()
+
+        def apply(connection: sqlite3.Connection) -> int | None:
+            if dedupe:
+                existing = connection.execute(
+                    """SELECT id FROM discovery_events
+                       WHERE device_id = ? AND kind = ? AND detail = ?
+                       ORDER BY id DESC LIMIT 1""",
+                    (device_id, kind, encoded),
+                ).fetchone()
+                if existing is not None:
+                    return None
+            cur = connection.execute(
+                """INSERT INTO discovery_events (at, device_id, kind, detail)
+                   VALUES (?, ?, ?, ?)""",
+                (stamp, device_id, kind, encoded),
+            )
+            return int(cur.lastrowid) if cur.lastrowid is not None else None
+
+        if conn is not None:
+            return apply(conn)
+        with self.connection() as own:
+            return apply(own)
+
+    def record_discovery_event_once(
+        self,
+        device_id: str,
+        kind: str,
+        detail: Any = None,
+        *,
+        at: str | None = None,
+    ) -> bool:
+        return self.record_discovery_event(device_id, kind, detail, at=at) is not None
+
+    def get_agent_by_mac(self, mac: str) -> sqlite3.Row | None:
+        if not mac:
+            return None
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM agents WHERE mac = ? COLLATE NOCASE LIMIT 1", (mac,)
+            ).fetchone()
+
+    def get_wake_target_by_mac(self, mac: str) -> sqlite3.Row | None:
+        if not mac:
+            return None
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM wake_targets WHERE mac = ? COLLATE NOCASE LIMIT 1", (mac,)
+            ).fetchone()
+
+    def get_wake_target(self, target_id: str) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM wake_targets WHERE id = ?", (target_id,)
+            ).fetchone()
+
+    def prune_discovery(self, retention_days: int = 90) -> tuple[int, int]:
+        days = max(1, min(3650, int(retention_days)))
+        cutoff = (utcnow() - timedelta(days=days)).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self.transaction() as conn:
+            scans = conn.execute(
+                "DELETE FROM discovery_scans WHERE started_at < ?", (cutoff,)
+            )
+            events = conn.execute(
+                "DELETE FROM discovery_events WHERE at < ?", (cutoff,)
+            )
+            return int(scans.rowcount), int(events.rowcount)

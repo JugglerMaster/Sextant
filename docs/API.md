@@ -523,7 +523,134 @@ Any authenticated role can read. `hours` must be 1–720 and `limit` must be 1�
 }
 ```
 
-Kinds are `online`, `service`, `package`, `version`, `profile`, `alert`, and `docker.health`. Alert detail identifies the lifecycle action (`raised`, `cleared`, `acknowledged`, `reacknowledged`, `snoozed`, or `acknowledgement_expired`) plus the `incident_id` where applicable. Raises are recorded on the first heartbeat that sees a condition; a recurrence is still a `raised` event with `recurrence: true` and the previous incident id. Steady heartbeats only advance `last_seen_at` and do not create events. Events are recorded best-effort: a failed event write never breaks a heartbeat or command path. Detail is deliberately bounded (for package transitions, at most the first ten names plus counts and a `truncated` flag), and an oversized detail payload is replaced with `{"truncated": true}`. Events are pruned with `SEXTANT_COMMAND_RETENTION_DAYS` (default 90).
+Kinds are `online`, `service`, `package`, `version`, `profile`, `alert`, `docker.health`, and `discovery`. Discovery events are recorded for a linked enrolled agent when a device is first discovered or a new port appears. Alert detail identifies the lifecycle action (`raised`, `cleared`, `acknowledged`, `reacknowledged`, `snoozed`, or `acknowledgement_expired`) plus the `incident_id` where applicable. Raises are recorded on the first heartbeat that sees a condition; a recurrence is still a `raised` event with `recurrence: true` and the previous incident id. Steady heartbeats only advance `last_seen_at` and do not create events. Events are recorded best-effort: a failed event write never breaks a heartbeat or command path. Detail is deliberately bounded (for package transitions, at most the first ten names plus counts and a `truncated` flag), and an oversized detail payload is replaced with `{"truncated": true}`. Events are pruned with `SEXTANT_COMMAND_RETENTION_DAYS` (default 90).
+
+## Discovery (D1–D2)
+
+Discovery is off by default. Scans require `SEXTANT_DISCOVERY_ENABLED=1`, an
+admin-stored authorization acknowledgement, a private CIDR allowlist, and a
+scope that is inside that allowlist. Viewers can read; operators can scan,
+cancel, and edit device metadata; admins can change the acknowledgement and
+delete devices. All state-changing calls require CSRF.
+
+### Settings and acknowledgement
+
+`GET /api/discovery/settings` returns the effective configuration:
+
+```json
+{
+  "enabled": true,
+  "acknowledged": true,
+  "acknowledged_at": "2026-11-06T08:00:00Z",
+  "acknowledged_by": "admin",
+  "acknowledgement_text": "I am authorized to scan these networks",
+  "cidrs": ["192.168.1.0/24"],
+  "cidr_errors": [],
+  "exclude": ["192.168.1.1/32"],
+  "methods": ["neigh", "dns", "oui", "ssdp", "tcp"],
+  "probe_ports": [22, 53, 80, 443],
+  "active_probes": true,
+  "interval_hours": 0,
+  "max_hosts": 1024,
+  "concurrency": 32,
+  "timeout_ms": 600,
+  "retention_days": 90,
+  "agent_relay": false,
+  "export_limit": 10000,
+  "disabled_reasons": []
+}
+```
+
+Admins record the acknowledgement (the text must match exactly):
+
+```http
+PATCH /api/discovery/settings
+X-CSRF-Token: …
+Content-Type: application/json
+
+{"acknowledged": true, "acknowledgement": "I am authorized to scan these networks"}
+```
+
+`{"acknowledged": false}` clears it. Both actions are audited as
+`discovery.acknowledged` / `discovery.acknowledgement_cleared`.
+
+### Devices
+
+`GET /api/discovery/devices?state=new&segment=192.168.1.0%2F24&q=printer&type=printer&vendor=VMware&no_agent=true&admin_ports=true&limit=50&offset=0`
+
+Optional filters: `state` (`new`, `known`, `ignored`, `promoted`), `segment`,
+`q`, `type`, `vendor`, `no_agent`, `admin_ports`, and `mac`. Returns
+`devices`, `total`, `limit`, `offset`, and a `summary` with state/type/segment/
+vendor counts. `limit` is 1–500.
+
+```json
+{
+  "devices": [{
+    "id": "dev_…",
+    "ip": "192.168.1.40",
+    "mac": "b8:27:eb:11:22:33",
+    "hostname": "printer.lan",
+    "vendor": "Raspberry Pi Foundation",
+    "device_type": "printer",
+    "os_guess": "Embedded",
+    "confidence": 0.9,
+    "state": "new",
+    "segment": "192.168.1.0/24",
+    "open_ports": [80, 631],
+    "services": {"80": {"protocol": "http", "status": 200, "server": "nginx/1.24"}},
+    "evidence": {"methods": ["neigh", "dns", "oui", "ssdp"], "neighbor": true},
+    "agent_id": null,
+    "wake_target_id": null,
+    "tags": ["office"],
+    "mac_randomized": false
+  }],
+  "total": 1,
+  "summary": {"total": 1, "new": 1, "no_agent": 1, "states": {"new": 1}}
+}
+```
+
+`GET /api/discovery/devices/{id}` adds `events`, the linked `agent` (same shape
+as the dashboard agent), and the linked `wake_target`.
+
+`PATCH /api/discovery/devices/{id}` (operator+) accepts any of `tags`, `notes`,
+and `state`; the action is audited. `DELETE /api/discovery/devices/{id}`
+(admin) removes the device and its events.
+
+### Scans
+
+```http
+POST /api/discovery/scan
+X-CSRF-Token: …
+Content-Type: application/json
+
+{"scope": ["192.168.1.0/24"], "methods": ["neigh", "dns", "oui", "ssdp"]}
+```
+
+`scope` is optional (defaults to the full allowlist), but every supplied CIDR
+must be inside an allowlisted range. `methods` must be a subset of the
+configured methods. `tcp` requires `SEXTANT_DISCOVERY_ACTIVE_PROBES=1`.
+Out-of-scope targets, individual hosts, host caps, and empty scopes return
+`400`; disabled or unacknowledged discovery returns `403`; concurrent or
+rapid starts return `429` with `Retry-After`.
+
+```json
+{"scan": {"id": "dsc_…", "status": "queued", "scope": ["192.168.1.0/24"],
+          "methods": ["neigh", "dns", "oui", "ssdp"], "progress": 0,
+          "hosts_found": 0, "cancel_requested": false}}
+```
+
+`GET /api/discovery/scans?limit=50&offset=0` lists history and
+`active_scan_id`. `GET /api/discovery/scans/{id}` returns one scan. Status is
+`queued`, `running`, `succeeded`, `failed`, or `cancelled`. Progress is a
+percentage plus `hosts_scanned`.
+
+`POST /api/discovery/scans/{id}/cancel` requests cancellation. A finished scan
+returns `409`. The worker notices the request between hosts and records
+`discovery.scan_cancelled`; a normal finish records
+`discovery.scan_finished`.
+
+No agent-relay scan route exists in D1–D2; `SEXTANT_DISCOVERY_AGENT_RELAY` is
+parsed for the future D3 work.
 
 ## Docker Hosts (D1–D5)
 
@@ -1201,7 +1328,7 @@ Content-Type: application/json
 | `409` | Duplicate username or saved-view name, result/output for an undispatched or finished command, output sequence conflict, queue full, offline-policy rejection, cancel after dispatch, revoking an already-used enrollment token |
 | `413` | Body over `SEXTANT_MAX_BODY_BYTES`, output chunk over 64 KiB, or per-command output over `SEXTANT_COMMAND_OUTPUT_LIMIT` |
 | `422` | Pydantic shape/field validation |
-| `429` | Login rate limit |
+| `429` | Login or discovery scan rate limit |
 | `502` | Wake packet send failure |
 | `503` | LDAP directory unavailable |
 

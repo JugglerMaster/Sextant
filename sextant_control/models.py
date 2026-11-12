@@ -771,6 +771,51 @@ class WakeTargetWakeIn(BaseModel):
     packets: int = Field(default=3, ge=1, le=10)
 
 
+class DiscoveryDevicePatchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tags: list[str] | None = Field(default=None, max_length=32)
+    notes: str | None = Field(default=None, max_length=2000)
+    state: Literal["new", "known", "ignored", "promoted"] | None = None
+
+    @field_validator("tags")
+    @classmethod
+    def _tags(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned = [str(tag).strip() for tag in value if str(tag).strip()]
+        if len(cleaned) > 32:
+            raise ValueError("at most 32 tags are allowed")
+        for tag in cleaned:
+            if len(tag) > 64:
+                raise ValueError("tags must be 64 characters or fewer")
+        return list(dict.fromkeys(cleaned))
+
+
+class DiscoveryScanIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scope: list[str] = Field(default_factory=list, max_length=16)
+    methods: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("scope")
+    @classmethod
+    def _scope(cls, value: list[str]) -> list[str]:
+        for item in value:
+            if not item or len(item) > 64:
+                raise ValueError("each scope must be a CIDR of 64 characters or fewer")
+        return list(dict.fromkeys(value))
+
+    @field_validator("methods")
+    @classmethod
+    def _methods(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(str(item).strip().lower() for item in value if str(item).strip()))
+
+
+class DiscoverySettingsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    acknowledged: bool
+    acknowledgement: str = Field(default="", max_length=500)
+
+
 class CommandResultIn(BaseModel):
     status: Literal["succeeded", "failed"]
     exit_code: int | None = None

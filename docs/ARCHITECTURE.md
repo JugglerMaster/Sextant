@@ -83,6 +83,10 @@ Key properties:
 | `docker_stacks`, `docker_stack_revisions` | Compose stack metadata and immutable revision manifests; file bytes live on disk |
 | `docker_deployments` | Per-host Compose deploy/update/down/restart/pull history, command link, active revision, Compose config-hash baseline, bounded log |
 | `docker_console_sessions` | Console session metadata: agent/container/shell/user/status/timestamps/exit/error; no stdin or output |
+| `discovered_devices` | One row per merged discovery identity: MAC/IP/hostname/vendor, type/OS/confidence, segment/source, bounded evidence, state, agent/wake links, tags/notes, randomized-MAC flag |
+| `discovery_scans` | Requested scope/methods, initiator, status, progress, host counts, cancellation flag, bounded error |
+| `discovery_events` | Deduplicated `new_device`, `new_port`, `service_changed`, `identity_conflict`, `went_dark`, and reserved `promoted` events |
+| `discovery_settings` | Single-row audited acknowledgement of the network-scan authorization statement |
 | `agent_profiles` | Server-managed behavior profiles (cadence, modules, action gates, update policy) |
 | `profile_tag_assignments` | Tag → profile assignments (applied to matching agents) |
 | `enrollment_tokens` | One-time token hashes with expiry and use metadata |
@@ -138,6 +142,31 @@ Agents report a stable machine identity (Windows `MachineGuid`, Linux `/etc/mach
 This is deliberately single-node state. It is not shared or coordinated across multiple server processes or replicas; each process would maintain its own revision and cache. Running multiple control-plane replicas is outside the current deployment model.
 
 On the browser side, the fleet grid keeps a keyed map of agent id to card node, reuses unchanged cards, and replaces only cards whose rendered signature changed. This preserves keyboard focus and selected checkboxes through SSE updates. The initial render is bounded (60 cards) with a **Show more** control, and offscreen cards use CSS `content-visibility`, so a large fleet does not create an unbounded DOM in one pass.
+
+## Discovery engine
+
+`sextant_control/discovery.py` owns CIDR validation, neighbour/ARP parsing,
+reverse DNS, the bundled OUI table, passive SSDP parsing, opt-in TCP/banner/TLS
+fingerprinting, classification, merge/diff logic, and the background manager.
+The manager runs one daemon worker started by the FastAPI lifespan and stopped
+on shutdown. A small bounded queue holds scan IDs; only one scan runs at a
+time, starts are rate-limited, and cancellation is checked between hosts and
+probe futures. Network work never runs on the event loop.
+
+A scan expands only allowlisted CIDRs, rejects public/loopback/link-local/
+multicast/unspecified/reserved/documentation ranges, applies excludes, and
+enforces `SEXTANT_DISCOVERY_MAX_HOSTS`. The scan row moves through `queued` →
+`running` → `succeeded`/`failed`/`cancelled`. Observations merge by MAC first,
+then stable IP when the MAC is unknown, then hostname; two different known MACs
+are never merged and produce an `identity_conflict` event. Agents and wake
+targets are linked by MAC. Change events are deduplicated by
+`(device_id, kind, detail)`; devices are retained until deleted/ignored while
+scans and events share `SEXTANT_DISCOVERY_RETENTION_DAYS`.
+
+Discovery is disabled by default and requires both the environment switch and
+the stored acknowledgement. Raw sockets, packet capture, exploit modules, and
+credential checks are deliberately absent. See [Discovery](DISCOVERY.md) for
+the full route and safety contract.
 
 ## Agent policy
 

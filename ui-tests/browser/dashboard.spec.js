@@ -24,6 +24,36 @@ for (const theme of THEMES) {
     await scan(page, `dashboard ${theme} desktop`);
   });
 
+  test(`Discovery inventory, drawer, and scan panel render in the ${theme} theme`, async ({ page }) => {
+    await login(page, { theme });
+    await page.locator('[data-page="discovery"]').click();
+    await expect(page.locator("#page-discovery")).toBeVisible();
+    await expect(page.locator("#discovery-summary")).toContainText("Discovered devices");
+    await expect(page.locator("#discovery-table-body")).toContainText("printer.lan");
+    await expect(page.locator("#discovery-table-body")).toContainText("Raspberry Pi Foundation");
+
+    await page.locator("#discovery-filter-state").selectOption("new");
+    await expect(page.locator("#discovery-table-body")).toContainText("printer.lan");
+    await expect(page.locator("#discovery-table-body")).not.toContainText("esxi.lan");
+    await page.locator("#discovery-filter-clear").click();
+    await expect(page.locator("#discovery-table-body")).toContainText("esxi.lan");
+
+    await page.locator("#discovery-table-body").getByRole("button", { name: /printer\.lan details/ }).click();
+    await expect(page.locator("#discovery-drawer")).toBeVisible();
+    await expect(page.locator("#discovery-drawer-body")).toContainText("Device record");
+    await expect(page.locator("#discovery-drawer-body")).toContainText("OpenSSH");
+    await expect(page.locator("#discovery-drawer-body")).toContainText("Change events");
+    await screenshot(page, `discovery-${theme}`);
+    await scan(page, `discovery ${theme}`);
+    await page.locator('#discovery-drawer [aria-label="Close discovered device details"]').click();
+
+    await page.locator("#discovery-scan-start").click();
+    await expect(page.locator("#discovery-scan-progress")).toBeVisible();
+    await expect(page.locator("#discovery-scan-cancel")).toBeVisible();
+    await page.locator("#discovery-scan-cancel").click();
+    await expect(page.locator("#discovery-scan-progress")).toBeHidden();
+  });
+
   test(`Compose Files renders and opens deploy controls in the ${theme} theme`, async ({ page }) => {
     await login(page, { theme });
     await page.locator('[data-page="compose-files"]').click();
@@ -159,6 +189,38 @@ for (const theme of THEMES) {
   });
 }
 
+test("Discovery renders at the mobile viewport", async ({ page }) => {
+  await login(page, { width: 390, height: 844 });
+  await page.evaluate(() => document.querySelector('[data-page="discovery"]').click());
+  await expect(page.locator("#page-discovery")).toBeVisible();
+  await expect(page.locator("#discovery-table-body")).toContainText("printer.lan");
+  await expect(page.locator("#discovery-scan-panel")).toBeVisible();
+  await screenshot(page, "discovery-dark-mobile", { fullPage: true });
+  await scan(page, "discovery dark mobile");
+});
+
+test("Discovery explains disabled and unacknowledged states", async ({ page }) => {
+  await login(page);
+  page.__apiSession.discoveryDisabled = true;
+  await page.locator('[data-page="discovery"]').click();
+  await expect(page.locator("#discovery-disabled")).toContainText("SEXTANT_DISCOVERY_ENABLED");
+  await expect(page.locator("#discovery-scan-panel")).toBeHidden();
+
+  page.__apiSession.discoveryDisabled = false;
+  page.__apiSession.discoveryAcknowledged = false;
+  await page.locator('[data-page="overview"]').click();
+  await page.locator('[data-page="discovery"]').click();
+  await expect(page.locator("#discovery-ack-panel")).toBeVisible();
+  await expect(page.locator("#discovery-scan-panel")).toBeHidden();
+
+  await page.locator("#discovery-ack-checkbox").check();
+  await page.locator("#discovery-ack-button").click();
+  await expect(page.locator("#discovery-ack-panel")).toBeHidden();
+  await expect(page.locator("#discovery-scan-panel")).toBeVisible();
+  await screenshot(page, "discovery-enabled-dark");
+  await scan(page, "discovery enabled");
+});
+
 test("Docker console modal renders at the mobile viewport", async ({ page }) => {
   await login(page, { width: 390, height: 844 });
   await page.evaluate(() => document.querySelector('[data-page="docker-hosts"]').click());
@@ -213,7 +275,7 @@ test("Ctrl/Cmd+K opens, filters, activates, and closes the command palette", asy
   await page.keyboard.press("Control+k");
   await expect(palette).toBeVisible();
   await expect(input).toBeFocused();
-  await expect(list.getByRole("option")).toHaveCount(13);
+  await expect(list.getByRole("option")).toHaveCount(14);
   await screenshot(page, "command-palette-dark");
 
   await input.fill("studio");
