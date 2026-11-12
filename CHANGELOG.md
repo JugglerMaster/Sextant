@@ -4,6 +4,13 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.6.5] - 2026-11-12
+
+### Changed
+
+- The Security page now points directory setup at Settings -> Domain &
+  directory instead of only environment variables.
+
 ## [0.6.4] - 2026-11-12
 
 ### Fixed
@@ -302,6 +309,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.6.5]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.5
 [0.6.4]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.4
 [0.6.3]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.3
 [0.6.2]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.2
