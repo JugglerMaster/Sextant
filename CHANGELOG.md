@@ -4,6 +4,15 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.4] - 2026-11-12
+
+### Fixed
+
+- Linux domain-join prerequisite installation now includes `libnss-sss`,
+  `libpam-sss`, and PackageKit, and starts `packagekit`. realmd uses PackageKit
+  for its package check; without it, realmd reports installed packages as
+  missing and refuses to join.
+
 ## [0.8.3] - 2026-11-12
 
 ### Changed
@@ -434,6 +443,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.8.4]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.4
 [0.8.3]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.3
 [0.8.2]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.2
 [0.8.1]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.1

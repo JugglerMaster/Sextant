@@ -60,8 +60,9 @@ manager. Unsupported distributions return a clear error.
 
 - Windows: DNS points at the DC, clock within five minutes, and the account has
   delegated create-computer-object rights or the default machine-account quota.
-- Linux: `realmd` + `sssd` or `adcli`, Kerberos packages, DNS SRV records, and a
-  clock within five minutes.
+- Linux: `realmd` + `sssd` (including `libnss-sss`/`libpam-sss` on Debian)
+  or `adcli`, Kerberos packages, **PackageKit** (realmd uses it for the
+  prerequisite check), DNS SRV records, and a clock within five minutes.
 - The domain user must be allowed to join computers, not necessarily a Domain
   Admin.
 

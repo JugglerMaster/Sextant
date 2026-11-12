@@ -329,11 +329,14 @@ def _install_packages(on_chunk: ChunkCallback | None) -> dict[str, Any]:
                     "realmd",
                     "sssd",
                     "sssd-tools",
+                    "libnss-sss",
+                    "libpam-sss",
                     "adcli",
                     "krb5-user",
                     "samba-common-bin",
                     "oddjob",
                     "oddjob-mkhomedir",
+                    "packagekit",
                 ],
                 {"DEBIAN_FRONTEND": "noninteractive"},
             ),
@@ -352,6 +355,7 @@ def _install_packages(on_chunk: ChunkCallback | None) -> dict[str, Any]:
                     "samba-common-tools",
                     "oddjob",
                     "oddjob-mkhomedir",
+                    "PackageKit",
                 ],
                 {},
             )
@@ -368,6 +372,7 @@ def _install_packages(on_chunk: ChunkCallback | None) -> dict[str, Any]:
                     "adcli",
                     "krb5-client",
                     "samba-client",
+                    "PackageKit",
                 ],
                 {},
             )
@@ -375,7 +380,7 @@ def _install_packages(on_chunk: ChunkCallback | None) -> dict[str, Any]:
     elif "arch" in family:
         commands = [
             (
-                ["pacman", "-S", "--noconfirm", "realmd", "sssd", "adcli", "krb5"],
+                ["pacman", "-S", "--noconfirm", "realmd", "sssd", "adcli", "krb5", "packagekit"],
                 {},
             )
         ]
@@ -409,6 +414,16 @@ def _install_packages(on_chunk: ChunkCallback | None) -> dict[str, Any]:
                 stdout="\n".join(outputs)[-200_000:],
                 error=result.get("error") or "Package installation failed.",
             )
+    systemctl = shutil.which("systemctl")
+    if systemctl:
+        started = run_capture(
+            [systemctl, "start", "packagekit"],
+            timeout=30,
+            max_output=20_000,
+        )
+        outputs.append(
+            f"$ systemctl start packagekit\n{started.get('stdout') or started.get('stderr') or ''}".strip()
+        )
     return _result("succeeded", exit_code=0, stdout="\n".join(outputs)[-200_000:])
 
 
