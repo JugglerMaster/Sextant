@@ -80,7 +80,7 @@ Current state: the Packages tab, agent cards, and drawer Overview show **Heartbe
 - Bulk selection with refresh-telemetry, wake, reboot, shutdown, service, and profile actions, sent as one batch request and reported per agent.
 - CSV export for the fleet, per-agent package inventory, and filtered command history.
 - Trends tab with gap-aware 24h/7d detail charts, a persistent state-change timeline, and a What changed summary.
-- Light/dark theme toggle and a Ctrl/Cmd+K command palette.
+- Classic light/dark theme toggle, a Ctrl/Cmd+K search palette, and a dedicated admin Updates tab. An up-arrow shortcut appears in the topbar only when a newer server release is known.
 - Live dashboard updates over change-driven SSE with polling fallback.
 - D2 Docker Hosts actions with a shared accessible dialog, focused action/confirm flows, offline/gate-disabled states, cached cleanup cards, and an `aria-live` action/refresh status.
 - D3 Compose Files views with admin editing, revision/deploy dialogs, deployment history, .env redaction for operators, storage settings, and managed-vs-external host stack display.
@@ -117,7 +117,9 @@ Priority: full pagination for Services and Users next.
 
 ### 4. History and charts
 
-- The History tab queries `GET /api/agents/{id}/commands` directly, so retained commands beyond the overview's latest-50 preview are reachable. Search is debounced and runs server-side; the status filter and page size (25/50/100) reset to the first page, Previous/Next preserve the current filters, refresh keeps the current page when possible, and Export CSV includes the active search/status filters. Command expansion, cancel, and retry remain available on each row.
+- Server updates live on their own admin tab, with Check now, Update now, Rollback, feed/hash state, and restart progress. The top-right refresh button was removed because fleet data already refreshes through SSE.
+
+The History tab queries `GET /api/agents/{id}/commands` directly, so retained commands beyond the overview's latest-50 preview are reachable. Search is debounced and runs server-side; the status filter and page size (25/50/100) reset to the first page, Previous/Next preserve the current filters, refresh keeps the current page when possible, and Export CSV includes the active search/status filters. Command expansion, cancel, and retry remain available on each row.
 - 24-hour CPU/memory/disk/GPU sparklines are implemented.
 - The Trends tab adds 24h/7d detail charts for CPU, memory, disk, GPU utilization, and GPU temperature. Points are positioned by their real bucket timestamps, null buckets break the line, and offline intervals remain visible as gaps instead of being bridged.
 - The Trends timeline merges retained commands with persistent `agent_events` and alert lifecycle entries, using real event timestamps. A compact **What changed** section summarizes the most recent service, package, version, profile, connectivity, and alert transitions in the selected window, with an explicit empty state when nothing changed.
