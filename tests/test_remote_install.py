@@ -82,6 +82,36 @@ def test_install_script_contains_expected_steps_and_redacts_token(monkeypatch, t
     assert all("sextant_enroll_secret_token" not in line for line in logs)
 
 
+def test_install_uses_published_wheel_filename_for_sha_blob(monkeypatch, tmp_path):
+    wheel = tmp_path / "cc6e41faa1fc193afe90afb5dcefb6eb87cc8d7a8ba791b740128659711f1cb7"
+    wheel.write_bytes(b"wheel")
+    calls = []
+
+    def fake_run(args, input_text=None, timeout=120):
+        calls.append((args, input_text))
+        return _Result(stdout="active")
+
+    monkeypatch.setattr(remote_install, "_run", fake_run)
+    remote_install.run_install(
+        key_path=str(_key(tmp_path)),
+        host="192.0.2.50",
+        port=22,
+        user="root",
+        server_url="https://ops.example.com",
+        token="sextant_enroll_secret_token",
+        name="box-01",
+        profile="server",
+        watch_services=[],
+        wheel_path=str(wheel),
+        wheel_filename="sextant-1.0-py3-none-any.whl",
+        log=lambda _line: None,
+    )
+    install_script = calls[-1][1]
+    assert "/tmp/sextant-sextant-1.0-py3-none-any.whl" in install_script
+    assert ".venv/bin/pip ]" in install_script
+    assert "sudo -n rm -rf /opt/sextant-agent/.venv" in install_script
+
+
 def test_remote_install_rejects_bad_target(tmp_path):
     with pytest.raises(remote_install.RemoteInstallError):
         remote_install.test_connection(key_path=str(_key(tmp_path)), host="bad host", port=22, user="root")

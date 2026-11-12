@@ -100,6 +100,30 @@ for (const theme of THEMES) {
     await scan(page, `settings ${theme} desktop`);
   });
 
+  test(`Agent domain join dialog renders in the ${theme} theme`, async ({ page }) => {
+    await login(page, { theme });
+    await openDrawer(page, "Studio PC");
+    await page.locator("#drawer-actions").getByRole("button", { name: "Join domain" }).click();
+    const dialog = page.locator("#domain-join-dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("Join Studio PC");
+    await dialog.locator('input[name="domain"]').fill("corp.example.com");
+    await dialog.locator('input[name="username"]').fill("CORP\\svc-join");
+    await dialog.locator('input[name="password"]').fill("SUPERSECRET");
+    await dialog.locator('input[name="computer_name"]').fill("STUDIO-PC");
+    await expect(dialog.locator('input[name="server"]')).toBeDisabled();
+    await expect(dialog.locator('select[name="method"]')).toHaveCount(0);
+    await page.locator("#domain-join-actions").getByRole("button", { name: "Join domain" }).click();
+    await expect(page.locator("#domain-join-log")).toContainText("PartOfDomain: True");
+    await expect(page.locator("#toast-region")).toContainText("Domain join command completed");
+    await page.locator("#domain-join-actions").getByRole("button", { name: "Check status" }).click();
+    await expect(page.locator("#domain-join-log")).toContainText("PartOfDomain: True");
+    await screenshot(page, `domain-join-${theme}-desktop`, { fullPage: true });
+    await scan(page, `domain join ${theme} desktop`);
+    await page.locator("#domain-join-actions").getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toBeHidden();
+  });
+
   test(`Discovery inventory, drawer, and scan panel render in the ${theme} theme`, async ({ page }) => {
     await login(page, { theme });
     await page.locator('[data-page="discovery"]').click();

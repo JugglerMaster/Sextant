@@ -181,6 +181,18 @@ class ProfileTagIn(BaseModel):
     profile: str = Field(min_length=1, max_length=64)
 
 
+class DomainJoinIn(BaseModel):
+    domain: str = Field(min_length=1, max_length=255)
+    username: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=4096)
+    ou: str = Field(default="", max_length=1024)
+    computer_name: str = Field(default="", max_length=15)
+    server: str = Field(default="", max_length=255)
+    method: Literal["auto", "realm", "adcli"] = "auto"
+    install_prerequisites: bool = False
+    reboot: bool = False
+
+
 class RemoteInstallIn(BaseModel):
     host: str = Field(min_length=1, max_length=255)
     port: int = Field(default=22, ge=1, le=65535)

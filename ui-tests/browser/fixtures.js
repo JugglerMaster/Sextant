@@ -729,6 +729,7 @@ const discoverySummary = {
   conflict_device_ids: ["dev_printer"],
 };
 let remoteInstallJob = null;
+let domainCommand = null;
 const discoveryIntegrations = [
   {
     kind: "snmp",
@@ -1376,6 +1377,50 @@ function createApi(session) {
     }
     if (method === "GET" && key === "/api/remote-install/ri_win") {
       return { status: 200, body: remoteInstallJob };
+    }
+    if (method === "POST" && key === "/api/agents/agt_demo/domain/join") {
+      domainCommand = {
+        id: "cmd_domain_join",
+        agent_id: "agt_demo",
+        kind: "domain",
+        args: {
+          action: "join",
+          domain: body?.domain || "",
+          username: body?.username || "",
+          password: "",
+          computer_name: body?.computer_name || "",
+        },
+        status: "succeeded",
+        exit_code: 0,
+        stdout: "Domain: corp.example.com\nPartOfDomain: True\nReboot required to finish.",
+        stderr: "",
+        error: "",
+        created_at: "2026-11-06T08:06:00Z",
+        completed_at: "2026-11-06T08:06:10Z",
+      };
+      return { status: 200, body: { command: domainCommand } };
+    }
+    if (method === "POST" && key === "/api/agents/agt_demo/domain/status") {
+      domainCommand = {
+        id: "cmd_domain_status",
+        agent_id: "agt_demo",
+        kind: "domain",
+        args: { action: "status" },
+        status: "succeeded",
+        exit_code: 0,
+        stdout: "Domain: corp.example.com\nPartOfDomain: True",
+        stderr: "",
+        error: "",
+        created_at: "2026-11-06T08:06:00Z",
+        completed_at: "2026-11-06T08:06:10Z",
+      };
+      return { status: 200, body: { command: domainCommand } };
+    }
+    if (method === "GET" && key === "/api/commands/cmd_domain_join") {
+      return { status: 200, body: { command: domainCommand } };
+    }
+    if (method === "GET" && key === "/api/commands/cmd_domain_status") {
+      return { status: 200, body: { command: domainCommand } };
     }
     if (key === "/api/agents/agt_demo") {
       return { status: 200, body: { agent: demoAgent, commands: historyCommands.slice(0, 2) } };

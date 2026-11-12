@@ -67,6 +67,7 @@ way.
 - **Authentication and roles** — local accounts with scrypt password hashes, signed HttpOnly session cookies, CSRF protection, login rate limiting, failed-login auditing, and `admin` / `operator` / `viewer` roles.
 - **Session and user administration** — server-side session registry with IP/user-agent, single-session and revoke-all controls, user disable/enable, and admin password reset. Password changes, admin resets, disabling a user, and revoke-all invalidate the relevant sessions.
 - **Active Directory / Samba AD** — optional LDAP(S) bind authentication with group-to-role mapping and per-user provisioning. The **Settings → Domain & directory** tab configures the server, bind account, user filter, attribute mapping, and role groups from the UI; see [SYSTEM_SETTINGS.md](docs/SYSTEM_SETTINGS.md).
+- **Agent domain join** — admins can join an enrolled Windows host with `Add-Computer` or a Linux host with `realm`/`adcli`, with optional OU, computer name, prerequisite install, reboot, and status check. Passwords are write-only and held only until the agent picks up the command; see [DOMAIN_JOIN.md](docs/DOMAIN_JOIN.md).
 - **Settings** — a signed-in profile tab and admin **Server**, **Domain & directory**, and **SSH** tabs. Values are stored in SQLite and layered over the environment, so the UI can change public URL, session/offline thresholds, LDAP/AD attributes, and the SSH key used for discovery onboarding/remote install without editing env files.
 - **Cross-platform agents** — Linux and Windows agents with outbound-only heartbeat/command polling and stable machine identity.
 - **Wake-on-LAN** — server-side magic packets for agents (using their reported MAC) and for saved agent-less targets.
@@ -267,6 +268,7 @@ See [deploy/sextant.env.example](deploy/sextant.env.example) for a deployment te
 - [Security model and hardening](docs/SECURITY.md)
 - [Active Directory / Samba AD authentication](docs/AD_LDAP.md)
 - [System settings (server, domain, SSH)](docs/SYSTEM_SETTINGS.md)
+- [Agent domain join (Windows and Linux)](docs/DOMAIN_JOIN.md)
 - [Samba AD domain setup](docs/SAMBA_AD.md)
 - [Domain management plan](docs/DOMAIN_MANAGEMENT.md)
 - [HTTP API](docs/API.md)

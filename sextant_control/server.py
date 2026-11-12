@@ -69,6 +69,7 @@ from .discovery_integrations import (
 from .docker_console import ConsoleBroker, ConsoleError
 from .docker_rules import DOCKER_MUTATION_ACTIONS
 from .docker_store import ComposeLibrary, DockerStoreError
+from .domain_join import DomainSecretStore
 from .ldap_auth import authenticate_ldap, probe_ldap
 from .notifications import NotificationError, NotificationService
 from .system_settings import (
@@ -97,6 +98,7 @@ from .models import (
     DockerConsoleClosedIn,
     DockerConsoleInputIn,
     DockerConsoleOpenIn,
+    DomainJoinIn,
     DockerConsoleOutputIn,
     DockerConsoleResizeIn,
     DockerDeployIn,
@@ -809,6 +811,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.discovery_manager = discovery_manager
     integration_secrets = IntegrationSecretStore()
     app.state.integration_secrets = integration_secrets
+    app.state.domain_secrets = DomainSecretStore()
 
     def _security_headers(response: Response, path: str) -> Response:
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -1049,6 +1052,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             normalized = validate_command_args(kind, args)
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        if kind == "domain" and not role_at_least(user, "admin"):
+            raise HTTPException(status_code=403, detail="Administrator access required for domain commands.")
         with database.transaction() as conn:
             agent = conn.execute(
                 "SELECT id, name, last_seen, policy, profile_id, os FROM agents WHERE id = ?",
@@ -1069,6 +1074,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "power": "allow_power",
                 "service": "allow_service",
                 "package": "allow_packages",
+                "domain": "allow_shell",
             }.get(kind)
             if policy_flag and (
                 agent_policy.get(policy_flag) is False or not profile_actions.get(policy_flag, False)
@@ -3867,6 +3873,91 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         return queue_command(agent_id, payload.kind, payload.args, user, request, database, config)
 
+    @app.post("/api/agents/{agent_id}/domain/join")
+    def join_agent_domain(
+        agent_id: str,
+        payload: DomainJoinIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        with database.connection() as conn:
+            agent = conn.execute(
+                "SELECT id, name, os, last_seen FROM agents WHERE id = ?", (agent_id,)
+            ).fetchone()
+            if agent is None:
+                raise HTTPException(status_code=404, detail="Agent not found.")
+            if str(agent["os"]).lower() not in {"linux", "windows"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Domain join is supported for Linux and Windows agents only.",
+                )
+            active = conn.execute(
+                """SELECT id FROM commands
+                   WHERE agent_id = ? AND kind = 'domain'
+                     AND status IN ('queued', 'dispatched', 'running')
+                   LIMIT 1""",
+                (agent_id,),
+            ).fetchone()
+        if active is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="A domain command is already active for this agent.",
+            )
+        args = {
+            "action": "join",
+            "domain": payload.domain,
+            "username": payload.username,
+            "ou": payload.ou,
+            "computer_name": payload.computer_name,
+            "server": payload.server,
+            "method": payload.method,
+            "install_prerequisites": payload.install_prerequisites,
+            "reboot": payload.reboot,
+        }
+        command = queue_command(
+            agent_id,
+            "domain",
+            args,
+            user,
+            request,
+            database,
+            config,
+            audit_action="domain.join_queued",
+            extra_detail={
+                "domain": payload.domain,
+                "username": payload.username,
+                "ou": payload.ou,
+                "computer_name": payload.computer_name,
+                "install_prerequisites": payload.install_prerequisites,
+                "reboot": payload.reboot,
+            },
+        )
+        app.state.domain_secrets.put(str(command["id"]), payload.password)
+        return {"command": command}
+
+    @app.post("/api/agents/{agent_id}/domain/status")
+    def agent_domain_status(
+        agent_id: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        return {
+            "command": queue_command(
+                agent_id,
+                "domain",
+                {"action": "status"},
+                user,
+                request,
+                database,
+                config,
+                audit_action="domain.status_queued",
+            )
+        }
+
     @app.post("/api/commands/{command_id}/cancel")
     def cancel_command(
         command_id: str,
@@ -6651,6 +6742,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         config: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         del request
+        app.state.domain_secrets.sweep()
         sweep_commands(database, config)
         now = utcnow()
         disks = []
@@ -6827,11 +6919,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 if updated.rowcount == 1:
                     row = conn.execute("SELECT * FROM commands WHERE id = ?", (row["id"],)).fetchone()
+                    command_args = loads(row["args"], {})
+                    if row["kind"] == "domain" and isinstance(command_args, dict):
+                        if str(command_args.get("action") or "join") == "join":
+                            secret = app.state.domain_secrets.pop(str(row["id"]))
+                            if secret is not None:
+                                command_args = {**command_args, "password": secret}
+                            else:
+                                command_args = {
+                                    **command_args,
+                                    "password": "",
+                                    "secret_missing": True,
+                                }
                     dispatch.append(
                         {
                             "id": row["id"],
                             "kind": row["kind"],
-                            "args": loads(row["args"], {}),
+                            "args": command_args,
                             "created_at": row["created_at"],
                         }
                     )
@@ -8277,6 +8381,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 str(wheel_path),
                 server_url,
                 payload.password if is_windows else "",
+                str(release["filename"] or ""),
             ),
             daemon=True,
         ).start()
@@ -8851,6 +8956,7 @@ def _run_remote_install_job(
     wheel_path: str,
     server_url: str,
     password: str = "",
+    wheel_filename: str = "",
 ) -> None:
     database = Database(settings.database_path)
     row = database.get_remote_install_job(job_id)
@@ -8913,6 +9019,7 @@ def _run_remote_install_job(
                 wheel_path=wheel_path,
                 log=log_line,
                 config_path=settings.ssh_config_path,
+                wheel_filename=wheel_filename,
             )
     except Exception as exc:  # job boundary: always record the failure
         error = _redact_remote_text(exc, secrets_to_redact)

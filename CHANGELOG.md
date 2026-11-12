@@ -4,6 +4,29 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.7.0] - 2026-11-12
+
+### Added
+
+- **Join domain** on the machine drawer for Windows and Linux agents.
+  Windows uses `Add-Computer` without an immediate restart; Linux prefers
+  `realm join` and falls back to `adcli`. Optional OU, computer name, DC,
+  prerequisite package installation, per-run reboot, and a read-only status
+  check. Admin-only and audited.
+- Domain-join passwords are held only in server memory until the agent fetches
+  the command, then injected into the agent process without touching SQLite,
+  argv, or logs.
+
+### Fixed
+
+- SSH key permission errors now explain that the Sextant service user cannot
+  read the key.
+- Remote install uploads the published `.whl` filename, so pip accepts wheels
+  stored under their SHA-256 blob name.
+- The remote installer recreates a virtualenv that is missing `pip` and gives a
+  clear error when the target lacks `python3-venv`.
+- The remote-install job log is now explicitly white for readability.
+
 ## [0.6.7] - 2026-11-12
 
 ### Changed
@@ -325,6 +348,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.7.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.7.0
 [0.6.7]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.7
 [0.6.6]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.6
 [0.6.5]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.5

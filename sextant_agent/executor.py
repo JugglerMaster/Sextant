@@ -194,6 +194,7 @@ def _powershell_capture(
     timeout: int,
     max_output: int,
     on_chunk: ChunkCallback | None = None,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     prefix = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
     return run_capture(
@@ -201,6 +202,7 @@ def _powershell_capture(
         timeout,
         input_text=prefix + script,
         max_output=max_output,
+        env=env,
         on_chunk=on_chunk,
     )
 
@@ -407,6 +409,25 @@ def execute_command(
         from .packages import apply_actions
 
         return apply_actions(args.get("actions"), config, policy)
+    if kind == "domain":
+        if not allow_shell:
+            return {
+                "status": "failed",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "error": "Domain commands are disabled by local or server policy.",
+            }
+        from .domain import run_domain
+
+        return run_domain(
+            args,
+            allow_packages=config.allow_packages
+            and bool(policy.get("allow_packages", True)),
+            timeout=max(30, min(900, int(args.get("timeout", 300)))),
+            max_output=config.max_output_bytes,
+            on_chunk=on_chunk,
+        )
     if kind == "refresh":
         return {
             "status": "succeeded",

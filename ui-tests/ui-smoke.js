@@ -461,6 +461,7 @@ const discoverySummary = {
   conflict_device_ids: ["dev_printer"],
 };
 let remoteInstallJob = null;
+let domainCommand = null;
 const discoveryIntegrations = [
   {
     kind: "snmp",
@@ -1073,6 +1074,46 @@ window.fetch = async (path, options = {}) => {
     response = { status: 200, body: { jobs: remoteInstallJob ? [remoteInstallJob] : [] } };
   } else if (method === "GET" && key === "/api/remote-install/ri_win") {
     response = { status: 200, body: remoteInstallJob };
+  } else if (method === "POST" && key === "/api/agents/agt_demo/domain/join") {
+    domainCommand = {
+      id: "cmd_domain_join",
+      agent_id: "agt_demo",
+      kind: "domain",
+      args: {
+        action: "join",
+        domain: body?.domain || "",
+        username: body?.username || "",
+        password: "",
+        computer_name: body?.computer_name || "",
+      },
+      status: "succeeded",
+      exit_code: 0,
+      stdout: "Domain: corp.example.com\nPartOfDomain: True\nReboot required to finish.",
+      stderr: "",
+      error: "",
+      created_at: "2026-11-06T08:06:00Z",
+      completed_at: "2026-11-06T08:06:10Z",
+    };
+    response = { status: 200, body: { command: domainCommand } };
+  } else if (method === "POST" && key === "/api/agents/agt_demo/domain/status") {
+    domainCommand = {
+      id: "cmd_domain_status",
+      agent_id: "agt_demo",
+      kind: "domain",
+      args: { action: "status" },
+      status: "succeeded",
+      exit_code: 0,
+      stdout: "Domain: corp.example.com\nPartOfDomain: True",
+      stderr: "",
+      error: "",
+      created_at: "2026-11-06T08:06:00Z",
+      completed_at: "2026-11-06T08:06:10Z",
+    };
+    response = { status: 200, body: { command: domainCommand } };
+  } else if (method === "GET" && key === "/api/commands/cmd_domain_join") {
+    response = { status: 200, body: { command: domainCommand } };
+  } else if (method === "GET" && key === "/api/commands/cmd_domain_status") {
+    response = { status: 200, body: { command: domainCommand } };
   } else if (method === "GET" && key === "/api/discovery/settings" && window.__discoveryDisabled) {
     response = {
       status: 200,
@@ -3109,6 +3150,39 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!window.document.getElementById("drawer-title").textContent.includes("Studio PC")) {
     throw new Error("command palette opened the wrong agent");
   }
+  const joinDomainAction = findButton(window.document.getElementById("drawer-actions"), "Join domain");
+  if (!joinDomainAction) throw new Error("agent Join domain action is missing");
+  joinDomainAction.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(120);
+  const domainDialog = window.document.getElementById("domain-join-dialog");
+  if (!domainDialog.open) throw new Error("domain join dialog did not open");
+  const agentDomainForm = window.document.getElementById("domain-join-form");
+  agentDomainForm.elements.domain.value = "corp.example.com";
+  agentDomainForm.elements.username.value = "CORP\\svc-join";
+  agentDomainForm.elements.password.value = "SUPERSECRET";
+  agentDomainForm.elements.computer_name.value = "STUDIO-PC";
+  agentDomainForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(160);
+  const domainRequest = window.__requests.find(
+    (request) => request.method === "POST" && request.path === "/api/agents/agt_demo/domain/join",
+  );
+  if (!domainRequest || domainRequest.body.domain !== "corp.example.com" || domainRequest.body.password !== "SUPERSECRET") {
+    throw new Error("domain join form was not posted");
+  }
+  if (!window.document.getElementById("domain-join-log").textContent.includes("PartOfDomain: True")) {
+    throw new Error("domain join result did not render");
+  }
+  if (!domainCommand || domainCommand.args.password !== "" || JSON.stringify(domainCommand.args).includes("SUPERSECRET")) {
+    throw new Error("domain password was persisted in the command args");
+  }
+  findButton(domainDialog, "Check status").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(160);
+  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/agents/agt_demo/domain/status")) {
+    throw new Error("domain status check was not sent");
+  }
+  findButton(domainDialog, "Cancel").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  if (domainDialog.open) throw new Error("domain join dialog did not close");
   window.document.querySelector("[data-close-drawer]").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(10);
 

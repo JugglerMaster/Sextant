@@ -68,6 +68,8 @@ const state = {
   settingsTab: "profile",
   systemSettings: null,
   systemSettingsLoading: false,
+  domainJoin: null,
+  domainJoinTimer: null,
   fleetStatusSignature: "",
   paletteItems: [],
   paletteIndex: 0,
@@ -1903,6 +1905,9 @@ function renderDrawerActions(agent) {
       actions.append(h("label", { class: "field" }, h("span", {}, "Profile"), select));
     }
     actions.append(button("Edit policy", "button-secondary", () => openAgentEditDialog(agent)));
+    if (agent.online && ["windows", "linux"].includes(String(agent.os || "").toLowerCase())) {
+      actions.append(button("Join domain", "button-secondary", () => openDomainJoinDialog(agent)));
+    }
     actions.append(button("Delete agent", "button-ghost", () => deleteAgent(agent)));
   }
 }
@@ -6779,6 +6784,238 @@ async function restartForSettings() {
   }
 }
 
+function domainJoinLog(text) {
+  const log = $("domain-join-log");
+  if (log) log.textContent = text;
+}
+
+async function openDomainJoinDialog(agent) {
+  if (!state.permissions.admin) {
+    toast("Administrator access required.", "error");
+    return;
+  }
+  if (!state.systemSettings) {
+    try {
+      state.systemSettings = await api("/api/system/settings");
+    } catch (_error) {
+      // The form still works without the domain prefill.
+    }
+  }
+  state.domainJoin = { agent, commandId: null };
+  renderDomainJoinDialog();
+  const dialog = $("domain-join-dialog");
+  if (dialog) dialog.showModal();
+}
+
+function closeDomainJoinDialog() {
+  if (state.domainJoinTimer) {
+    clearTimeout(state.domainJoinTimer);
+    state.domainJoinTimer = null;
+  }
+  const dialog = $("domain-join-dialog");
+  if (dialog?.open) dialog.close();
+  state.domainJoin = null;
+  setText("domain-join-error", "");
+  clear($("domain-join-body"));
+  clear($("domain-join-actions"));
+}
+
+function renderDomainJoinDialog() {
+  const data = state.domainJoin;
+  const body = $("domain-join-body");
+  const actions = $("domain-join-actions");
+  if (!data || !body || !actions) return;
+  const agent = data.agent;
+  const windows = String(agent.os || "").toLowerCase() === "windows";
+  clear(body);
+  clear(actions);
+  setText("domain-join-error", "");
+  const defaultDomain = state.systemSettings?.domain?.domain || "";
+  const shortName = String(agent.hostname || "").split(".")[0].slice(0, 15);
+  const form = h(
+    "form",
+    { class: "form-stack", id: "domain-join-form" },
+    h(
+      "p",
+      { class: "form-hint" },
+      `Join ${agent.name || agent.hostname} (${windows ? "Windows" : "Linux"}) to an AD domain. The password is sent only to this agent and is never stored or logged.`,
+    ),
+    h(
+      "div",
+      { class: "form-grid" },
+      h(
+        "label",
+        { class: "field" },
+        h("span", {}, "Domain"),
+        h("input", { name: "domain", maxlength: "255", required: true, value: defaultDomain, placeholder: "corp.example.com" }),
+      ),
+      h(
+        "label",
+        { class: "field" },
+        h("span", {}, "Domain user"),
+        h("input", { name: "username", maxlength: "255", required: true, placeholder: windows ? "CORP\\svc-join" : "svc-join@corp.example.com" }),
+      ),
+    ),
+    h(
+      "label",
+      { class: "field" },
+      h("span", {}, "Password"),
+      h("input", { name: "password", type: "password", maxlength: "4096", required: true, autocomplete: "new-password" }),
+    ),
+    h(
+      "div",
+      { class: "form-grid" },
+      h(
+        "label",
+        { class: "field" },
+        h("span", {}, "Computer name (optional)"),
+        h("input", { name: "computer_name", maxlength: "15", value: shortName }),
+      ),
+      h(
+        "label",
+        { class: "field" },
+        h("span", {}, "OU (optional)"),
+        h("input", { name: "ou", maxlength: "1024", placeholder: "OU=Workstations,DC=corp,DC=example,DC=com" }),
+      ),
+    ),
+    h(
+      "label",
+      { class: "field" },
+      h("span", {}, windows ? "Domain controller (optional)" : "Domain controller (optional, adcli)"),
+      h("input", { name: "server", maxlength: "255", disabled: windows, placeholder: windows ? "discovered automatically" : "dc1.corp.example.com" }),
+    ),
+    windows
+      ? null
+      : h(
+          "label",
+          { class: "field" },
+          h("span", {}, "Linux method"),
+          h(
+            "select",
+            { name: "method" },
+            h("option", { value: "auto" }, "Auto (realmd, then adcli)"),
+            h("option", { value: "realm" }, "realmd"),
+            h("option", { value: "adcli" }, "adcli"),
+          ),
+        ),
+    windows
+      ? null
+      : h(
+          "label",
+          { class: "checkbox-row" },
+          h("input", { type: "checkbox", name: "install_prerequisites" }),
+          h("span", {}, "Install realmd, SSSD, adcli, and Kerberos packages if missing"),
+        ),
+    h(
+      "label",
+      { class: "checkbox-row" },
+      h("input", { type: "checkbox", name: "reboot" }),
+      h("span", {}, windows ? "Reboot after a successful join" : "Reboot after a successful join (usually not required)"),
+    ),
+    h(
+      "p",
+      { class: "form-hint" },
+      windows
+        ? "Add-Computer joins without restarting first. Check the reboot box or use Reboot later to finish applying membership."
+        : "realmd configures SSSD/PAM. adcli creates the computer account but may need SSSD tuning. Check status after the join.",
+    ),
+    h("pre", { class: "terminal", id: "domain-join-log", "aria-live": "polite" }, "No command queued yet."),
+  );
+  body.append(form);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitDomainJoin(form);
+  });
+  actions.append(
+    button("Cancel", "button-ghost", closeDomainJoinDialog),
+    button("Check status", "button-secondary", () => checkAgentDomainStatus(agent)),
+    h("button", { class: "button button-primary", type: "submit", form: "domain-join-form" }, "Join domain"),
+  );
+  const first = form.querySelector("input, select");
+  if (first) setTimeout(() => first.focus(), 30);
+}
+
+async function submitDomainJoin(form) {
+  const data = state.domainJoin;
+  if (!data) return;
+  const values = new FormData(form);
+  const password = String(values.get("password") || "");
+  if (!password) {
+    setText("domain-join-error", "Enter the domain password.");
+    return;
+  }
+  setText("domain-join-error", "");
+  const payload = {
+    domain: String(values.get("domain") || "").trim(),
+    username: String(values.get("username") || "").trim(),
+    password,
+    ou: String(values.get("ou") || "").trim(),
+    computer_name: String(values.get("computer_name") || "").trim(),
+    server: String(values.get("server") || "").trim(),
+    method: String(values.get("method") || "auto"),
+    install_prerequisites: form.elements.install_prerequisites?.checked === true,
+    reboot: form.elements.reboot?.checked === true,
+  };
+  try {
+    const result = await api(`/api/agents/${data.agent.id}/domain/join`, {
+      method: "POST",
+      body: payload,
+    });
+    form.elements.password.value = "";
+    data.commandId = result.command?.id || "";
+    domainJoinLog("Join command queued for the agent's next heartbeat.");
+    toast("Domain join queued.");
+    watchAgentDomainCommand(data.commandId);
+  } catch (error) {
+    setText("domain-join-error", error.message);
+  }
+}
+
+async function checkAgentDomainStatus(agent) {
+  setText("domain-join-error", "");
+  try {
+    const result = await api(`/api/agents/${agent.id}/domain/status`, {
+      method: "POST",
+      body: {},
+    });
+    domainJoinLog("Status command queued for the agent's next heartbeat.");
+    watchAgentDomainCommand(result.command?.id || "");
+  } catch (error) {
+    setText("domain-join-error", error.message);
+  }
+}
+
+function watchAgentDomainCommand(commandId) {
+  if (!commandId) return;
+  if (state.domainJoinTimer) clearTimeout(state.domainJoinTimer);
+  const tick = async () => {
+    try {
+      const data = await api(`/api/commands/${encodeURIComponent(commandId)}`);
+      const command = data.command || {};
+      const parts = [
+        `Status: ${command.status || "unknown"}`,
+        command.stdout ? String(command.stdout).trim() : "",
+        command.stderr ? String(command.stderr).trim() : "",
+        command.error ? `Error: ${command.error}` : "",
+      ].filter(Boolean);
+      domainJoinLog(parts.join("\n\n") || "Waiting for the agent…");
+      if (["succeeded", "failed", "cancelled"].includes(command.status)) {
+        toast(
+          command.status === "succeeded"
+            ? "Domain join command completed."
+            : "Domain join command failed.",
+          command.status === "succeeded" ? "ok" : "error",
+        );
+        return;
+      }
+    } catch (error) {
+      domainJoinLog(error.message);
+    }
+    state.domainJoinTimer = setTimeout(tick, 1500);
+  };
+  tick();
+}
+
 function renderSecurity() {
   const details = $("security-details");
   clear(details);
@@ -9083,6 +9320,14 @@ function wireEvents() {
   $("discovery-scan-cancel")?.addEventListener("click", cancelDiscoveryScan);
   document.querySelectorAll("[data-close-discovery-drawer]").forEach((el) => {
     el.addEventListener("click", closeDiscoveryDrawer);
+  });
+  $("domain-join-dialog")?.addEventListener("close", () => {
+    if (state.domainJoinTimer) {
+      clearTimeout(state.domainJoinTimer);
+      state.domainJoinTimer = null;
+    }
+    state.domainJoin = null;
+    setText("domain-join-error", "");
   });
   $("discovery-promote-dialog")?.addEventListener("close", () => {
     clear($("discovery-promote-body"));

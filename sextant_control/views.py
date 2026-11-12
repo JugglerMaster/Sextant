@@ -60,6 +60,46 @@ def validate_command_args(kind: str, args: dict[str, Any]) -> dict[str, Any]:
     if kind == "refresh":
         return {}
 
+    if kind == "domain":
+        action = str(args.get("action") or "join").strip().lower()
+        if action not in {"join", "status"}:
+            raise ValueError("domain action must be join or status")
+        if action == "status":
+            return {"action": "status"}
+        if str(args.get("password") or ""):
+            raise ValueError("Domain passwords are supplied only to the dedicated join endpoint")
+        domain = str(args.get("domain") or "").strip()
+        if not re.match(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253})[A-Za-z0-9]$", domain):
+            raise ValueError("invalid domain name")
+        username = str(args.get("username") or "").strip()
+        if not username or len(username) > 255 or any(ord(ch) < 32 for ch in username):
+            raise ValueError("invalid domain username")
+        ou = str(args.get("ou") or "").strip()
+        if len(ou) > 1024 or any(ord(ch) < 32 for ch in ou):
+            raise ValueError("invalid OU")
+        computer_name = str(args.get("computer_name") or "").strip()
+        if computer_name and not re.match(r"^[A-Za-z0-9][A-Za-z0-9-]{0,14}$", computer_name):
+            raise ValueError("invalid computer name")
+        server = str(args.get("server") or "").strip()
+        if server and len(server) > 255:
+            raise ValueError("invalid domain controller")
+        method = str(args.get("method") or "auto").strip().lower()
+        if method not in {"auto", "realm", "adcli"}:
+            raise ValueError("domain method must be auto, realm, or adcli")
+        return {
+            "action": "join",
+            "domain": domain,
+            "username": username,
+            "password": "",
+            "ou": ou,
+            "computer_name": computer_name,
+            "server": server,
+            "method": method,
+            "install_prerequisites": bool(args.get("install_prerequisites")),
+            "reboot": bool(args.get("reboot")),
+            "timeout": max(30, min(900, int(args.get("timeout", 300)))),
+        }
+
     if kind == "docker":
         from .docker_rules import normalize_docker_command_args
 

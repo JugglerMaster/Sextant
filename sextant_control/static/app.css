@@ -1156,3 +1156,31 @@ html[data-theme="light"] .stat-card { min-height: 108px; }
 .settings-tabs .tab { padding: 10px 12px; }
 .settings-tab-panel { margin-top: 4px; }
 #ssh-key-details dd { word-break: break-word; }
+
+#domain-join-log {
+  display: block;
+  min-height: 120px;
+  margin: 0;
+  padding: 13px;
+  overflow: auto;
+  color: var(--terminal-text);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#remote-install-log {
+  display: block;
+  min-height: 280px;
+  margin: 0;
+  padding: 13px;
+  overflow: auto;
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

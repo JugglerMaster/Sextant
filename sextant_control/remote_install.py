@@ -136,6 +136,11 @@ def _key_check(key_path: str) -> None:
         raise RemoteInstallError(
             f"SSH key not found at {key_path}. Upload a key in Settings -> SSH or set SEXTANT_SSH_KEY_PATH."
         )
+    if not os.access(path, os.R_OK):
+        raise RemoteInstallError(
+            f"SSH key {key_path} is not readable by the Sextant service user. "
+            "Set its owner or group so the service can read it, or re-upload it in Settings -> SSH."
+        )
     if os.name != "nt":
         mode = path.stat().st_mode
         if mode & (stat.S_IRWXG | stat.S_IRWXO):
@@ -188,6 +193,7 @@ def run_install(
     log: Callable[[str], None] = lambda _line: None,
     timeout: int = 300,
     config_path: str = "",
+    wheel_filename: str = "",
 ) -> None:
     _validate_target(host, port, user)
     _require_binaries()
@@ -196,7 +202,12 @@ def run_install(
     if not wheel.is_file():
         raise RemoteInstallError("Agent wheel is missing from the package store.")
 
-    remote_wheel = f"/tmp/sextant-{wheel.name}"
+    # The store keeps blobs under their SHA-256 name, which has no .whl suffix.
+    # pip requires a wheel filename, so use the release's published filename.
+    remote_name = wheel_filename if wheel_filename.endswith(".whl") else wheel.name
+    if not remote_name.endswith(".whl"):
+        remote_name = f"{remote_name}.whl"
+    remote_wheel = f"/tmp/sextant-{remote_name}"
     remote_unit = "/tmp/sextant-agent.service"
     log(f"Checking prerequisites on {user}@{host}:{port}")
     log(
@@ -247,8 +258,12 @@ WHEEL={shlex.quote(remote_wheel)}
 UNIT={shlex.quote(remote_unit)}
 sudo -n install -d -m 0755 /opt/sextant-agent
 sudo -n install -d -m 0700 /etc/sextant-agent
-if [ ! -x /opt/sextant-agent/.venv/bin/python ]; then
-  sudo -n python3 -m venv /opt/sextant-agent/.venv
+if [ ! -x /opt/sextant-agent/.venv/bin/python ] || [ ! -x /opt/sextant-agent/.venv/bin/pip ]; then
+  sudo -n rm -rf /opt/sextant-agent/.venv
+  if ! sudo -n python3 -m venv /opt/sextant-agent/.venv; then
+    echo "Could not create the agent virtualenv. Install python3-venv (Debian/Ubuntu) or the python3 venv package for this distribution, then retry." >&2
+    exit 1
+  fi
 fi
 sudo -n /opt/sextant-agent/.venv/bin/pip install --no-deps --upgrade "$WHEEL"
 sudo -n ln -sfn .venv /opt/sextant-agent/current
