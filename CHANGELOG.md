@@ -4,6 +4,32 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.6.0] - 2026-11-12
+
+### Added
+
+- A **Settings** page with a self-service **Profile** tab and admin **Server**,
+  **Domain & directory**, and **SSH** tabs.
+- Server settings can be changed from the UI and are persisted in SQLite over
+  the environment defaults: public URL, allowed hosts, session length, offline
+  threshold, enrollment token lifetime, secure cookies, and proxy trust. A
+  restart action covers the host/secure-cookie changes installed at startup.
+- Domain & directory settings configure AD/Samba/LDAP from the UI: domain name,
+  server/port, LDAPS and CA path, base/bind DN, write-only bind password, user
+  filter, attribute mapping for username/display name/email/groups, group role
+  mapping, default role, and a live **Test directory** diagnostic.
+- SSH settings can upload or paste a managed private key, or use a local system
+  user's `~/.ssh` key and config. The effective path, readability, and
+  fingerprint are shown; private keys are never returned.
+- `PATCH /api/me` for local display name and email.
+
+### Changed
+
+- LDAP authentication now reads configurable attribute names instead of
+  hard-coding `sAMAccountName`, `displayName`, `mail`, and `memberOf`.
+- Remote install can pass a system user's `~/.ssh/config` to `ssh`/`scp`.
+- The sidebar adds **Settings**; the command palette includes it.
+
 ## [0.5.9] - 2026-11-12
 
 ### Changed
@@ -239,6 +265,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.6.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.0
 [0.5.9]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.9
 [0.5.8]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.8
 [0.5.7]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.7

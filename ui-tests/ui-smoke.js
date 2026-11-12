@@ -583,22 +583,77 @@ const updateStatus = {
   error: "",
 };
 
+const currentUser = {
+  id: 1,
+  username: "admin",
+  display_name: "Admin",
+  email: "",
+  role: "admin",
+  source: "local",
+  created_at: "2026-11-06T07:00:00Z",
+  last_login_at: "2026-11-06T08:00:00Z",
+};
+
+const systemSettings = {
+  server: {
+    public_url: "",
+    allowed_hosts: [],
+    session_hours: 12,
+    cookie_secure: false,
+    trust_proxy: false,
+    offline_after_seconds: 90,
+    enrollment_ttl_minutes: 30,
+    data_dir: "/var/lib/sextant",
+  },
+  domain: {
+    enabled: false,
+    domain: "",
+    server: "",
+    port: 389,
+    use_ssl: false,
+    base_dn: "",
+    bind_dn: "",
+    bind_password_set: false,
+    user_filter: "(sAMAccountName={username})",
+    username_attr: "sAMAccountName",
+    display_name_attr: "displayName",
+    email_attr: "mail",
+    group_attr: "memberOf",
+    admin_groups: [],
+    operator_groups: [],
+    viewer_groups: [],
+    default_role: "viewer",
+    ca_cert: "",
+    timeout: 8,
+  },
+  ssh: {
+    source: "managed",
+    system_user: "",
+    key_path: "",
+    config_path: "",
+    install_enabled: true,
+    effective_key_path: "/var/lib/sextant/ssh/install_key",
+    key_present: false,
+    key_readable: false,
+    key_fingerprint: "",
+    public_key: "",
+  },
+  meta: {
+    ldap3_available: true,
+    updated_at: "2026-11-06T08:00:00Z",
+    updated_by: "admin",
+    restart_required: [],
+  },
+};
+
+
 const responses = {
   "/api/auth/config": { status: 200, body: { ldap_enabled: false, version: "0.3.0", public_url: "" } },
   "/api/me": { status: 401, body: { detail: "Authentication required." } },
   "/api/auth/login": {
     status: 200,
     body: {
-      user: {
-        id: 1,
-        username: "admin",
-        display_name: "Admin",
-        email: "",
-        role: "admin",
-        source: "local",
-        created_at: "2026-11-06T07:00:00Z",
-        last_login_at: "2026-11-06T08:00:00Z",
-      },
+      user: currentUser,
       csrf: "csrf-demo",
       permissions: { viewer: true, operate: true, admin: true },
       settings: { ldap_enabled: false, local_auth: true, offline_after_seconds: 90, version: "0.3.0", public_url: "" },
@@ -899,6 +954,75 @@ window.fetch = async (path, options = {}) => {
         update: updateStatus,
       },
     };
+  } else if (method === "GET" && key === "/api/system/settings") {
+    response = { status: 200, body: JSON.parse(JSON.stringify(systemSettings)) };
+  } else if (method === "PATCH" && key === "/api/system/settings") {
+    if (body?.server) Object.assign(systemSettings.server, body.server);
+    if (body?.domain) {
+      Object.assign(systemSettings.domain, body.domain);
+      if (body.domain.bind_password) systemSettings.domain.bind_password_set = true;
+      if (body.domain.clear_bind_password) systemSettings.domain.bind_password_set = false;
+      delete systemSettings.domain.bind_password;
+      systemSettings.domain.enabled = Boolean(systemSettings.domain.enabled);
+      systemSettings.domain.admin_groups = systemSettings.domain.admin_groups || [];
+      systemSettings.domain.operator_groups = systemSettings.domain.operator_groups || [];
+      systemSettings.domain.viewer_groups = systemSettings.domain.viewer_groups || [];
+    }
+    if (body?.ssh) {
+      Object.assign(systemSettings.ssh, body.ssh);
+      if (body.ssh.private_key) {
+        systemSettings.ssh.key_present = true;
+        systemSettings.ssh.key_readable = true;
+        systemSettings.ssh.key_fingerprint = "SHA256:demo";
+      }
+      if (body.ssh.clear_key) {
+        systemSettings.ssh.key_present = false;
+        systemSettings.ssh.key_readable = false;
+        systemSettings.ssh.key_fingerprint = "";
+      }
+      delete systemSettings.ssh.private_key;
+      delete systemSettings.ssh.clear_key;
+    }
+    systemSettings.meta.restart_required = body?.server
+      ? ["allowed_hosts", "cookie_secure"].filter((key) => key in body.server)
+      : [];
+    response = { status: 200, body: JSON.parse(JSON.stringify(systemSettings)) };
+  } else if (method === "POST" && key === "/api/system/ldap/test") {
+    response = {
+      status: 200,
+      body: {
+        bound: true,
+        server: "dc1.corp.example.com",
+        port: 636,
+        base_dn: "DC=corp,DC=example,DC=com",
+        entries: 1,
+        filter: "(sAMAccountName=jdoe)",
+        sample: {
+          "CN=Jane Doe,DC=corp,DC=example,DC=com": {
+            displayName: ["Jane Doe"],
+            mail: ["jane.doe@example.test"],
+          },
+        },
+      },
+    };
+  } else if (method === "POST" && key === "/api/system/ssh/test") {
+    response = {
+      status: 200,
+      body: {
+        present: true,
+        readable: true,
+        fingerprint: "SHA256:demo",
+        effective_key_path: "/var/lib/sextant/ssh/install_key",
+        source: "managed",
+        system_user: "",
+        effective_config_path: "",
+        config_present: false,
+      },
+    };
+  } else if (method === "PATCH" && key === "/api/me") {
+    if (body?.display_name !== undefined) currentUser.display_name = body.display_name;
+    if (body?.email !== undefined) currentUser.email = body.email;
+    response = { status: 200, body: { user: { ...currentUser } } };
   } else if (method === "GET" && key === "/api/saved-views") {
     response = { status: 200, body: { views: savedViews.map((view) => ({ ...view, filters: { ...view.filters } })) } };
   } else if (method === "POST" && key === "/api/saved-views") {
@@ -2805,6 +2929,104 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   }
   if (!window.document.getElementById("updates-hint").textContent.includes("restart")) {
     throw new Error("updates panel did not show restart instructions after rollback");
+  }
+
+  window.document.querySelector('[data-page="settings"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(120);
+  if (window.document.getElementById("page-settings").hidden) throw new Error("Settings page did not open");
+  for (const tab of ["profile", "server", "domain", "ssh"]) {
+    const button = window.document.querySelector(`[data-settings-tab="${tab}"]`);
+    if (!button || button.hidden) throw new Error(`Settings tab ${tab} is missing for an admin`);
+  }
+  const profileForm = window.document.getElementById("user-profile-form");
+  profileForm.elements.display_name.value = "Sextant Admin";
+  profileForm.elements.email.value = "admin@example.test";
+  profileForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(100);
+  const profilePatch = window.__requests.find(
+    (request) => request.method === "PATCH" && request.path === "/api/me",
+  );
+  if (!profilePatch || profilePatch.body.display_name !== "Sextant Admin") {
+    throw new Error("Profile update was not sent");
+  }
+  if (!window.document.getElementById("user-name").textContent.includes("Sextant Admin")) {
+    throw new Error("Profile update did not refresh the account chip");
+  }
+
+  window.document.querySelector('[data-settings-tab="server"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  if (!window.document.getElementById("settings-tabs").textContent.includes("Server")) {
+    throw new Error("Server settings tab did not render");
+  }
+  const serverForm = window.document.getElementById("server-settings-form");
+  if (serverForm.elements.session_hours.value !== "12") {
+    throw new Error("Server settings did not load the effective session length");
+  }
+  serverForm.elements.session_hours.value = "24";
+  serverForm.elements.public_url.value = "https://sextant.example.test";
+  serverForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(120);
+  const serverPatch = window.__requests.find(
+    (request) => request.method === "PATCH" && request.path === "/api/system/settings" && request.body.server,
+  );
+  if (!serverPatch || serverPatch.body.server.session_hours !== 24) {
+    throw new Error("Server settings update was not sent");
+  }
+  if (!window.document.getElementById("toast-region").textContent.includes("Restart")) {
+    throw new Error("Server settings save did not mention the restart requirement");
+  }
+
+  window.document.querySelector('[data-settings-tab="domain"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  const domainForm = window.document.getElementById("domain-settings-form");
+  domainForm.elements.enabled.checked = true;
+  domainForm.elements.domain.value = "corp.example.com";
+  domainForm.elements.server.value = "dc1.corp.example.com";
+  domainForm.elements.bind_dn.value = "CN=svc-sextant,DC=corp,DC=example,DC=com";
+  domainForm.elements.bind_password.value = "super-secret";
+  domainForm.elements.display_name_attr.value = "displayName";
+  window.document.getElementById("domain-test-username").value = "jdoe";
+  window.document.getElementById("domain-settings-test").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(120);
+  if (!window.document.getElementById("domain-test-result").textContent.includes("Directory test succeeded")) {
+    throw new Error("Directory test result did not render");
+  }
+  domainForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(140);
+  const domainPatch = window.__requests.find(
+    (request) => request.method === "PATCH" && request.path === "/api/system/settings" && request.body.domain?.enabled,
+  );
+  if (!domainPatch || domainPatch.body.domain.bind_password !== "super-secret") {
+    throw new Error("Domain settings update was not sent");
+  }
+  if (domainForm.elements.bind_password.placeholder !== "configured — leave blank to keep") {
+    throw new Error("Saved bind password state was not shown");
+  }
+
+  window.document.querySelector('[data-settings-tab="ssh"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  const sshForm = window.document.getElementById("ssh-settings-form");
+  sshForm.elements.private_key.value = "-----BEGIN OPENSSH PRIVATE KEY-----\ndemo\n-----END OPENSSH PRIVATE KEY-----";
+  sshForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(120);
+  const sshPatch = window.__requests.find(
+    (request) => request.method === "PATCH" && request.path === "/api/system/settings" && request.body.ssh,
+  );
+  if (!sshPatch || !sshPatch.body.ssh.private_key.includes("PRIVATE KEY")) {
+    throw new Error("SSH key upload was not sent");
+  }
+  if (!window.document.getElementById("ssh-key-details").textContent.includes("SHA256:demo")) {
+    throw new Error("SSH key fingerprint did not render");
+  }
+  sshForm.elements.source.value = "system_user";
+  sshForm.elements.source.dispatchEvent(new window.Event("change", { bubbles: true }));
+  if (!window.document.getElementById("ssh-managed-fields").hidden) {
+    throw new Error("Managed SSH fields should hide in system-user mode");
+  }
+  sshForm.elements.source.value = "managed";
+  sshForm.elements.source.dispatchEvent(new window.Event("change", { bubbles: true }));
+  if (!findButton(window.document.getElementById("server-settings-form"), "Restart server")) {
+    throw new Error("Settings restart action is missing");
   }
 
   const themeToggle = window.document.getElementById("theme-toggle");

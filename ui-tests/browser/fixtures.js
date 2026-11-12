@@ -463,7 +463,7 @@ const loginUser = {
 
 function loginPayload() {
   return {
-    user: loginUser,
+    user: { ...loginUser },
     csrf: "csrf-demo",
     permissions: { viewer: true, operate: true, admin: true },
     settings: {
@@ -475,6 +475,58 @@ function loginPayload() {
     },
   };
 }
+
+const systemSettings = {
+  server: {
+    public_url: "",
+    allowed_hosts: [],
+    session_hours: 12,
+    cookie_secure: false,
+    trust_proxy: false,
+    offline_after_seconds: 90,
+    enrollment_ttl_minutes: 30,
+    data_dir: "/var/lib/sextant",
+  },
+  domain: {
+    enabled: false,
+    domain: "",
+    server: "",
+    port: 389,
+    use_ssl: false,
+    base_dn: "",
+    bind_dn: "",
+    bind_password_set: false,
+    user_filter: "(sAMAccountName={username})",
+    username_attr: "sAMAccountName",
+    display_name_attr: "displayName",
+    email_attr: "mail",
+    group_attr: "memberOf",
+    admin_groups: [],
+    operator_groups: [],
+    viewer_groups: [],
+    default_role: "viewer",
+    ca_cert: "",
+    timeout: 8,
+  },
+  ssh: {
+    source: "managed",
+    system_user: "",
+    key_path: "",
+    config_path: "",
+    install_enabled: true,
+    effective_key_path: "/var/lib/sextant/ssh/install_key",
+    key_present: false,
+    key_readable: false,
+    key_fingerprint: "",
+    public_key: "",
+  },
+  meta: {
+    ldap3_available: true,
+    updated_at: "2026-11-06T08:00:00Z",
+    updated_by: "admin",
+    restart_required: [],
+  },
+};
 
 const packagesPayload = {
   inventory: [
@@ -751,9 +803,77 @@ function createApi(session) {
       return { status: 200, body: { ldap_enabled: false, version: "0.3.0", public_url: "" } };
     }
     if (key === "/api/me") {
+      if (method === "PATCH") {
+        if (body?.display_name !== undefined) loginUser.display_name = body.display_name;
+        if (body?.email !== undefined) loginUser.email = body.email;
+        return { status: 200, body: { user: { ...loginUser } } };
+      }
       return session.authenticated
         ? { status: 200, body: loginPayload() }
         : { status: 401, body: { detail: "Authentication required." } };
+    }
+    if (key === "/api/system/settings") {
+      if (method === "PATCH") {
+        if (body?.server) Object.assign(systemSettings.server, body.server);
+        if (body?.domain) {
+          Object.assign(systemSettings.domain, body.domain);
+          if (body.domain.bind_password) systemSettings.domain.bind_password_set = true;
+          if (body.domain.clear_bind_password) systemSettings.domain.bind_password_set = false;
+          delete systemSettings.domain.bind_password;
+          systemSettings.domain.enabled = Boolean(systemSettings.domain.enabled);
+        }
+        if (body?.ssh) {
+          Object.assign(systemSettings.ssh, body.ssh);
+          if (body.ssh.private_key) {
+            systemSettings.ssh.key_present = true;
+            systemSettings.ssh.key_readable = true;
+            systemSettings.ssh.key_fingerprint = "SHA256:demo";
+          }
+          if (body.ssh.clear_key) {
+            systemSettings.ssh.key_present = false;
+            systemSettings.ssh.key_readable = false;
+            systemSettings.ssh.key_fingerprint = "";
+          }
+          delete systemSettings.ssh.private_key;
+          delete systemSettings.ssh.clear_key;
+        }
+        systemSettings.meta.restart_required = body?.server
+          ? ["allowed_hosts", "cookie_secure"].filter((key) => key in body.server)
+          : [];
+      }
+      return { status: 200, body: JSON.parse(JSON.stringify(systemSettings)) };
+    }
+    if (key === "/api/system/ldap/test" && method === "POST") {
+      return {
+        status: 200,
+        body: {
+          bound: true,
+          server: "dc1.corp.example.com",
+          port: 636,
+          base_dn: "DC=corp,DC=example,DC=com",
+          entries: 1,
+          filter: "(sAMAccountName=jdoe)",
+          sample: { "CN=Jane Doe,DC=corp,DC=example,DC=com": { displayName: ["Jane Doe"] } },
+        },
+      };
+    }
+    if (key === "/api/system/ssh/test" && method === "POST") {
+      return {
+        status: 200,
+        body: {
+          present: true,
+          readable: true,
+          fingerprint: "SHA256:demo",
+          effective_key_path: "/var/lib/sextant/ssh/install_key",
+          source: "managed",
+          system_user: "",
+          effective_config_path: "",
+          config_present: false,
+        },
+      };
+    }
+    if (key === "/api/system/restart" && method === "POST") {
+      return { status: 200, body: { restarting: true, restart_pending: true } };
     }
     if (key === "/api/auth/login" && method === "POST") {
       session.authenticated = true;

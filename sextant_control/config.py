@@ -45,6 +45,11 @@ class LdapSettings:
     ca_cert: str = ""
     port: int = 389
     timeout: int = 8
+    domain: str = ""
+    username_attr: str = "sAMAccountName"
+    display_name_attr: str = "displayName"
+    email_attr: str = "mail"
+    group_attr: str = "memberOf"
 
     @property
     def effective_port(self) -> int:
@@ -218,6 +223,9 @@ class Settings:
     docker_console_max_input_bytes: int = 65536
     docker_console_max_output_bytes: int = 1_048_576
     ssh_key_path: str = ""
+    ssh_key_source: str = "managed"
+    ssh_system_user: str = ""
+    ssh_config_path: str = ""
     ssh_install_enabled: bool = True
     windows_install_enabled: bool = True
     windows_install_ca_file: str = ""
@@ -415,6 +423,9 @@ class Settings:
                 4096, _int(env.get("SEXTANT_DOCKER_CONSOLE_MAX_OUTPUT_BYTES"), 1_048_576, 4096)
             ),
             ssh_key_path=env.get("SEXTANT_SSH_KEY_PATH", "").strip() or str(data_dir / "ssh" / "install_key"),
+            ssh_key_source=(env.get("SEXTANT_SSH_KEY_SOURCE", "managed").strip().lower() or "managed"),
+            ssh_system_user=env.get("SEXTANT_SSH_SYSTEM_USER", "").strip(),
+            ssh_config_path=env.get("SEXTANT_SSH_CONFIG_PATH", "").strip(),
             ssh_install_enabled=_bool(env.get("SEXTANT_SSH_INSTALL_ENABLED"), True),
             windows_install_enabled=_bool(env.get("SEXTANT_WINDOWS_INSTALL_ENABLED"), True),
             windows_install_ca_file=env.get("SEXTANT_WINDOWS_INSTALL_CA_FILE", "").strip(),
@@ -477,4 +488,11 @@ def _ldap_from_env(env: dict[str, str]) -> LdapSettings | None:
         ca_cert=env.get("SEXTANT_LDAP_CA_CERT", ""),
         port=_int(env.get("SEXTANT_LDAP_PORT"), 389),
         timeout=_int(env.get("SEXTANT_LDAP_TIMEOUT"), 8, 2),
+        domain=env.get("SEXTANT_LDAP_DOMAIN", "").strip(),
+        username_attr=env.get("SEXTANT_LDAP_USERNAME_ATTR", "sAMAccountName").strip()
+        or "sAMAccountName",
+        display_name_attr=env.get("SEXTANT_LDAP_DISPLAY_NAME_ATTR", "displayName").strip()
+        or "displayName",
+        email_attr=env.get("SEXTANT_LDAP_EMAIL_ATTR", "mail").strip() or "mail",
+        group_attr=env.get("SEXTANT_LDAP_GROUP_ATTR", "memberOf").strip() or "memberOf",
     )

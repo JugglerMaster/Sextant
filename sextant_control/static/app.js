@@ -65,6 +65,9 @@ const state = {
   updates: null,
   updatesBusy: false,
   updatesNotice: "",
+  settingsTab: "profile",
+  systemSettings: null,
+  systemSettingsLoading: false,
   fleetStatusSignature: "",
   paletteItems: [],
   paletteIndex: 0,
@@ -127,6 +130,7 @@ const PAGE_META = {
   "remote-install": ["Remote install", "Install a Linux agent over key-based SSH."],
   updates: ["Updates", "Server release checks, self-update, and rollback."],
   security: ["Security", "Session, identity provider, and account settings."],
+  settings: ["Settings", "Your profile, server, directory, and discovery SSH settings."],
 };
 
 const SVG_TAGS = new Set(["svg", "g", "path", "circle", "line", "polyline", "text", "rect"]);
@@ -1086,6 +1090,7 @@ function navigate(page, load = true) {
     if (!state.updates) void checkForUpdates();
   }
   if (page === "security") renderSecurity();
+  if (page === "settings") loadSettingsPage();
 }
 
 async function loadDashboard(silent = false) {
@@ -6328,6 +6333,452 @@ async function composeDeploy(stackId, agentId, revisionHash, projectName, action
   }
 }
 
+function settingsTabs() {
+  return [...document.querySelectorAll("#settings-tabs .tab")];
+}
+
+function renderSettingsTabs() {
+  const admin = Boolean(state.permissions.admin);
+  const allowed = new Set(admin ? ["profile", "server", "domain", "ssh"] : ["profile"]);
+  let active = state.settingsTab || "profile";
+  if (!allowed.has(active)) active = "profile";
+  state.settingsTab = active;
+  settingsTabs().forEach((tab) => {
+    tab.hidden = !allowed.has(tab.dataset.settingsTab);
+    tab.classList.toggle("is-active", tab.dataset.settingsTab === active);
+    tab.setAttribute("aria-pressed", tab.dataset.settingsTab === active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-settings-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.settingsPanel !== active;
+  });
+}
+
+function loadSettingsPage() {
+  renderSettings();
+  if (state.permissions.admin && !state.systemSettings) {
+    void loadSystemSettings();
+  }
+}
+
+async function loadSystemSettings(force = false) {
+  if (!state.permissions.admin || state.systemSettingsLoading) return;
+  if (state.systemSettings && !force) {
+    renderSettings();
+    return;
+  }
+  state.systemSettingsLoading = true;
+  try {
+    state.systemSettings = await api("/api/system/settings");
+    renderSettings();
+  } catch (error) {
+    setText("server-settings-error", error.message);
+  } finally {
+    state.systemSettingsLoading = false;
+  }
+}
+
+function settingsUpdatedLabel(data) {
+  if (!data?.meta?.updated_at) return "";
+  const who = data.meta.updated_by ? ` by ${data.meta.updated_by}` : "";
+  return `Updated ${localTime(data.meta.updated_at)}${who}`;
+}
+
+function renderSettings() {
+  renderSettingsTabs();
+  const user = state.user;
+  if (!user) return;
+  const profile = $("user-profile-form");
+  if (profile) {
+    profile.elements.display_name.value = user.display_name || user.username || "";
+    profile.elements.email.value = user.email || "";
+    const username = $("user-profile-username");
+    if (username) username.value = user.username || "";
+    const directory = user.source === "ad";
+    profile.elements.display_name.disabled = directory;
+    profile.elements.email.disabled = directory;
+    const submit = profile.querySelector('button[type="submit"]');
+    if (submit) submit.disabled = directory;
+    setText(
+      "user-profile-source-hint",
+      directory
+        ? "This directory account is managed by Active Directory / Samba. Change these attributes there."
+        : "Your local account profile. Display name and email are shown in audit entries and notifications.",
+    );
+  }
+  const account = $("settings-account-details");
+  if (account) {
+    clear(account);
+    const entries = [
+      ["Signed in as", user.display_name || user.username],
+      ["Username", user.username],
+      ["Role", user.role],
+      ["Source", user.source === "ad" ? "Active Directory / Samba" : "Local account"],
+      ["Directory auth", state.settings?.ldap_enabled ? "Enabled" : "Not configured"],
+      ["Console version", state.settings?.version || "—"],
+    ];
+    for (const [key, value] of entries) {
+      account.append(h("dt", {}, key), h("dd", {}, value));
+    }
+  }
+  if (!state.permissions.admin) return;
+  const data = state.systemSettings;
+  if (!data) {
+    setText("server-settings-status", "Loading server settings…");
+    return;
+  }
+  renderServerSettings(data);
+  renderDomainSettings(data);
+  renderSshSettings(data);
+}
+
+function renderServerSettings(data) {
+  const form = $("server-settings-form");
+  if (!form || !data?.server) return;
+  const server = data.server;
+  form.elements.public_url.value = server.public_url || "";
+  form.elements.allowed_hosts.value = (server.allowed_hosts || []).join(", ");
+  form.elements.session_hours.value = String(server.session_hours ?? 12);
+  form.elements.offline_after_seconds.value = String(server.offline_after_seconds ?? 90);
+  form.elements.enrollment_ttl_minutes.value = String(server.enrollment_ttl_minutes ?? 30);
+  form.elements.cookie_secure.checked = Boolean(server.cookie_secure);
+  form.elements.trust_proxy.checked = Boolean(server.trust_proxy);
+  setText("server-settings-status", settingsUpdatedLabel(data));
+  setText(
+    "server-settings-meta",
+    `Data directory: ${server.data_dir || "—"} · version ${state.settings?.version || "—"}`,
+  );
+}
+
+function renderDomainSettings(data) {
+  const form = $("domain-settings-form");
+  if (!form || !data?.domain) return;
+  const domain = data.domain;
+  form.elements.enabled.checked = Boolean(domain.enabled);
+  form.elements.domain.value = domain.domain || "";
+  form.elements.server.value = domain.server || "";
+  form.elements.port.value = String(domain.port ?? 389);
+  form.elements.use_ssl.checked = Boolean(domain.use_ssl);
+  form.elements.base_dn.value = domain.base_dn || "";
+  form.elements.bind_dn.value = domain.bind_dn || "";
+  form.elements.bind_password.value = "";
+  form.elements.bind_password.placeholder = domain.bind_password_set
+    ? "configured — leave blank to keep"
+    : "not configured";
+  form.elements.user_filter.value = domain.user_filter || "(sAMAccountName={username})";
+  form.elements.username_attr.value = domain.username_attr || "sAMAccountName";
+  form.elements.display_name_attr.value = domain.display_name_attr || "displayName";
+  form.elements.email_attr.value = domain.email_attr || "mail";
+  form.elements.group_attr.value = domain.group_attr || "memberOf";
+  form.elements.admin_groups.value = (domain.admin_groups || []).join("\n");
+  form.elements.operator_groups.value = (domain.operator_groups || []).join("\n");
+  form.elements.viewer_groups.value = (domain.viewer_groups || []).join("\n");
+  form.elements.default_role.value = domain.default_role || "viewer";
+  form.elements.ca_cert.value = domain.ca_cert || "";
+  form.elements.timeout.value = String(domain.timeout ?? 8);
+  form.elements.clear_bind_password.checked = false;
+  setText("domain-settings-status", settingsUpdatedLabel(data));
+  setText(
+    "domain-settings-hint",
+    data.meta?.ldap3_available
+      ? "The optional ldap3 dependency is installed. Directory login is live after saving; local break-glass accounts stay available."
+      : "The optional ldap3 dependency is not installed. Install `sextant[ldap]` before enabling directory login.",
+  );
+}
+
+function renderSshSettings(data) {
+  const form = $("ssh-settings-form");
+  if (!form || !data?.ssh) return;
+  const ssh = data.ssh;
+  form.elements.source.value = ssh.source || "managed";
+  form.elements.key_path.value = ssh.source === "managed" ? ssh.key_path || ssh.effective_key_path || "" : "";
+  form.elements.key_path_override.value = ssh.source === "system_user" ? ssh.key_path || "" : "";
+  form.elements.system_user.value = ssh.system_user || "";
+  form.elements.config_path.value = ssh.config_path || "";
+  form.elements.install_enabled.checked = Boolean(ssh.install_enabled);
+  form.elements.private_key.value = "";
+  form.elements.clear_key.checked = false;
+  setText("ssh-settings-status", settingsUpdatedLabel(data));
+  renderSshKeyDetails(data);
+  syncSshFields();
+}
+
+function renderSshKeyDetails(data) {
+  const details = $("ssh-key-details");
+  if (!details) return;
+  clear(details);
+  const ssh = data?.ssh || {};
+  const entries = [
+    ["Source", ssh.source === "system_user" ? `System user ${ssh.system_user || "—"}` : "Sextant-managed key"],
+    ["Effective key", ssh.effective_key_path || "—"],
+    ["Key present", ssh.key_present ? "yes" : "no"],
+    ["Key readable", ssh.key_readable ? "yes" : "no"],
+    ["Fingerprint", ssh.key_fingerprint || "not available"],
+    ["SSH config", ssh.config_path || "not set"],
+    ["Remote install", ssh.install_enabled ? "enabled" : "disabled"],
+  ];
+  for (const [key, value] of entries) {
+    details.append(h("dt", {}, key), h("dd", {}, value));
+  }
+  if (ssh.public_key) {
+    details.append(
+      h("dt", {}, "Public key"),
+      h("dd", { class: "mono", style: "word-break:break-all" }, ssh.public_key),
+    );
+  }
+}
+
+function syncSshFields() {
+  const form = $("ssh-settings-form");
+  if (!form) return;
+  const system = form.elements.source.value === "system_user";
+  const managed = $("ssh-managed-fields");
+  const systemFields = $("ssh-system-fields");
+  if (managed) managed.hidden = system;
+  if (systemFields) systemFields.hidden = !system;
+}
+
+function settingsFormError(id, error) {
+  setText(id, error?.message || String(error || ""));
+}
+
+async function saveUserProfile(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  setText("user-profile-error", "");
+  try {
+    const data = await api("/api/me", {
+      method: "PATCH",
+      body: {
+        display_name: String(form.elements.display_name.value || "").trim(),
+        email: String(form.elements.email.value || "").trim(),
+      },
+    });
+    state.user = { ...state.user, ...data.user };
+    updateChrome();
+    renderSettings();
+    toast("Profile updated.");
+  } catch (error) {
+    settingsFormError("user-profile-error", error);
+  }
+}
+
+async function saveServerSettings(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  setText("server-settings-error", "");
+  const button = form.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  try {
+    const data = await api("/api/system/settings", {
+      method: "PATCH",
+      body: {
+        server: {
+          public_url: String(form.elements.public_url.value || "").trim(),
+          allowed_hosts: splitList(form.elements.allowed_hosts.value),
+          session_hours: Number(form.elements.session_hours.value || 12),
+          offline_after_seconds: Number(form.elements.offline_after_seconds.value || 90),
+          enrollment_ttl_minutes: Number(form.elements.enrollment_ttl_minutes.value || 30),
+          cookie_secure: form.elements.cookie_secure.checked,
+          trust_proxy: form.elements.trust_proxy.checked,
+        },
+      },
+    });
+    state.systemSettings = data;
+    renderSettings();
+    const restart = data.meta?.restart_required?.length
+      ? " Restart the server to apply the host/secure-cookie changes."
+      : "";
+    toast(`Server settings saved.${restart}`, restart ? "warn" : "ok");
+  } catch (error) {
+    settingsFormError("server-settings-error", error);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function domainPayloadFromForm(form) {
+  const values = new FormData(form);
+  return {
+    enabled: form.elements.enabled.checked,
+    domain: String(values.get("domain") || "").trim(),
+    server: String(values.get("server") || "").trim(),
+    port: Number(values.get("port") || 389),
+    use_ssl: form.elements.use_ssl.checked,
+    base_dn: String(values.get("base_dn") || "").trim(),
+    bind_dn: String(values.get("bind_dn") || "").trim(),
+    user_filter: String(values.get("user_filter") || "").trim(),
+    username_attr: String(values.get("username_attr") || "").trim(),
+    display_name_attr: String(values.get("display_name_attr") || "").trim(),
+    email_attr: String(values.get("email_attr") || "").trim(),
+    group_attr: String(values.get("group_attr") || "").trim(),
+    admin_groups: splitList(values.get("admin_groups")),
+    operator_groups: splitList(values.get("operator_groups")),
+    viewer_groups: splitList(values.get("viewer_groups")),
+    default_role: String(values.get("default_role") || "viewer"),
+    ca_cert: String(values.get("ca_cert") || "").trim(),
+    timeout: Number(values.get("timeout") || 8),
+    clear_bind_password: form.elements.clear_bind_password.checked,
+  };
+}
+
+async function saveDomainSettings(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  setText("domain-settings-error", "");
+  const button = form.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  try {
+    const domain = domainPayloadFromForm(form);
+    const password = String(form.elements.bind_password.value || "");
+    if (password) domain.bind_password = password;
+    const data = await api("/api/system/settings", {
+      method: "PATCH",
+      body: { domain },
+    });
+    state.systemSettings = data;
+    renderSettings();
+    await loadSettingsPage();
+    toast("Domain settings saved. Directory login uses them immediately.");
+  } catch (error) {
+    settingsFormError("domain-settings-error", error);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function testDomainSettings() {
+  const form = $("domain-settings-form");
+  if (!form) return;
+  const result = $("domain-test-result");
+  setText("domain-settings-error", "");
+  if (result) {
+    result.hidden = false;
+    result.textContent = "Testing directory connection…";
+  }
+  try {
+    const domain = domainPayloadFromForm(form);
+    const password = String(form.elements.bind_password.value || "");
+    if (password) domain.bind_password = password;
+    const data = await api("/api/system/ldap/test", {
+      method: "POST",
+      body: {
+        domain,
+        username: String($("domain-test-username")?.value || "").trim(),
+      },
+    });
+    const lines = [
+      `Bound to ${data.server}:${data.port}.`,
+      `Filter: ${data.filter}`,
+      `${data.entries} matching entr${data.entries === 1 ? "y" : "ies"}.`,
+    ];
+    if (data.sample && Object.keys(data.sample).length) {
+      lines.push("Sample attributes are shown below.");
+    }
+    if (result) {
+      clear(result);
+      result.append(h("strong", {}, "Directory test succeeded"), h("p", {}, lines.join(" ")));
+      for (const [dn, attrs] of Object.entries(data.sample || {})) {
+        result.append(h("p", { class: "mono" }, dn));
+        result.append(h("pre", { class: "mono" }, JSON.stringify(attrs, null, 2)));
+      }
+    }
+    toast("Directory test succeeded.");
+  } catch (error) {
+    if (result) {
+      result.hidden = false;
+      result.textContent = error.message;
+    }
+    settingsFormError("domain-settings-error", error);
+  }
+}
+
+async function saveSshSettings(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  setText("ssh-settings-error", "");
+  const button = form.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  try {
+    const source = form.elements.source.value;
+    const ssh = {
+      source,
+      system_user: String(form.elements.system_user.value || "").trim(),
+      key_path:
+        source === "managed"
+          ? String(form.elements.key_path.value || "").trim()
+          : String(form.elements.key_path_override.value || "").trim(),
+      config_path: String(form.elements.config_path.value || "").trim(),
+      install_enabled: form.elements.install_enabled.checked,
+      clear_key: form.elements.clear_key.checked,
+    };
+    const privateKey = String(form.elements.private_key.value || "");
+    if (source === "managed" && privateKey) ssh.private_key = privateKey;
+    const data = await api("/api/system/settings", {
+      method: "PATCH",
+      body: { ssh },
+    });
+    state.systemSettings = data;
+    renderSettings();
+    toast(
+      data.ssh?.key_present ? "SSH settings saved and key loaded." : "SSH settings saved.",
+      data.ssh?.key_present ? "ok" : "warn",
+    );
+  } catch (error) {
+    settingsFormError("ssh-settings-error", error);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function testSshSettings() {
+  const form = $("ssh-settings-form");
+  if (!form) return;
+  setText("ssh-settings-error", "");
+  try {
+    const source = form.elements.source.value;
+    const data = await api("/api/system/ssh/test", {
+      method: "POST",
+      body: {
+        ssh: {
+          source,
+          system_user: String(form.elements.system_user.value || "").trim(),
+          key_path:
+            source === "managed"
+              ? String(form.elements.key_path.value || "").trim()
+              : String(form.elements.key_path_override.value || "").trim(),
+          config_path: String(form.elements.config_path.value || "").trim(),
+          install_enabled: form.elements.install_enabled.checked,
+        },
+      },
+    });
+    renderSshKeyDetails({ ssh: data });
+    toast(
+      data.present
+        ? `Key found: ${data.fingerprint || data.effective_key_path}`
+        : "No key found at the effective path.",
+      data.present ? "ok" : "warn",
+    );
+  } catch (error) {
+    settingsFormError("ssh-settings-error", error);
+  }
+}
+
+async function restartForSettings() {
+  const confirmed = await confirmAction(
+    "Restart Sextant",
+    "Restart the server now? Open sessions disconnect briefly and the page reloads.",
+    "Restart server",
+  );
+  if (!confirmed) return;
+  try {
+    await api("/api/system/restart", { method: "POST", body: {} });
+    toast("Restart requested. Reloading…", "warn");
+    setTimeout(() => window.location.reload(), 12000);
+  } catch (error) {
+    settingsFormError("server-settings-error", error);
+  }
+}
+
 function renderSecurity() {
   const details = $("security-details");
   clear(details);
@@ -8749,6 +9200,38 @@ function wireEvents() {
       loadUsers();
     } catch (error) {
       setText("user-error", error.message);
+    }
+  });
+
+  $("user-profile-form")?.addEventListener("submit", saveUserProfile);
+  $("server-settings-form")?.addEventListener("submit", saveServerSettings);
+  $("domain-settings-form")?.addEventListener("submit", saveDomainSettings);
+  $("ssh-settings-form")?.addEventListener("submit", saveSshSettings);
+  $("domain-settings-test")?.addEventListener("click", testDomainSettings);
+  $("ssh-settings-test")?.addEventListener("click", testSshSettings);
+  $("server-settings-restart")?.addEventListener("click", restartForSettings);
+  $("settings-open-security")?.addEventListener("click", () => navigate("security"));
+  document.querySelectorAll("#settings-tabs .tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      state.settingsTab = tab.dataset.settingsTab || "profile";
+      renderSettings();
+    });
+  });
+  $("ssh-settings-form")?.elements.source?.addEventListener("change", syncSshFields);
+  $("ssh-key-file")?.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (file.size > 65536) {
+      settingsFormError("ssh-settings-error", "Key file exceeds the 64 KB limit.");
+      event.target.value = "";
+      return;
+    }
+    try {
+      const form = $("ssh-settings-form");
+      form.elements.private_key.value = await file.text();
+      toast(`${file.name} loaded. Save to install it.`);
+    } catch (_error) {
+      settingsFormError("ssh-settings-error", "Could not read the selected key file.");
     }
   });
 

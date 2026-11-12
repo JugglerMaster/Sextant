@@ -69,8 +69,17 @@ from .discovery_integrations import (
 from .docker_console import ConsoleBroker, ConsoleError
 from .docker_rules import DOCKER_MUTATION_ACTIONS
 from .docker_store import ComposeLibrary, DockerStoreError
-from .ldap_auth import authenticate_ldap
+from .ldap_auth import authenticate_ldap, probe_ldap
 from .notifications import NotificationError, NotificationService
+from .system_settings import (
+    apply_overrides as apply_system_overrides,
+    build_ldap_settings,
+    normalize_patch as normalize_system_patch,
+    serialize as serialize_system_settings,
+    ssh_key_info,
+    write_bind_password,
+    write_ssh_private_key,
+)
 from .models import (
     AdminPasswordResetIn,
     AgentEnrollIn,
@@ -704,8 +713,14 @@ def _record_agent_events(database: Database, events: list[dict[str, Any]]) -> No
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    base_settings = settings
     db = Database(settings.database_path)
     db.initialize()
+    system_row = db.get_system_settings()
+    system_values = loads(system_row["values_json"], {}) if system_row is not None else {}
+    if not isinstance(system_values, dict):
+        system_values = {}
+    settings = apply_system_overrides(base_settings, system_values)
     if settings.command_retention_days:
         db.prune_commands(settings.command_retention_days)
         db.prune_agent_events(settings.command_retention_days)
@@ -737,6 +752,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.base_settings = base_settings
+    app.state.system_settings_values = system_values
     app.state.db = db
     app.state.notifications = notification_service
     app.state.limiter = LoginRateLimiter()
@@ -1456,6 +1473,217 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "server_time": utcnow_iso(),
             "permissions": _permissions(user),
         }
+
+    def _system_values(database: Database) -> dict[str, Any]:
+        row = database.get_system_settings()
+        values = loads(row["values_json"], {}) if row is not None else {}
+        return values if isinstance(values, dict) else {}
+
+    def _system_payload(request: Request, database: Database) -> dict[str, Any]:
+        row = database.get_system_settings()
+        return serialize_system_settings(
+            request.app.state.base_settings,
+            _system_values(database),
+            updated_at=str(row["updated_at"]) if row is not None else "",
+            updated_by=str(row["updated_by"]) if row is not None else "",
+        )
+
+    @app.get("/api/system/settings")
+    def system_settings_view(
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        del user
+        return _system_payload(request, database)
+
+    @app.patch("/api/system/settings")
+    def update_system_settings(
+        payload: dict[str, Any],
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        current = _system_values(database)
+        try:
+            merged, secrets = normalize_system_patch(
+                request.app.state.base_settings, current, payload
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if "bind_password" in secrets:
+            write_bind_password(request.app.state.base_settings, secrets["bind_password"])
+        database.set_system_settings(merged, user["username"])
+        request.app.state.system_settings_values = merged
+        request.app.state.settings = apply_system_overrides(
+            request.app.state.base_settings, merged
+        )
+        if "ssh_private_key" in secrets:
+            write_ssh_private_key(
+                request.app.state.settings, secrets["ssh_private_key"]
+            )
+        database.audit(
+            actor=user["username"],
+            action="system.settings_updated",
+            target="system",
+            detail={
+                "sections": sorted(key for key in payload if key in {"server", "domain", "ssh"}),
+                "domain_enabled": bool(merged.get("domain", {}).get("enabled")),
+                "ssh_source": merged.get("ssh", {}).get("source", ""),
+                "restart_required": sorted(
+                    key
+                    for key in ("allowed_hosts", "cookie_secure")
+                    if key in payload.get("server", {})
+                ),
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        result = _system_payload(request, database)
+        result["meta"]["restart_required"] = sorted(
+            key
+            for key in ("allowed_hosts", "cookie_secure")
+            if key in (payload.get("server") or {})
+        )
+        return result
+
+    @app.patch("/api/me")
+    def update_me(
+        payload: dict[str, Any],
+        request: Request,
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if user.get("source") == "ad":
+            raise HTTPException(
+                status_code=400,
+                detail="Directory accounts are updated from the domain, not here.",
+            )
+        display_name = payload.get("display_name")
+        email = payload.get("email")
+        if display_name is None and email is None:
+            raise HTTPException(status_code=400, detail="No profile changes were supplied.")
+        if display_name is not None:
+            display_name = str(display_name).strip()
+            if not display_name:
+                raise HTTPException(status_code=400, detail="Display name cannot be empty.")
+            if len(display_name) > 255:
+                raise HTTPException(status_code=400, detail="Display name is too long.")
+        if email is not None:
+            email = str(email).strip()
+            if email and (
+                len(email) > 255
+                or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email)
+            ):
+                raise HTTPException(status_code=400, detail="Enter a valid email address.")
+        row = database.update_user_profile(
+            int(user["id"]), display_name=display_name, email=email
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="User not found.")
+        database.audit(
+            actor=user["username"],
+            action="auth.profile_updated",
+            target=user["username"],
+            detail={"display_name": display_name is not None, "email": email is not None},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return {"user": user_to_dict(row)}
+
+    @app.post("/api/system/ldap/test")
+    def test_system_ldap(
+        payload: dict[str, Any],
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        current = _system_values(database)
+        patch = {"domain": payload.get("domain")} if "domain" in payload else {}
+        try:
+            merged, secrets = normalize_system_patch(
+                request.app.state.base_settings, current, patch
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        domain = merged.get("domain") or {}
+        if not domain.get("enabled"):
+            raise HTTPException(status_code=400, detail="Directory login is disabled.")
+        ldap = build_ldap_settings(
+            request.app.state.base_settings,
+            domain,
+            secrets.get("bind_password"),
+        )
+        if ldap is None:
+            raise HTTPException(status_code=400, detail="Directory login is not configured.")
+        try:
+            result = probe_ldap(ldap, str(payload.get("username") or "").strip())
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        database.audit(
+            actor=user["username"],
+            action="system.ldap_tested",
+            target=ldap.server,
+            detail={"username": bool(payload.get("username")), "entries": result.get("entries", 0)},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return result
+
+    @app.post("/api/system/ssh/test")
+    def test_system_ssh(
+        payload: dict[str, Any],
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        del user
+        current = _system_values(database)
+        patch = {"ssh": payload.get("ssh")} if "ssh" in payload else {}
+        try:
+            merged, _secrets = normalize_system_patch(
+                request.app.state.base_settings, current, patch
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        effective = apply_system_overrides(request.app.state.base_settings, merged)
+        info = ssh_key_info(effective.ssh_key_path)
+        return {
+            **info,
+            "source": effective.ssh_key_source,
+            "system_user": effective.ssh_system_user,
+            "effective_key_path": effective.ssh_key_path,
+            "effective_config_path": effective.ssh_config_path,
+            "config_present": bool(
+                effective.ssh_config_path and Path(effective.ssh_config_path).exists()
+            ),
+        }
+
+    @app.post("/api/system/restart")
+    def restart_for_settings(
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        try:
+            trigger = selfupdate.request_restart(
+                config.update_restart_path,
+                version=__version__,
+                action="settings",
+            )
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503, detail="The restart handoff is not available."
+            ) from exc
+        database.audit(
+            actor=user["username"],
+            action="system.restart_requested",
+            target="sextant",
+            detail={"reason": "settings", "trigger": str(trigger)},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return {"restarting": True, "restart_pending": True}
 
     @app.get("/api/notifications/status")
     def notification_status(
@@ -7948,6 +8176,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     host=payload.host,
                     port=payload.port,
                     user=payload.user,
+                    config_path=config.ssh_config_path,
                 )
             except remote_install.RemoteInstallError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -8665,6 +8894,7 @@ def _run_remote_install_job(
                 watch_services=loads(row["watch_services"], []),
                 wheel_path=wheel_path,
                 log=log_line,
+                config_path=settings.ssh_config_path,
             )
     except Exception as exc:  # job boundary: always record the failure
         error = _redact_remote_text(exc, secrets_to_redact)

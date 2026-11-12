@@ -489,6 +489,13 @@ CREATE TABLE IF NOT EXISTS discovery_settings (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS system_settings (
+    id TEXT PRIMARY KEY CHECK (id = 'system'),
+    values_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS discovery_integrations (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -1088,6 +1095,28 @@ class Database:
                 "SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND is_active = 1"
             ).fetchone()
             return int(row["n"])
+
+    def update_user_profile(
+        self,
+        user_id: int,
+        *,
+        display_name: str | None = None,
+        email: str | None = None,
+    ) -> sqlite3.Row | None:
+        fields: list[str] = []
+        params: list[Any] = []
+        if display_name is not None:
+            fields.append("display_name = ?")
+            params.append(display_name[:255])
+        if email is not None:
+            fields.append("email = ?")
+            params.append(email[:255])
+        if not fields:
+            return self.get_user_by_id(user_id)
+        params.append(user_id)
+        with self.connection() as conn:
+            conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", params)
+            return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
 
     def create_user(
         self,
@@ -3536,6 +3565,28 @@ class Database:
             own.execute(sql, params)
 
     # ---- Discovery ------------------------------------------------------
+
+    def get_system_settings(self) -> sqlite3.Row | None:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM system_settings WHERE id = 'system'"
+            ).fetchone()
+
+    def set_system_settings(self, values: dict[str, Any], actor: str) -> sqlite3.Row:
+        now = utcnow_iso()
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT INTO system_settings (id, values_json, updated_at, updated_by)
+                   VALUES ('system', ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     values_json = excluded.values_json,
+                     updated_at = excluded.updated_at,
+                     updated_by = excluded.updated_by""",
+                (dumps(values), now, actor[:255]),
+            )
+            return conn.execute(
+                "SELECT * FROM system_settings WHERE id = 'system'"
+            ).fetchone()
 
     def get_discovery_settings(self) -> sqlite3.Row | None:
         with self.connection() as conn:

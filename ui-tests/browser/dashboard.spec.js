@@ -46,6 +46,60 @@ for (const theme of THEMES) {
     await scan(page, `updates ${theme} desktop`);
   });
 
+  test(`Settings profile, server, domain, and SSH tabs render in the ${theme} theme`, async ({ page }) => {
+    await login(page, { theme });
+    await page.locator('[data-page="settings"]').click();
+    await expect(page.locator("#page-settings")).toBeVisible();
+    await expect(page.locator("#user-profile-form")).toBeVisible();
+
+    await page.locator("#user-profile-form").locator('input[name="display_name"]').fill("Sextant Admin");
+    await page.locator("#user-profile-form").locator('input[name="email"]').fill("admin@example.test");
+    await page.locator("#user-profile-form").getByRole("button", { name: "Save profile" }).click();
+    await expect(page.locator("#toast-region")).toContainText("Profile updated");
+    await expect(page.locator("#user-name")).toHaveText("Sextant Admin");
+
+    await page.locator('[data-settings-tab="server"]').click();
+    await expect(page.locator("#server-settings-form")).toBeVisible();
+    await expect(page.locator('#server-settings-form input[name="session_hours"]')).not.toHaveValue("");
+    await page.locator('#server-settings-form input[name="session_hours"]').fill("24");
+    await page.locator('#server-settings-form input[name="public_url"]').fill("https://sextant.example.test");
+    await page.locator("#server-settings-form").getByRole("button", { name: "Save server settings" }).click();
+    await expect(page.locator("#toast-region")).toContainText("Server settings saved");
+    await expect(page.locator("#toast-region")).toContainText("Restart");
+
+    await page.locator('[data-settings-tab="domain"]').click();
+    const domainForm = page.locator("#domain-settings-form");
+    await expect(domainForm).toBeVisible();
+    await domainForm.locator('input[name="enabled"]').check();
+    await domainForm.locator('input[name="domain"]').fill("corp.example.com");
+    await domainForm.locator('input[name="server"]').fill("dc1.corp.example.com");
+    await domainForm.locator('input[name="bind_dn"]').fill("CN=svc-sextant,DC=corp,DC=example,DC=com");
+    await domainForm.locator('input[name="bind_password"]').fill("super-secret");
+    await domainForm.locator('input[name="display_name_attr"]').fill("displayName");
+    await page.locator("#domain-test-username").fill("jdoe");
+    await page.locator("#domain-settings-test").click();
+    await expect(page.locator("#domain-test-result")).toContainText("Directory test succeeded");
+    await domainForm.getByRole("button", { name: "Save domain settings" }).click();
+    await expect(page.locator("#toast-region")).toContainText("Domain settings saved");
+
+    await page.locator('[data-settings-tab="ssh"]').click();
+    const sshForm = page.locator("#ssh-settings-form");
+    await expect(sshForm).toBeVisible();
+    await sshForm.locator('textarea[name="private_key"]').fill(
+      "-----BEGIN OPENSSH PRIVATE KEY-----\ndemo\n-----END OPENSSH PRIVATE KEY-----",
+    );
+    await sshForm.getByRole("button", { name: "Save SSH settings" }).click();
+    await expect(page.locator("#toast-region")).toContainText("SSH settings saved");
+    await expect(page.locator("#ssh-key-details")).toContainText("SHA256:demo");
+    await sshForm.locator('select[name="source"]').selectOption("system_user");
+    await expect(page.locator("#ssh-managed-fields")).toBeHidden();
+    await expect(page.locator("#ssh-system-fields")).toBeVisible();
+    await sshForm.locator('select[name="source"]').selectOption("managed");
+
+    await screenshot(page, `settings-${theme}-desktop`, { fullPage: true });
+    await scan(page, `settings ${theme} desktop`);
+  });
+
   test(`Discovery inventory, drawer, and scan panel render in the ${theme} theme`, async ({ page }) => {
     await login(page, { theme });
     await page.locator('[data-page="discovery"]').click();
@@ -393,7 +447,7 @@ test("Ctrl/Cmd+K opens, filters, activates, and closes the command palette", asy
   await page.keyboard.press("Control+k");
   await expect(palette).toBeVisible();
   await expect(input).toBeFocused();
-  await expect(list.getByRole("option")).toHaveCount(15);
+  await expect(list.getByRole("option")).toHaveCount(16);
   await screenshot(page, "command-palette-dark");
 
   await input.fill("studio");

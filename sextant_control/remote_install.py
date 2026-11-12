@@ -50,53 +50,61 @@ def _validate_target(host: str, port: int, user: str) -> None:
         raise RemoteInstallError("SSH user contains invalid characters.")
 
 
-def _ssh_base(key_path: str, host: str, port: int, user: str) -> list[str]:
-    return [
-        "ssh",
-        "-i",
-        key_path,
-        "-p",
-        str(port),
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "GlobalKnownHostsFile=/dev/null",
-        "-o",
-        "LogLevel=ERROR",
-        "-o",
-        "IdentitiesOnly=yes",
-        "-o",
-        "ConnectTimeout=15",
-        f"{user}@{host}",
-    ]
+def _ssh_base(
+    key_path: str, host: str, port: int, user: str, config_path: str = ""
+) -> list[str]:
+    args = ["ssh", "-i", key_path]
+    if config_path:
+        args.extend(["-F", config_path])
+    args.extend(
+        [
+            "-p",
+            str(port),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "ConnectTimeout=15",
+            f"{user}@{host}",
+        ]
+    )
+    return args
 
 
-def _scp_base(key_path: str, port: int) -> list[str]:
-    return [
-        "scp",
-        "-i",
-        key_path,
-        "-P",
-        str(port),
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "GlobalKnownHostsFile=/dev/null",
-        "-o",
-        "LogLevel=ERROR",
-        "-o",
-        "IdentitiesOnly=yes",
-        "-o",
-        "ConnectTimeout=15",
-    ]
+def _scp_base(key_path: str, port: int, config_path: str = "") -> list[str]:
+    args = ["scp", "-i", key_path]
+    if config_path:
+        args.extend(["-F", config_path])
+    args.extend(
+        [
+            "-P",
+            str(port),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "ConnectTimeout=15",
+        ]
+    )
+    return args
 
 
 def _run(args: list[str], *, input_text: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -126,7 +134,7 @@ def _key_check(key_path: str) -> None:
     path = Path(key_path)
     if not path.is_file():
         raise RemoteInstallError(
-            f"SSH key not found at {key_path}. Place one at SEXTANT_SSH_KEY_PATH or the default data/ssh/install_key."
+            f"SSH key not found at {key_path}. Upload a key in Settings -> SSH or set SEXTANT_SSH_KEY_PATH."
         )
     if os.name != "nt":
         mode = path.stat().st_mode
@@ -141,6 +149,7 @@ def test_connection(
     port: int,
     user: str,
     timeout: int = 60,
+    config_path: str = "",
 ) -> str:
     _validate_target(host, port, user)
     _require_binaries()
@@ -154,7 +163,7 @@ python3 --version
 echo "sudo=passwordless systemd=present"
 """
     result = _run(
-        [*_ssh_base(key_path, host, port, user), "bash -s"],
+        [*_ssh_base(key_path, host, port, user, config_path), "bash -s"],
         input_text=script,
         timeout=timeout,
     )
@@ -178,6 +187,7 @@ def run_install(
     wheel_path: str,
     log: Callable[[str], None] = lambda _line: None,
     timeout: int = 300,
+    config_path: str = "",
 ) -> None:
     _validate_target(host, port, user)
     _require_binaries()
@@ -189,10 +199,19 @@ def run_install(
     remote_wheel = f"/tmp/sextant-{wheel.name}"
     remote_unit = "/tmp/sextant-agent.service"
     log(f"Checking prerequisites on {user}@{host}:{port}")
-    log(test_connection(key_path=key_path, host=host, port=port, user=user, timeout=60))
+    log(
+        test_connection(
+            key_path=key_path,
+            host=host,
+            port=port,
+            user=user,
+            timeout=60,
+            config_path=config_path,
+        )
+    )
 
     log("Uploading agent wheel and service unit")
-    scp = [*_scp_base(key_path, port)]
+    scp = [*_scp_base(key_path, port, config_path)]
     uploaded = _run([*scp, str(wheel), f"{user}@{host}:{remote_wheel}"], timeout=120)
     if uploaded.returncode != 0:
         raise RemoteInstallError((uploaded.stderr or uploaded.stdout)[-2000:])
@@ -243,7 +262,7 @@ rm -f "$WHEEL" "$UNIT"
 """
     log("Installing and enrolling the agent")
     result = _run(
-        [*_ssh_base(key_path, host, port, user), "bash -s"],
+        [*_ssh_base(key_path, host, port, user, config_path), "bash -s"],
         input_text=script,
         timeout=timeout,
     )

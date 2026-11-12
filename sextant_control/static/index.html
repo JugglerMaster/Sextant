@@ -125,6 +125,10 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.6-2.8 8-7 10-4.2-2-7-5.4-7-10V6z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M9 12l2 2 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>Security</span>
         </button>
+        <button class="nav-item" data-page="settings" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M19 13.5l1.4 1.1-1.8 3.1-1.8-.7a7 7 0 0 1-1.6 1l-.3 1.9h-3.6l-.3-1.9a7 7 0 0 1-1.6-1l-1.8.7-1.8-3.1L9 13.5a7 7 0 0 1 0-1.9L7.6 10.5l1.8-3.1 1.8.7a7 7 0 0 1 1.6-1l.3-1.9h3.6l.3 1.9a7 7 0 0 1 1.6 1l1.8-.7 1.8 3.1-1.4 1.1a7 7 0 0 1 0 1.9z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+          <span>Settings</span>
+        </button>
       </nav>
       <div class="sidebar-foot">
         <div class="user-chip">
@@ -738,6 +742,152 @@
           <p class="form-hint" id="updates-hint">Updates are staged and health-checked before the stable current symlink is switched. The server restarts through a root-owned systemd handoff.</p>
           <p class="form-error" id="updates-error" role="alert"></p>
         </article>
+      </section>
+
+      <section class="page" id="page-settings" hidden>
+        <nav class="tabs settings-tabs" id="settings-tabs" aria-label="Settings sections">
+          <button class="tab is-active" data-settings-tab="profile" type="button">Profile</button>
+          <button class="tab nav-admin" data-settings-tab="server" type="button">Server</button>
+          <button class="tab nav-admin" data-settings-tab="domain" type="button">Domain &amp; directory</button>
+          <button class="tab nav-admin" data-settings-tab="ssh" type="button">SSH</button>
+        </nav>
+
+        <div class="settings-tab-panel" data-settings-panel="profile">
+          <div class="panel-grid">
+            <article class="panel">
+              <div class="panel-head"><div><p class="eyebrow">Account</p><h2>Your profile</h2></div></div>
+              <form id="user-profile-form" class="form-stack">
+                <label class="field"><span>Username</span><input id="user-profile-username" disabled></label>
+                <label class="field"><span>Display name</span><input name="display_name" maxlength="255" required></label>
+                <label class="field"><span>Email</span><input name="email" type="email" maxlength="255" placeholder="you@example.com"></label>
+                <p class="form-hint" id="user-profile-source-hint"></p>
+                <p class="form-error" id="user-profile-error" role="alert"></p>
+                <button class="button button-primary" type="submit">Save profile</button>
+              </form>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><p class="eyebrow">Security</p><h2>Password and sessions</h2></div></div>
+              <dl class="detail-list" id="settings-account-details"></dl>
+              <div class="section-toolbar">
+                <button class="button button-secondary" id="settings-open-security" type="button">Change password</button>
+              </div>
+              <p class="form-hint">Directory accounts are managed by Active Directory / Samba. Local accounts can change their password on the Security page.</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="settings-tab-panel" data-settings-panel="server" hidden>
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">System</p><h2>Main server</h2></div>
+              <span class="form-hint" id="server-settings-status" aria-live="polite"></span>
+            </div>
+            <form id="server-settings-form" class="form-stack">
+              <div class="form-grid">
+                <label class="field"><span>Public URL</span><input name="public_url" maxlength="1024" placeholder="https://sextant.example.com"></label>
+                <label class="field"><span>Allowed hosts</span><input name="allowed_hosts" maxlength="2000" placeholder="sextant.example.com, 192.168.1.194"></label>
+                <label class="field"><span>Session length (hours)</span><input name="session_hours" type="number" min="1" max="8784"></label>
+                <label class="field"><span>Offline after (seconds)</span><input name="offline_after_seconds" type="number" min="15" max="86400"></label>
+                <label class="field"><span>Enrollment token lifetime (minutes)</span><input name="enrollment_ttl_minutes" type="number" min="1" max="10080"></label>
+              </div>
+              <label class="checkbox-row"><input type="checkbox" name="cookie_secure"><span>Require HTTPS for the session cookie</span></label>
+              <label class="checkbox-row"><input type="checkbox" name="trust_proxy"><span>Trust reverse-proxy forwarding headers</span></label>
+              <p class="form-hint">Public URL, allowed hosts, and secure-cookie changes take full effect after a restart. Session length, offline threshold, enrollment lifetime, and proxy trust apply immediately.</p>
+              <p class="form-hint" id="server-settings-meta"></p>
+              <p class="form-error" id="server-settings-error" role="alert"></p>
+              <div class="section-toolbar">
+                <button class="button button-primary" type="submit">Save server settings</button>
+                <button class="button button-secondary" id="server-settings-restart" type="button">Restart server</button>
+              </div>
+            </form>
+          </article>
+        </div>
+
+        <div class="settings-tab-panel" data-settings-panel="domain" hidden>
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">Authentication</p><h2>Domain &amp; directory</h2></div>
+              <span class="form-hint" id="domain-settings-status" aria-live="polite"></span>
+            </div>
+            <form id="domain-settings-form" class="form-stack">
+              <label class="checkbox-row"><input type="checkbox" name="enabled"><span>Enable Active Directory / Samba / LDAP sign-in</span></label>
+              <div class="form-grid">
+                <label class="field"><span>Domain</span><input name="domain" maxlength="255" placeholder="corp.example.com"></label>
+                <label class="field"><span>Directory server</span><input name="server" maxlength="255" placeholder="dc1.corp.example.com"></label>
+                <label class="field"><span>Port</span><input name="port" type="number" min="1" max="65535"></label>
+                <label class="field"><span>Base DN</span><input name="base_dn" maxlength="512" placeholder="DC=corp,DC=example,DC=com"></label>
+                <label class="field"><span>Bind DN</span><input name="bind_dn" maxlength="512" placeholder="CN=svc-sextant,OU=Service Accounts,DC=corp,DC=example,DC=com"></label>
+                <label class="field"><span>Bind password</span><input name="bind_password" type="password" maxlength="1024" autocomplete="new-password" placeholder="leave blank to keep the saved password"></label>
+                <label class="field"><span>User filter</span><input name="user_filter" maxlength="512" value="(sAMAccountName={username})"></label>
+                <label class="field"><span>Timeout (seconds)</span><input name="timeout" type="number" min="2" max="60"></label>
+              </div>
+              <label class="checkbox-row"><input type="checkbox" name="use_ssl"><span>Use LDAPS / StartTLS (TLS)</span></label>
+              <label class="checkbox-row"><input type="checkbox" name="clear_bind_password"><span>Clear the saved bind password</span></label>
+              <label class="field"><span>CA certificate path (optional)</span><input name="ca_cert" maxlength="1024" placeholder="/etc/ssl/certs/corp-root-ca.pem"></label>
+              <div class="section-head">
+                <div><p class="eyebrow">Attribute mapping</p><h3>Read from the directory</h3></div>
+              </div>
+              <div class="form-grid">
+                <label class="field"><span>Username attribute</span><input name="username_attr" maxlength="128" value="sAMAccountName"></label>
+                <label class="field"><span>Display name attribute</span><input name="display_name_attr" maxlength="128" value="displayName"></label>
+                <label class="field"><span>Email attribute</span><input name="email_attr" maxlength="128" value="mail"></label>
+                <label class="field"><span>Group attribute</span><input name="group_attr" maxlength="128" value="memberOf"></label>
+              </div>
+              <div class="section-head">
+                <div><p class="eyebrow">Authorization</p><h3>Group to role mapping</h3></div>
+              </div>
+              <label class="field"><span>Admin groups (comma or newline separated DNs)</span><textarea name="admin_groups" rows="3" maxlength="4000"></textarea></label>
+              <label class="field"><span>Operator groups</span><textarea name="operator_groups" rows="3" maxlength="4000"></textarea></label>
+              <label class="field"><span>Viewer groups</span><textarea name="viewer_groups" rows="3" maxlength="4000"></textarea></label>
+              <label class="field"><span>Default role</span><select name="default_role"><option value="viewer">Viewer</option><option value="operator">Operator</option><option value="admin">Admin</option></select></label>
+              <p class="form-hint" id="domain-settings-hint"></p>
+              <p class="form-error" id="domain-settings-error" role="alert"></p>
+              <div class="section-toolbar">
+                <button class="button button-primary" type="submit">Save domain settings</button>
+                <button class="button button-secondary" id="domain-settings-test" type="button">Test directory</button>
+              </div>
+              <label class="field"><span>Test lookup username (optional)</span><input id="domain-test-username" maxlength="128" placeholder="jdoe"></label>
+              <div class="callout" id="domain-test-result" hidden></div>
+            </form>
+          </article>
+        </div>
+
+        <div class="settings-tab-panel" data-settings-panel="ssh" hidden>
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">Discovery onboarding</p><h2>SSH key</h2></div>
+              <span class="form-hint" id="ssh-settings-status" aria-live="polite"></span>
+            </div>
+            <form id="ssh-settings-form" class="form-stack">
+              <label class="field"><span>Key source</span>
+                <select name="source">
+                  <option value="managed">Sextant-managed private key</option>
+                  <option value="system_user">Use a local system user's SSH configuration</option>
+                </select>
+              </label>
+              <div id="ssh-managed-fields">
+                <label class="field"><span>Private key path</span><input name="key_path" maxlength="1024" placeholder="default: data/ssh/install_key"></label>
+                <label class="field"><span>Upload or paste a private key</span><input id="ssh-key-file" type="file" accept=".pem,.key,id_rsa,id_ed25519"></label>
+                <label class="field"><span>Or paste the private key</span><textarea name="private_key" rows="5" maxlength="65536" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
+                <label class="checkbox-row"><input type="checkbox" name="clear_key"><span>Remove the stored key</span></label>
+              </div>
+              <div id="ssh-system-fields" hidden>
+                <label class="field"><span>System user</span><input name="system_user" maxlength="64" placeholder="root, sextant, dadisc01"></label>
+                <label class="field"><span>Key path override (optional)</span><input name="key_path_override" maxlength="1024" placeholder="default: that user's ~/.ssh/id_ed25519"></label>
+                <label class="field"><span>SSH config path override (optional)</span><input name="config_path" maxlength="1024" placeholder="default: that user's ~/.ssh/config"></label>
+                <p class="form-hint">Sextant only reads that user's key and config. It never copies or returns the private key.</p>
+              </div>
+              <label class="checkbox-row"><input type="checkbox" name="install_enabled"><span>Allow SSH-based remote install and discovery onboarding</span></label>
+              <p class="form-hint">The key is used by remote install and for onboarding discovered Linux devices. Key files are kept at mode 0600.</p>
+              <dl class="detail-list" id="ssh-key-details"></dl>
+              <p class="form-error" id="ssh-settings-error" role="alert"></p>
+              <div class="section-toolbar">
+                <button class="button button-primary" type="submit">Save SSH settings</button>
+                <button class="button button-secondary" id="ssh-settings-test" type="button">Test key</button>
+              </div>
+            </form>
+          </article>
+        </div>
       </section>
 
       <section class="page" id="page-security" hidden>

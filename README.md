@@ -66,7 +66,8 @@ way.
 
 - **Authentication and roles** — local accounts with scrypt password hashes, signed HttpOnly session cookies, CSRF protection, login rate limiting, failed-login auditing, and `admin` / `operator` / `viewer` roles.
 - **Session and user administration** — server-side session registry with IP/user-agent, single-session and revoke-all controls, user disable/enable, and admin password reset. Password changes, admin resets, disabling a user, and revoke-all invalidate the relevant sessions.
-- **Active Directory / Samba AD** — optional LDAP(S) bind authentication with group-to-role mapping and per-user provisioning.
+- **Active Directory / Samba AD** — optional LDAP(S) bind authentication with group-to-role mapping and per-user provisioning. The **Settings → Domain & directory** tab configures the server, bind account, user filter, attribute mapping, and role groups from the UI; see [SYSTEM_SETTINGS.md](docs/SYSTEM_SETTINGS.md).
+- **Settings** — a signed-in profile tab and admin **Server**, **Domain & directory**, and **SSH** tabs. Values are stored in SQLite and layered over the environment, so the UI can change public URL, session/offline thresholds, LDAP/AD attributes, and the SSH key used for discovery onboarding/remote install without editing env files.
 - **Cross-platform agents** — Linux and Windows agents with outbound-only heartbeat/command polling and stable machine identity.
 - **Wake-on-LAN** — server-side magic packets for agents (using their reported MAC) and for saved agent-less targets.
 - **Discovery (D1–D6)** — default-off, CIDR-scoped inventory of unmanaged devices. Operators record an audited authorization acknowledgement, choose an allowlisted private scope, and run passive neighbour/DNS/OUI/SSDP collection plus opt-in TCP/banner/TLS fingerprinting. The page shows fleet counts, device types, open ports, linked agents/wake targets, and deduplicated new-device/new-port/service/identity/went-dark events. Scans run in a bounded background worker with a host cap, rate limit, progress, and cancellation. An eligible Linux agent can also be selected as the scan source for its own VLAN; it receives a validated `discovery.scan` over the existing outbound command channel and reports bounded results back. Local `allow_discovery`, profile `modules.discovery`, per-agent policy, and `SEXTANT_DISCOVERY_AGENT_RELAY` must all agree. D4 adds exposure/conflict/segment analysis, bounded admin CSV/JSON export, and wake verification. D5 adds promotion to a wake target, a one-time Linux install command, a manual Windows elevated-PowerShell command, or an existing-agent link. D6 adds Nmap/arp-scan/DHCP-lease/JSON imports, bounded stdlib SNMP v2c polling, and read-only UniFi/RouterOS/OPNsense/Proxmox/ESXi adapters with write-only memory secrets. Live vendor connectors are marked unverified; ESXi is fixture-only.
@@ -265,6 +266,7 @@ See [deploy/sextant.env.example](deploy/sextant.env.example) for a deployment te
 - [Code and dependency review](docs/CODE_REVIEW.md)
 - [Security model and hardening](docs/SECURITY.md)
 - [Active Directory / Samba AD authentication](docs/AD_LDAP.md)
+- [System settings (server, domain, SSH)](docs/SYSTEM_SETTINGS.md)
 - [Samba AD domain setup](docs/SAMBA_AD.md)
 - [Domain management plan](docs/DOMAIN_MANAGEMENT.md)
 - [HTTP API](docs/API.md)

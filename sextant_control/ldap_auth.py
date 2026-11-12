@@ -111,10 +111,17 @@ def authenticate_ldap(
 
         safe_username = escape_filter_chars(username)
         search_filter = settings.user_filter.replace("{username}", safe_username)
+        attributes = [
+            settings.display_name_attr,
+            "cn",
+            settings.email_attr,
+            settings.username_attr,
+            settings.group_attr,
+        ]
         service.search(
             search_base=settings.base_dn,
             search_filter=search_filter,
-            attributes=["displayName", "cn", "mail", "sAMAccountName", "memberOf"],
+            attributes=list(dict.fromkeys(attributes)),
             size_limit=2,
         )
         entries = list(getattr(service, "entries", []) or [])
@@ -124,9 +131,13 @@ def authenticate_ldap(
 
         entry = entries[0]
         attributes = getattr(entry, "entry_attributes_as_dict", {}) or {}
-        member_of = _values(_attr(attributes, "memberOf"))
-        display_name = (_values(_attr(attributes, "displayName")) or _values(_attr(attributes, "cn")) or (username,))[0]
-        email = (_values(_attr(attributes, "mail")) or ("",))[0]
+        member_of = _values(_attr(attributes, settings.group_attr))
+        display_name = (
+            _values(_attr(attributes, settings.display_name_attr))
+            or _values(_attr(attributes, "cn"))
+            or (username,)
+        )[0]
+        email = (_values(_attr(attributes, settings.email_attr)) or ("",))[0]
 
         user_dn = getattr(entry, "entry_dn", None)
         if not user_dn:
@@ -170,6 +181,89 @@ def authenticate_ldap(
         # exception: a transport/library message must never be able to leak
         # the supplied password into a traceback or service log.
         raise RuntimeError(f"LDAP authentication failed: {type(exc).__name__}") from None
+
+
+def probe_ldap(
+    settings: LdapSettings,
+    username: str = "",
+    ldap_module: Any | None = None,
+) -> dict[str, Any]:
+    """Validate the service bind and optionally look up one user.
+
+    This never accepts or returns a user password; it is an admin diagnostic
+    for the saved directory configuration.
+    """
+    if ldap_module is None:
+        try:
+            import ldap3 as ldap_module
+        except ImportError as exc:
+            raise RuntimeError(
+                "The optional ldap3 dependency is not installed. Install it with "
+                "`pip install 'sextant[ldap]'`."
+            ) from exc
+    try:
+        server_kwargs: dict[str, Any] = {
+            "port": settings.effective_port,
+            "use_ssl": settings.use_ssl,
+            "get_info": getattr(ldap_module, "NONE", None),
+            "connect_timeout": settings.timeout,
+        }
+        if settings.use_ssl:
+            tls_kwargs: dict[str, Any] = {"validate": ssl.CERT_REQUIRED}
+            if settings.ca_cert:
+                tls_kwargs["ca_certs_file"] = settings.ca_cert
+            server_kwargs["tls"] = ldap_module.Tls(**tls_kwargs)
+        server = ldap_module.Server(settings.server, **server_kwargs)
+        service = ldap_module.Connection(
+            server,
+            user=settings.bind_dn,
+            password=settings.bind_password,
+            auto_bind=True,
+            receive_timeout=settings.timeout,
+        )
+        if not getattr(service, "bound", False):
+            raise RuntimeError("LDAP service bind failed")
+        if username:
+            search_filter = settings.user_filter.replace(
+                "{username}", escape_filter_chars(username)
+            )
+            attributes = [
+                settings.display_name_attr,
+                "cn",
+                settings.email_attr,
+                settings.username_attr,
+                settings.group_attr,
+            ]
+        else:
+            search_filter = "(objectClass=*)"
+            attributes = [settings.username_attr]
+        service.search(
+            search_base=settings.base_dn,
+            search_filter=search_filter,
+            attributes=list(dict.fromkeys(attributes)),
+            size_limit=5,
+        )
+        entries = list(getattr(service, "entries", []) or [])
+        sample: dict[str, Any] = {}
+        for entry in entries[:3]:
+            values = getattr(entry, "entry_attributes_as_dict", {}) or {}
+            sample[getattr(entry, "entry_dn", "") or "entry"] = {
+                key: _values(value)[:3] for key, value in values.items()
+            }
+        _safe_unbind(service)
+        return {
+            "bound": True,
+            "server": settings.server,
+            "port": settings.effective_port,
+            "base_dn": settings.base_dn,
+            "entries": len(entries),
+            "filter": search_filter,
+            "sample": sample,
+        }
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"LDAP probe failed: {type(exc).__name__}") from None
 
 
 def _safe_unbind(connection: Any) -> None:
