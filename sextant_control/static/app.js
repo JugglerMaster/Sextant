@@ -1351,9 +1351,14 @@ function cadenceLabel(seconds) {
   return `${Math.round(value)}s cadence`;
 }
 
+function heartbeatSecondsFor(agent) {
+  const value = Number(profileForAgent(agent)?.settings?.heartbeat_seconds || 30);
+  return value > 0 ? value : 30;
+}
+
 function staleInfo(agent) {
   const profile = profileForAgent(agent);
-  const heartbeatSeconds = profile?.settings?.heartbeat_seconds || 30;
+  const heartbeatSeconds = heartbeatSecondsFor(agent);
   const inventorySeconds = profile?.settings?.collection?.service_inventory_seconds || 21600;
   const now = Date.now();
   const lastSeen = Date.parse(agent.last_seen || "");
@@ -3092,7 +3097,7 @@ function renderRemote(body) {
     output,
   );
   body.append(
-    section("Remote control", "Shell", form, terminal, h("p", { class: "form-hint" }, "Commands are queued until the agent's next heartbeat, typically within 30 seconds. Ctrl/Cmd + Enter runs. Every command is audited.")),
+    section("Remote control", "Shell", form, terminal, h("p", { class: "form-hint" }, `Commands are queued until the agent's next heartbeat, typically within ${heartbeatSecondsFor(agent)} seconds. Ctrl/Cmd + Enter runs. Every command is audited.`)),
   );
   if (!shellAllowed) body.append(h("div", { class: "alert-item" }, h("span", { class: "alert-mark" }, "!"), "Remote shell is blocked by server agent policy."));
   if (!agent.online) body.append(h("div", { class: "alert-item" }, h("span", { class: "alert-mark" }, "!"), "This agent is offline. Wake it or wait for its next heartbeat."));
@@ -3150,7 +3155,7 @@ async function runRemoteCommand(agent, shell, command) {
       body: { kind: "shell", args: { shell, command: text, timeout: 60 } },
     });
     term.lines.push({ type: "cmd", text: `${shell === "powershell" ? "PS" : shell === "cmd" ? "CMD" : "$"} ${text}` });
-    term.lines.push({ type: "note", text: "Queued for the agent's next heartbeat." });
+    term.lines.push({ type: "note", text: `Queued for the agent's next heartbeat (up to ${heartbeatSecondsFor(agent)}s).` });
     term.pending = created.id;
     term.status = "Queued";
     renderTerminalDom(agent);
@@ -3222,7 +3227,11 @@ function applyCommandUpdate(agentId, commandId, command) {
     renderMinimizedDrawers();
     return;
   }
-  term.status = command.status === "dispatched" ? "Running on agent" : "Queued for heartbeat";
+  const commandAgent = (state.dashboard?.agents || []).find((item) => item.id === agentId);
+  term.status =
+    command.status === "dispatched"
+      ? "Running on agent"
+      : `Queued for heartbeat (up to ${heartbeatSecondsFor(commandAgent)}s)`;
   if (state.detailAgent?.id === agentId && state.detailTab === "remote") renderTerminalDom(state.detailAgent);
   renderMinimizedDrawers();
 }
@@ -7162,7 +7171,7 @@ async function submitDomainJoin(form) {
     flush_dns: form.elements.flush_dns?.checked !== false,
   };
   data.pending.join = true;
-  data.log.join = "Join command queued for the agent's next heartbeat.";
+  data.log.join = `Join command queued for the agent's next heartbeat (up to ${heartbeatSecondsFor(data.agent)}s).`;
   renderDomainJoinLog();
   updateDomainJoinButtons();
   try {
@@ -7192,7 +7201,7 @@ async function checkAgentDomainStatus(agent) {
   }
   setText("domain-join-error", "");
   data.pending.status = true;
-  data.log.status = "Status command queued for the agent's next heartbeat.";
+  data.log.status = `Status command queued for the agent's next heartbeat (up to ${heartbeatSecondsFor(data.agent)}s).`;
   renderDomainJoinLog();
   updateDomainJoinButtons();
   try {
@@ -7223,7 +7232,7 @@ function watchAgentDomainCommand(commandId, channel = "join") {
       const parts = [
         `Status: ${command.status || "unknown"}`,
         command.status === "queued"
-          ? "Waiting for the agent's next heartbeat (up to ~30 seconds)."
+          ? `Waiting for the agent's next heartbeat (up to ${heartbeatSecondsFor(data.agent)} seconds).`
           : "",
         command.stdout ? String(command.stdout).trim() : "",
         command.stderr ? String(command.stderr).trim() : "",
