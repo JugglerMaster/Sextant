@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -260,6 +261,15 @@ def stage_venv(
             500,
         )
     pip = _venv_bin(venv_dir, "pip")
+    # Carry installed optional extras into the new release venv. The server
+    # can only inspect its own environment, which is exactly what we want.
+    extras: list[str] = []
+    for module, requirement in (
+        ("ldap3", "ldap3>=2.9,<3"),
+        ("winrm", "pywinrm>=0.5,<1"),
+    ):
+        if importlib.util.find_spec(module) is not None:
+            extras.append(requirement)
     installed = _run(
         [
             str(pip),
@@ -267,6 +277,7 @@ def stage_venv(
             "--disable-pip-version-check",
             "--no-input",
             str(wheel),
+            *extras,
         ],
         timeout=timeout,
     )

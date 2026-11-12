@@ -1612,7 +1612,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         config: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         current = _system_values(database)
-        patch = {"domain": payload.get("domain")} if "domain" in payload else {}
+        if "domain" in payload:
+            patch = {"domain": payload["domain"]}
+        else:
+            domain = current.get("domain") or serialize_system_settings(
+                request.app.state.base_settings, current
+            ).get("domain", {})
+            patch = {"domain": domain}
         try:
             merged, secrets = normalize_system_patch(
                 request.app.state.base_settings, current, patch

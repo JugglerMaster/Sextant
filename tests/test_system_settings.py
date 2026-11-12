@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import stat
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from sextant_control.config import DiscoverySettings, Settings
+from sextant_control.config import DiscoverySettings, LdapSettings, Settings
 from sextant_control.security import hash_password
 from sextant_control.server import create_app
 from tests.helpers import ADMIN_PASSWORD, headers, login
@@ -56,6 +57,37 @@ def test_ldap_group_dns_keep_their_commas(tmp_path):
     assert settings.ldap.operator_groups == (
         "CN=RC Operators,OU=Groups,DC=corp,DC=example,DC=com",
     )
+
+
+def test_ldap_test_uses_environment_configuration_before_first_save(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    settings = replace(
+        settings,
+        ldap=LdapSettings(
+            server="dc1.corp.example.com",
+            base_dn="DC=corp,DC=example,DC=com",
+            bind_dn="CN=svc,DC=corp,DC=example,DC=com",
+            bind_password="secret",
+            use_ssl=True,
+            port=636,
+            admin_groups=("CN=Admins,OU=Groups,DC=corp,DC=example,DC=com",),
+        ),
+    )
+    captured = {}
+
+    def fake_probe(ldap, username=""):
+        captured["server"] = ldap.server
+        captured["username"] = username
+        return {"bound": True, "server": ldap.server, "port": ldap.effective_port, "entries": 1}
+
+    monkeypatch.setattr("sextant_control.server.probe_ldap", fake_probe)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        admin = login(client)
+        response = client.post("/api/system/ldap/test", json={}, headers=headers(admin))
+        assert response.status_code == 200, response.text
+        assert response.json()["bound"] is True
+        assert captured["server"] == "dc1.corp.example.com"
 
 
 def test_system_settings_persist_and_apply_without_restart(tmp_path):
