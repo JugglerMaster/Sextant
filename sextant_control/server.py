@@ -28,6 +28,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
 from . import remote_install
+from . import selfupdate
 from . import updates
 from . import windows_remote
 from .config import Settings
@@ -113,6 +114,7 @@ from .models import (
     RemoteInstallIn,
     SavedViewIn,
     StorePackageIn,
+    UpdateApplyIn,
     UserCreateIn,
     UserUpdateIn,
     WakeTargetIn,
@@ -425,6 +427,10 @@ def _public_settings(settings: Settings) -> dict[str, Any]:
         "windows_install_enabled": settings.windows_install_enabled,
         "version": __version__,
         "public_url": settings.public_url,
+        "update": {
+            "check_interval_hours": settings.update_check_hours,
+            "feed_configured": bool(settings.update_feed),
+        },
         "notifications": {
             "enabled": settings.notify_enabled,
             "telegram_enabled": settings.telegram_enabled,
@@ -7304,22 +7310,205 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         del user
         return {**database.store_stats(), "bytes": store.total_bytes(), "max_bytes": store.max_total_bytes}
 
-    @app.get("/api/update/status")
-    def update_status(
-        force: bool = False,
-        user: dict[str, Any] = Depends(require_admin),
-        config: Settings = Depends(get_settings),
-    ) -> dict[str, Any]:
-        del user
+    def _update_status_payload(data: dict[str, Any], config: Settings) -> dict[str, Any]:
+        return updates.decorate_status(
+            data,
+            check_interval_hours=config.update_check_hours,
+            state=selfupdate.read_state(config.update_state_path),
+            restart_pending=selfupdate.restart_pending(config.update_restart_path),
+        )
+
+    def _check_updates(
+        force: bool,
+        *,
+        user: dict[str, Any],
+        request: Request,
+        config: Settings,
+        database: Database,
+        action: str,
+    ) -> tuple[dict[str, Any], bool]:
         if not config.update_feed:
-            return updates.check_update("")
+            return updates.check_update(""), False
         cache = app.state.update_cache
         now = time.monotonic()
         ttl = config.update_check_hours * 3600
         if force or cache["data"] is None or now - cache["at"] > ttl:
-            cache["data"] = updates.check_update(config.update_feed)
+            data = updates.check_update(config.update_feed)
+            cache["data"] = data
             cache["at"] = now
-        return cache["data"]
+            database.audit(
+                user["username"],
+                action,
+                updates.sanitize_feed(config.update_feed),
+                {
+                    "latest_version": data.get("latest_version", ""),
+                    "update_available": bool(data.get("update_available")),
+                    "feed_state": data.get("feed_state", ""),
+                    "error": updates.sanitize_error(data.get("error", "")),
+                },
+                ip=client_ip(request, config.trust_proxy),
+            )
+            return data, True
+        return cache["data"], False
+
+    @app.get("/api/update/status")
+    def update_status(
+        request: Request,
+        force: bool = False,
+        user: dict[str, Any] = Depends(require_admin),
+        config: Settings = Depends(get_settings),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        data, _checked = _check_updates(
+            force,
+            user=user,
+            request=request,
+            config=config,
+            database=database,
+            action="update.check",
+        )
+        return _update_status_payload(data, config)
+
+    @app.post("/api/update/check")
+    def update_check_now(
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        config: Settings = Depends(get_settings),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        data, _checked = _check_updates(
+            True,
+            user=user,
+            request=request,
+            config=config,
+            database=database,
+            action="update.check_now",
+        )
+        return {**_update_status_payload(data, config), "checked_now": True}
+
+    @app.post("/api/update/apply")
+    def update_apply(
+        payload: UpdateApplyIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        config: Settings = Depends(get_settings),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        target = str(payload.version or "").strip().lstrip("vV")
+
+        def reject(status_code: int, detail: str) -> None:
+            database.audit(
+                user["username"],
+                "update.apply",
+                target,
+                {
+                    "status": "rejected",
+                    "error": updates.sanitize_error(detail),
+                },
+                ip=client_ip(request, config.trust_proxy),
+            )
+            raise HTTPException(status_code=status_code, detail=detail)
+
+        if not config.update_feed:
+            reject(409, "No update feed is configured.")
+        data, _checked = _check_updates(
+            True,
+            user=user,
+            request=request,
+            config=config,
+            database=database,
+            action="update.check",
+        )
+        decorated = _update_status_payload(data, config)
+        if not decorated.get("update_available"):
+            reject(409, "No newer release is available.")
+        latest = str(decorated.get("latest_version") or "")
+        if updates.parse_version(target) != updates.parse_version(latest):
+            reject(
+                409,
+                f"Target version {target or '(empty)'} is not the latest available release ({latest}).",
+            )
+        if updates.parse_version(target) <= updates.parse_version(__version__):
+            reject(409, "That version is already installed.")
+        if not decorated.get("apply_available"):
+            reject(
+                409,
+                str(decorated.get("apply_disabled_reason") or "The update cannot be applied."),
+            )
+        try:
+            result = selfupdate.apply_update(
+                decorated,
+                version=target,
+                release_root=config.update_release_path,
+                current_link=config.update_current_path,
+                trigger_path=config.update_restart_path,
+                state_path=config.update_state_path,
+                max_bytes=config.update_download_max_mb * 1024 * 1024,
+            )
+        except selfupdate.UpdateError as exc:
+            database.audit(
+                user["username"],
+                "update.apply",
+                target,
+                {
+                    "status": "failed",
+                    "error": updates.sanitize_error(exc),
+                },
+                ip=client_ip(request, config.trust_proxy),
+            )
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        database.audit(
+            user["username"],
+            "update.apply",
+            target,
+            {
+                "status": result.get("status", ""),
+                "previous_version": result.get("previous_version", ""),
+                "sha256": result.get("sha256", ""),
+                "size": result.get("size", 0),
+                "restart_requested": bool(result.get("restart_requested")),
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return {**result, "update": _update_status_payload(data, config)}
+
+    @app.post("/api/update/rollback")
+    def update_rollback(
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        config: Settings = Depends(get_settings),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        try:
+            result = selfupdate.rollback_update(
+                release_root=config.update_release_path,
+                current_link=config.update_current_path,
+                trigger_path=config.update_restart_path,
+                state_path=config.update_state_path,
+            )
+        except selfupdate.UpdateError as exc:
+            database.audit(
+                user["username"],
+                "update.rollback",
+                "",
+                {"status": "failed", "error": updates.sanitize_error(exc)},
+                ip=client_ip(request, config.trust_proxy),
+            )
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        database.audit(
+            user["username"],
+            "update.rollback",
+            str(result.get("version") or ""),
+            {
+                "status": result.get("status", ""),
+                "rolled_back_from": result.get("rolled_back_from", ""),
+                "restart_requested": bool(result.get("restart_requested")),
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        cached = app.state.update_cache.get("data")
+        data = cached if isinstance(cached, dict) else updates.check_update("")
+        return {**result, "update": _update_status_payload(data, config)}
 
     @app.get("/api/agent/{agent_id}/update")
     def agent_update(

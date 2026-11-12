@@ -541,6 +541,41 @@ const discoveryAgents = [
 ];
 let discoveryActiveScan = null;
 
+const updateAsset = {
+  name: "sextant-9.9.9-py3-none-any.whl",
+  size: 1048576,
+  url: "https://example.test/sextant-9.9.9-py3-none-any.whl",
+  sha256: "a".repeat(64),
+  arch: "",
+  kind: "wheel",
+  version: "9.9.9",
+};
+const updateStatus = {
+  enabled: true,
+  feed: "github:owner/repo",
+  feed_kind: "github",
+  feed_state: "ok",
+  update_available: true,
+  current_version: "0.3.0",
+  latest_version: "9.9.9",
+  url: "https://example.test/releases",
+  notes: "Release notes for 9.9.9",
+  published_at: "2026-11-06T08:00:00Z",
+  assets: [updateAsset],
+  selected_asset: updateAsset,
+  hash_available: true,
+  apply_available: true,
+  apply_disabled_reason: "",
+  checked_at: "2026-11-06T08:00:00Z",
+  last_checked: "2026-11-06T08:00:00Z",
+  check_interval_hours: 24,
+  rollback_available: false,
+  previous_version: "",
+  installed_version: "",
+  restart_pending: false,
+  error: "",
+};
+
 const responses = {
   "/api/auth/config": { status: 200, body: { ldap_enabled: false, version: "0.3.0", public_url: "" } },
   "/api/me": { status: 401, body: { detail: "Authentication required." } },
@@ -564,12 +599,7 @@ const responses = {
   },
   "/api/update/status": {
     status: 200,
-    body: {
-      update_available: true,
-      current_version: "0.3.0",
-      latest_version: "9.9.9",
-      url: "https://example.test/releases",
-    },
+    body: updateStatus,
   },
   "/api/dashboard": {
     status: 200,
@@ -818,6 +848,48 @@ window.fetch = async (path, options = {}) => {
           updated: status === "updated" ? ids.length : 0,
           failed: 0,
         },
+      },
+    };
+  } else if (method === "POST" && key === "/api/update/check") {
+    updateStatus.last_checked = "2026-11-06T08:05:00Z";
+    response = { status: 200, body: { ...updateStatus, checked_now: true } };
+  } else if (method === "POST" && key === "/api/update/apply") {
+    updateStatus.update_available = false;
+    updateStatus.apply_available = false;
+    updateStatus.latest_version = "0.3.0";
+    updateStatus.rollback_available = true;
+    updateStatus.previous_version = "0.3.0";
+    updateStatus.installed_version = "9.9.9";
+    updateStatus.restart_pending = true;
+    response = {
+      status: 200,
+      body: {
+        status: "switched",
+        version: "9.9.9",
+        previous_version: "0.3.0",
+        restart_required: true,
+        restarting: true,
+        restart_requested: true,
+        instructions: "The new release is live after the service restarts.",
+        update: updateStatus,
+      },
+    };
+  } else if (method === "POST" && key === "/api/update/rollback") {
+    updateStatus.rollback_available = false;
+    updateStatus.previous_version = "";
+    updateStatus.installed_version = "0.3.0";
+    updateStatus.restart_pending = true;
+    response = {
+      status: 200,
+      body: {
+        status: "rolled_back",
+        version: "0.3.0",
+        rolled_back_from: "9.9.9",
+        restart_required: true,
+        restarting: true,
+        restart_requested: true,
+        instructions: "The previous release is live after the service restarts.",
+        update: updateStatus,
       },
     };
   } else if (method === "GET" && key === "/api/saved-views") {
@@ -1416,6 +1488,15 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const updateBanner = window.document.getElementById("update-banner");
   if (updateBanner.hidden) throw new Error("update banner should be visible for an available release");
   if (!updateBanner.textContent.includes("9.9.9")) throw new Error("update banner missing version");
+  const bannerCheck = window.document.getElementById("update-banner-check");
+  const bannerApply = window.document.getElementById("update-banner-apply");
+  if (!bannerCheck || !bannerApply) throw new Error("update banner actions missing");
+  if (bannerApply.hidden) throw new Error("update banner should offer Update now when a hash is available");
+  bannerCheck.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
+  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/update/check")) {
+    throw new Error("update banner Check now did not call the force check endpoint");
+  }
   const alertCenter = window.document.getElementById("alert-center");
   if (alertCenter.hidden) throw new Error("alert center should be visible");
   if (!alertCenter.textContent.includes("Disk C:")) throw new Error("alert center missing alert");
@@ -2610,6 +2691,78 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   }
   window.__discoveryRelayDisabled = false;
 
+  window.document.querySelector('[data-page="security"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  const updatesPanel = window.document.getElementById("updates-panel");
+  if (!updatesPanel || updatesPanel.hidden) throw new Error("admin updates panel is missing");
+  const updatesDetails = window.document.getElementById("updates-details");
+  if (!updatesDetails.textContent.includes("Current version") || !updatesDetails.textContent.includes("24 hours")) {
+    throw new Error("updates panel is missing version or check interval");
+  }
+  if (!updatesDetails.textContent.includes("9.9.9") || !updatesDetails.textContent.includes("SHA-256")) {
+    throw new Error("updates panel is missing latest version or hash state");
+  }
+  if (!window.document.getElementById("updates-notes").href.includes("example.test/releases")) {
+    throw new Error("updates panel release notes link is missing");
+  }
+
+  updateStatus.hash_available = false;
+  updateStatus.apply_available = false;
+  updateStatus.apply_disabled_reason = "The release does not publish a SHA-256 digest for the server wheel.";
+  updateStatus.selected_asset = { ...updateAsset, sha256: "" };
+  findButton(updatesPanel, "Check now").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  if (!window.document.getElementById("updates-apply").hidden) {
+    throw new Error("Update now should be hidden when the release has no SHA-256");
+  }
+  if (!window.document.getElementById("updates-error").textContent.includes("SHA-256")) {
+    throw new Error("hash-disabled update state should explain why Apply is disabled");
+  }
+  if (window.document.getElementById("update-banner-apply").hidden === false) {
+    throw new Error("banner Update now should be hidden when the release has no SHA-256");
+  }
+
+  updateStatus.hash_available = true;
+  updateStatus.apply_available = true;
+  updateStatus.apply_disabled_reason = "";
+  updateStatus.selected_asset = updateAsset;
+  findButton(updatesPanel, "Check now").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  if (window.document.getElementById("updates-apply").hidden) {
+    throw new Error("Update now should return when a hash is available");
+  }
+
+  findButton(updatesPanel, "Update now").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  const updateDialog = window.document.getElementById("confirm-dialog");
+  if (!updateDialog.open || !updateDialog.textContent.includes("9.9.9")) {
+    throw new Error("Update now did not request confirmation");
+  }
+  updateDialog.close("confirm");
+  await sleep(80);
+  const applyRequest = window.__requests.find(
+    (request) => request.method === "POST" && request.path === "/api/update/apply",
+  );
+  if (!applyRequest || applyRequest.body?.version !== "9.9.9") {
+    throw new Error("Update now did not post the target version");
+  }
+  if (!window.document.getElementById("updates-hint").textContent.includes("restart")) {
+    throw new Error("updates panel did not show restart instructions after apply");
+  }
+  const rollbackButton = findButton(updatesPanel, "Rollback");
+  if (!rollbackButton || rollbackButton.hidden) throw new Error("Rollback action is missing after an update");
+  rollbackButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  if (!updateDialog.open) throw new Error("Rollback did not request confirmation");
+  updateDialog.close("confirm");
+  await sleep(80);
+  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/update/rollback")) {
+    throw new Error("Rollback did not call the rollback endpoint");
+  }
+  if (!window.document.getElementById("updates-hint").textContent.includes("restart")) {
+    throw new Error("updates panel did not show restart instructions after rollback");
+  }
+
   const themeToggle = window.document.getElementById("theme-toggle");
   if (!themeToggle) throw new Error("theme toggle missing");
   if (window.document.documentElement.dataset.theme !== "dark") throw new Error("dark theme should be the default");
@@ -2679,7 +2832,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/exposure/conflicts/segments/table/drawer/edit/verify/promotion commands/token clearing/import preview/history/integration settings/secret redaction/SNMP fixture-only/server-and-agent scan source/start/cancel/relay-disabled/disabled/unacknowledged states, Windows remote-install WinRM/password states, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, update banner/Check now/Update now/hash-disabled state, admin Updates panel with Check now/Update now/Rollback/restart instructions, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/exposure/conflicts/segments/table/drawer/edit/verify/promotion commands/token clearing/import preview/history/integration settings/secret redaction/SNMP fixture-only/server-and-agent scan source/start/cancel/relay-disabled/disabled/unacknowledged states, Windows remote-install WinRM/password states, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

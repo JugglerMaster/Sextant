@@ -1160,13 +1160,33 @@ Tag assignments:
 
 `PATCH /api/agents/{id}` accepts `{"profile": "server"}` to reassign a device without re-enrollment. Profile values are not editable per device.
 
-## Update check (notify only)
+## Server updates
 
 | Method | Route | Role | Purpose |
 |---|---|---|---|
-| GET | `/api/update/status?force=false` | admin | Cached server release check |
+| GET | `/api/update/status?force=false` | admin | Cached server release check and admin panel state |
+| POST | `/api/update/check` | admin + CSRF | Force a fresh check (the **Check now** action) |
+| POST | `/api/update/apply` | admin + CSRF | Stage, verify, health-check, switch, and request restart |
+| POST | `/api/update/rollback` | admin + CSRF | Repoint `current` to the previous release and request restart |
 | GET | `/api/agent/{agent_id}/update?current_version=…` | agent bearer | Latest agent release in the store |
 
+`POST /api/update/apply` takes `{"version": "0.5.2"}`. It rejects a target that
+is not the latest available release, already current, missing a server wheel,
+missing a SHA-256 or size, or larger than the configured download limit. The
+response includes `status`, `version`, `previous_version`, `restart_required`,
+`restarting`, `restart_requested`, and `instructions`. The server never calls
+`systemctl`; it writes the root-owned restart trigger.
+
+`GET /api/update/status` includes `enabled`, `feed`, `feed_kind`, `feed_state`,
+`current_version`, `latest_version`, `update_available`, `url`, `notes`,
+`assets`, `selected_asset`, `hash_available`, `apply_available`,
+`apply_disabled_reason`, `checked_at`, `last_checked`,
+`check_interval_hours`, `rollback_available`, `previous_version`,
+`restart_pending`, and `error`. Feed URLs are sanitized before audit; tokens and
+credentials are never logged.
+
+| Method | Route | Role | Purpose |
+|---|---|---|---|
 | GET | `/api/export/agents.csv` | any | Export agent inventory CSV |
 | GET | `/api/export/packages.csv?agent_id=…` | any | Export package inventory CSV (all agents if omitted) |
 | GET | `/api/export/commands.csv?agent_id=…` | any | Export filtered command history CSV (all agents if omitted) |
@@ -1206,7 +1226,7 @@ authenticated agent heartbeat is observed. See
 [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md) for target and certificate
 requirements.
 
-`SEXTANT_UPDATE_FEED=github:owner/repo` or an HTTPS JSON URL enables the check. The dashboard shows an admin banner when a newer server version exists. This version does **not** apply server updates automatically.
+`SEXTANT_UPDATE_FEED=github:owner/repo` or an HTTPS JSON URL enables the check. The dashboard shows an admin banner and Security-page Updates panel when a newer server version exists. Apply is always an explicit admin action; it is never automatic. A release with no SHA-256 digest is displayed with Apply disabled.
 
 ### Wake an agent
 

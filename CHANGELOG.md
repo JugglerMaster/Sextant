@@ -4,6 +4,33 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [Unreleased]
+
+### Added
+
+- Admin server self-update: daily cached GitHub/static-feed checks (default 24
+  hours, 1–168 range), a Security-page Updates panel, and a login banner with
+  **Check now**, **Update now**, and **Release notes**.
+- Manual apply stages `/opt/sextant/releases/<version>/venv`, installs the wheel
+  with dependencies, health-checks `sextant --help` plus an import/version
+  check, atomically repoints `/opt/sextant/current`, and records the previous
+  target for **Rollback**.
+- Release metadata now carries asset SHA-256 (GitHub asset digest or static feed
+  `sha256`), selects the server wheel by filename/architecture, and disables
+  Apply with an explanation when no hash is published.
+- Root-owned systemd restart handoff (`sextant-update-restart.path`/`.service`
+  and `/usr/local/sbin/sextant-update-restart`) so the unprivileged server never
+  calls `systemctl` directly. The main unit now runs
+  `/opt/sextant/current/bin/sextant` and sets `TimeoutStopSec=15`.
+- Uvicorn graceful-shutdown timeout (`SEXTANT_GRACEFUL_SHUTDOWN_SECONDS`, default
+  10s) so open SSE connections do not block an update restart.
+- Audit entries for check, check-now, apply, and rollback with feed-token and
+  credential redaction.
+
+### Changed
+
+- `SEXTANT_UPDATE_CHECK_HOURS` now defaults to 24 instead of 6.
+
 ## [0.5.1] - 2026-11-12
 
 ### Fixed

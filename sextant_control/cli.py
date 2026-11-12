@@ -47,6 +47,11 @@ def cmd_serve(args: argparse.Namespace, settings: Settings) -> int:
         proxy_headers=settings.trust_proxy,
         access_log=not args.quiet,
         log_level=args.log_level,
+        timeout_graceful_shutdown=(
+            args.graceful_shutdown_timeout
+            if args.graceful_shutdown_timeout is not None
+            else settings.graceful_shutdown_seconds
+        ),
     )
     return 0
 
@@ -400,6 +405,12 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--ssl-certfile", default=None)
     serve.add_argument("--quiet", action="store_true", help="Disable HTTP access logging")
     serve.add_argument("--log-level", default="info")
+    serve.add_argument(
+        "--graceful-shutdown-timeout",
+        type=int,
+        default=None,
+        help="Seconds to wait for open connections (default: SEXTANT_GRACEFUL_SHUTDOWN_SECONDS or 10)",
+    )
     serve.set_defaults(func=cmd_serve)
 
     init = sub.add_parser("init", help="Create the database and bootstrap admin")

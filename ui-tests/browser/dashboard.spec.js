@@ -24,6 +24,25 @@ for (const theme of THEMES) {
     await scan(page, `dashboard ${theme} desktop`);
   });
 
+  test(`admin updates panel renders and checks in the ${theme} theme`, async ({ page }) => {
+    await login(page, { theme });
+    await expect(page.locator("#update-banner")).toBeVisible();
+    await expect(page.locator("#update-banner-check")).toBeVisible();
+    await expect(page.locator("#update-banner-apply")).toBeVisible();
+    await page.locator('[data-page="security"]').click();
+    await expect(page.locator("#updates-panel")).toBeVisible();
+    await expect(page.locator("#updates-details")).toContainText("Current version");
+    await expect(page.locator("#updates-details")).toContainText("24 hours");
+    await expect(page.locator("#updates-details")).toContainText("9.9.9");
+    await expect(page.locator("#updates-details")).toContainText("SHA-256");
+    await expect(page.locator("#updates-apply")).toBeVisible();
+    await expect(page.locator("#updates-rollback")).toBeHidden();
+    await page.locator("#updates-check-now").click();
+    await expect(page.locator("#toast-region")).toContainText("Update check complete");
+    await screenshot(page, `updates-${theme}-desktop`, { fullPage: true });
+    await scan(page, `updates ${theme} desktop`);
+  });
+
   test(`Discovery inventory, drawer, and scan panel render in the ${theme} theme`, async ({ page }) => {
     await login(page, { theme });
     await page.locator('[data-page="discovery"]').click();

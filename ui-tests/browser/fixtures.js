@@ -1103,10 +1103,112 @@ function createApi(session) {
       return {
         status: 200,
         body: {
+          enabled: true,
+          feed: "github:owner/repo",
+          feed_kind: "github",
+          feed_state: "ok",
           update_available: true,
           current_version: "0.3.0",
           latest_version: "9.9.9",
           url: "https://example.test/releases",
+          notes: "Release notes for 9.9.9",
+          assets: [
+            {
+              name: "sextant-9.9.9-py3-none-any.whl",
+              size: 1048576,
+              url: "https://example.test/sextant-9.9.9-py3-none-any.whl",
+              sha256: "a".repeat(64),
+              arch: "",
+              kind: "wheel",
+              version: "9.9.9",
+            },
+          ],
+          selected_asset: {
+            name: "sextant-9.9.9-py3-none-any.whl",
+            size: 1048576,
+            url: "https://example.test/sextant-9.9.9-py3-none-any.whl",
+            sha256: "a".repeat(64),
+            arch: "",
+            kind: "wheel",
+            version: "9.9.9",
+          },
+          hash_available: true,
+          apply_available: true,
+          apply_disabled_reason: "",
+          checked_at: "2026-11-06T08:00:00Z",
+          last_checked: "2026-11-06T08:00:00Z",
+          check_interval_hours: 24,
+          rollback_available: false,
+          previous_version: "",
+          installed_version: "",
+          restart_pending: false,
+          error: "",
+        },
+      };
+    }
+    if (method === "POST" && key === "/api/update/check") {
+      return {
+        status: 200,
+        body: {
+          enabled: true,
+          feed: "github:owner/repo",
+          feed_kind: "github",
+          feed_state: "ok",
+          update_available: true,
+          current_version: "0.3.0",
+          latest_version: "9.9.9",
+          url: "https://example.test/releases",
+          notes: "Release notes for 9.9.9",
+          assets: [],
+          selected_asset: {
+            name: "sextant-9.9.9-py3-none-any.whl",
+            size: 1048576,
+            url: "https://example.test/sextant-9.9.9-py3-none-any.whl",
+            sha256: "a".repeat(64),
+            arch: "",
+            kind: "wheel",
+            version: "9.9.9",
+          },
+          hash_available: true,
+          apply_available: true,
+          apply_disabled_reason: "",
+          checked_at: "2026-11-06T08:05:00Z",
+          last_checked: "2026-11-06T08:05:00Z",
+          check_interval_hours: 24,
+          rollback_available: false,
+          previous_version: "",
+          installed_version: "",
+          restart_pending: false,
+          error: "",
+          checked_now: true,
+        },
+      };
+    }
+    if (method === "POST" && key === "/api/update/apply") {
+      return {
+        status: 200,
+        body: {
+          status: "switched",
+          version: "9.9.9",
+          previous_version: "0.3.0",
+          restart_required: true,
+          restarting: true,
+          restart_requested: true,
+          instructions: "The new release is live after the service restarts.",
+        },
+      };
+    }
+    if (method === "POST" && key === "/api/update/rollback") {
+      return {
+        status: 200,
+        body: {
+          status: "rolled_back",
+          version: "0.3.0",
+          rolled_back_from: "9.9.9",
+          restart_required: true,
+          restarting: true,
+          restart_requested: true,
+          instructions: "The previous release is live after the service restarts.",
         },
       };
     }

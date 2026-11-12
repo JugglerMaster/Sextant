@@ -69,10 +69,14 @@ python3 --version
 ```bash
 sudo useradd --system --home /opt/sextant --shell /usr/sbin/nologin sextant
 sudo install -d -o root -g sextant -m 0755 /opt/sextant
+sudo install -d -o sextant -g sextant -m 0755 /opt/sextant/releases
 sudo install -d -o sextant -g sextant -m 0700 /var/lib/sextant
 ```
 
-The server does **not** run as root. Only agents need elevated privileges.
+The server does **not** run as root. Only agents need elevated privileges. The
+unprivileged server must be able to stage releases and replace the `current`
+symlink; the systemd unit grants write access to `/opt/sextant` and
+`/var/lib/sextant`.
 
 ### 2.3 Copy the source and install dependencies
 
@@ -91,8 +95,16 @@ sudo python3 -m venv /opt/sextant/.venv
 sudo /opt/sextant/.venv/bin/pip install --upgrade pip
 sudo /opt/sextant/.venv/bin/pip install --require-hashes -r /opt/sextant/requirements.lock
 sudo /opt/sextant/.venv/bin/pip install --no-deps /opt/sextant
+sudo install -d -o sextant -g sextant -m 0755 /opt/sextant/releases/0.5.1
+sudo ln -sfn /opt/sextant/.venv /opt/sextant/releases/0.5.1/venv
+sudo ln -sfn /opt/sextant/releases/0.5.1/venv /opt/sextant/current
 sudo chown -R root:sextant /opt/sextant
+sudo chown sextant:sextant /opt/sextant /opt/sextant/releases
 ```
+
+The stable `/opt/sextant/current` symlink is what systemd and the updater use.
+The initial `.venv` is kept as the first versioned release so the first
+self-update has a rollback target.
 
 Optional, only if using Active Directory / Samba AD:
 
@@ -103,7 +115,7 @@ sudo /opt/sextant/.venv/bin/pip install 'ldap3>=2.9,<3'
 Check the entry point:
 
 ```bash
-sudo -u sextant /opt/sextant/.venv/bin/sextant --help
+sudo -u sextant /opt/sextant/current/bin/sextant --help
 ```
 
 > **Development install instead:** `python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'` is fine for a lab. Use the lockfile path for anything persistent.
@@ -147,10 +159,22 @@ Important:
 
 ```bash
 sudo install -m 0644 /opt/sextant/deploy/sextant.service /etc/systemd/system/sextant.service
+sudo install -m 0755 /opt/sextant/deploy/sextant-update-restart.sh \
+  /usr/local/sbin/sextant-update-restart
+sudo install -m 0644 /opt/sextant/deploy/sextant-update-restart.service \
+  /etc/systemd/system/sextant-update-restart.service
+sudo install -m 0644 /opt/sextant/deploy/sextant-update-restart.path \
+  /etc/systemd/system/sextant-update-restart.path
 sudo systemctl daemon-reload
-sudo systemctl enable --now sextant
+sudo systemctl enable --now sextant sextant-update-restart.path
 sudo systemctl status sextant --no-pager
 ```
+
+The main unit runs `/opt/sextant/current/bin/sextant` and sets
+`TimeoutStopSec=15`. The path unit watches `/var/lib/sextant/restart-request`
+and lets the unprivileged server request a restart without direct `systemctl`
+access. `sextant-update-restart.service` sleeps briefly before restarting so the
+apply/rollback HTTP response can reach the browser.
 
 Check it locally:
 
@@ -564,12 +588,22 @@ If the agent does not appear, see [Troubleshooting](#7-troubleshooting).
 
 ### Server
 
+Admins can use **Security → Server updates → Update now** after configuring
+`SEXTANT_UPDATE_FEED`. The server verifies the wheel, stages a versioned venv,
+health-checks it, switches `/opt/sextant/current`, and requests a restart through
+the root-owned path unit. Rollback repoints `current` to the recorded previous
+release.
+
+For a manual upgrade or air-gapped host:
+
 ```bash
 sudo sqlite3 /var/lib/sextant/sextant.sqlite3 \
   ".backup '/var/backups/sextant/pre-upgrade.sqlite3'"
-sudo rsync -a --delete --exclude .venv --exclude data ./ /opt/sextant/
+sudo rsync -a --delete --exclude .venv --exclude data --exclude releases ./ /opt/sextant/
 sudo /opt/sextant/.venv/bin/pip install --require-hashes -r /opt/sextant/requirements.lock
 sudo /opt/sextant/.venv/bin/pip install --no-deps --upgrade /opt/sextant
+# If you use the current-symlink layout, stage the new version under releases/
+# and repoint current instead of upgrading .venv in place.
 sudo systemctl restart sextant
 curl -fsS http://127.0.0.1:8080/api/health
 ```
@@ -585,6 +619,7 @@ Use the update commands in [§3.4](#34-update-or-uninstall) and [§4.5](#45-upda
 - `/var/lib/sextant/sextant.sqlite3` (and `-wal`/`-shm` if copying live)
 - `/var/lib/sextant/secret.key` (or `SEXTANT_SECRET_KEY`)
 - `/var/lib/sextant/store/` (package-store blobs)
+- `/var/lib/sextant/update-state.json` (previous release for rollback)
 - `/etc/sextant.env`
 - `/opt/sextant` (code/config reference)
 - Agent config files: `/etc/sextant-agent/config.json`, `C:\ProgramData\SextantAgent\config.json`

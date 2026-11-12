@@ -133,7 +133,20 @@ There is no pixel-level remote desktop or input injection in this version. “Re
 - **Package management is enabled by default**, but remains a deliberate two-key control: the agent-local `allow_packages` flag and the assigned profile's `package_management`/`allow_packages` settings must both be true. Either can disable it. Actions are argv-based (no shell), names/versions are validated, and only `install`/`remove`/`upgrade` are accepted. Every rule change and sync is audited.
 - **Package jobs are admin-controlled.** Desired state is admin-only; operators can trigger a sync of already-approved rules. Critical packages should be pinned rather than tracked with `latest`.
 - **Agent self-update** downloads the wheel over the authenticated store route, verifies SHA-256 and size, stages a new versioned venv, health-checks it, and switches the `current` symlink. `allow_self_update: false` is a local hard stop. The old release is kept for rollback.
-- **Server update checks are notify-only.** The server reads release metadata from `SEXTANT_UPDATE_FEED` (GitHub or a static JSON URL) and shows an admin banner. It does not download or apply a server update in this version.
+- **Server update apply is admin-only, CSRF-protected, and audited.** The server
+  reads release metadata from `SEXTANT_UPDATE_FEED` (GitHub or a static JSON URL),
+  caches it for 1–168 hours, and shows an admin banner and Security-page panel.
+  Apply requires an explicit target version and a wheel asset with a SHA-256 and
+  size. The download is bounded, rejects unexpected redirect schemes/hosts, and
+  is verified before staging. The staged venv is health-checked before the
+  `current` symlink is switched. The unprivileged server writes a restart trigger
+  under `/var/lib/sextant`; a root-owned systemd path unit performs the restart.
+  The server never logs feed tokens, credentials, or authorization headers, and
+  audit entries redact feed query strings. Releases without a hash are shown but
+  cannot be applied. There is no automatic server update.
+- **Update trust is still Tier 0.** A compromised feed or GitHub release can
+  serve different bytes, but an admin must approve each apply. Signatures and
+  feed pinning are deferred.
 - **GitHub is not an app source.** App packages are uploaded to the store by an admin or CI; agents never download apps from GitHub.
 - **Remote install is admin-only and one job at a time.** Linux uses one private key on the server filesystem (`SEXTANT_SSH_KEY_PATH`, mode 0600), not SQLite, with no SSH passwords or agent forwarding, a fixed install script, validated inputs, and full audit. Host-key verification is intentionally disabled for rebuilt hosts, so use SSH only on a trusted admin network/VPN. Windows uses WinRM over HTTPS with the optional `pywinrm` extra, certificate validation, a one-time password held only in the job thread, redacted logs/audit, a fixed PowerShell installer, SHA-256 wheel verification, and an authenticated-heartbeat success gate. There is no insecure TLS switch. Passwords and enrollment tokens are never stored in SQLite or returned by later APIs.
 

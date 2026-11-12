@@ -154,7 +154,11 @@
 
       <div class="update-banner" id="update-banner" hidden role="status">
         <span id="update-banner-text"></span>
-        <a id="update-banner-link" href="#" target="_blank" rel="noopener">Release notes</a>
+        <div class="update-banner-actions">
+          <a id="update-banner-link" href="#" target="_blank" rel="noopener">Release notes</a>
+          <button class="button button-secondary button-small" id="update-banner-check" type="button">Check now</button>
+          <button class="button button-primary button-small" id="update-banner-apply" type="button">Update now</button>
+        </div>
       </div>
 
       <section class="page" id="page-overview">
@@ -658,6 +662,21 @@
             <p class="form-hint">AD/Samba login uses LDAP bind. Group membership maps to admin, operator, or viewer roles. Configure it with <code>SEXTANT_LDAP_*</code> environment variables.</p>
           </article>
         </div>
+        <article class="panel nav-admin" id="updates-panel" hidden>
+          <div class="panel-head">
+            <div><p class="eyebrow">Maintenance</p><h2>Server updates</h2></div>
+            <span class="form-hint" id="updates-state-label" aria-live="polite"></span>
+          </div>
+          <dl class="detail-list" id="updates-details"></dl>
+          <div class="update-panel-actions">
+            <button class="button button-secondary button-small" id="updates-check-now" type="button">Check now</button>
+            <button class="button button-primary button-small" id="updates-apply" type="button" hidden>Update now</button>
+            <button class="button button-secondary button-small" id="updates-rollback" type="button" hidden>Rollback</button>
+            <a id="updates-notes" class="button button-ghost button-small" href="#" target="_blank" rel="noopener" hidden>Release notes</a>
+          </div>
+          <p class="form-hint" id="updates-hint">Updates are staged and health-checked before the stable current symlink is switched. The server restarts through a root-owned systemd handoff.</p>
+          <p class="form-error" id="updates-error" role="alert"></p>
+        </article>
       </section>
     </main>
   </div>

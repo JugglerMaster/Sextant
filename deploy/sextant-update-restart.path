@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for Sextant server update restart requests
+
+[Path]
+PathExists=/var/lib/sextant/restart-request
+Unit=sextant-update-restart.service
+
+[Install]
+WantedBy=paths.target

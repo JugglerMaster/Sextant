@@ -10,15 +10,16 @@ User=sextant
 Group=sextant
 WorkingDirectory=/opt/sextant
 EnvironmentFile=/etc/sextant.env
-ExecStart=/opt/sextant/.venv/bin/sextant serve --host 127.0.0.1 --port 8080
+ExecStart=/opt/sextant/current/bin/sextant serve --host 127.0.0.1 --port 8080
 Restart=on-failure
 RestartSec=3
+TimeoutStopSec=15
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/sextant
+ReadWritePaths=/var/lib/sextant /opt/sextant
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]

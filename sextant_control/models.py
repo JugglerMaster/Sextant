@@ -753,6 +753,10 @@ class SavedViewIn(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
 
 
+class UpdateApplyIn(BaseModel):
+    version: str = Field(min_length=1, max_length=64)
+
+
 class AgentWakeIn(BaseModel):
     broadcast: str = Field(default="255.255.255.255", max_length=64)
     port: int = Field(default=9, ge=1, le=65535)

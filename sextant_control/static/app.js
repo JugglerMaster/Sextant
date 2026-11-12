@@ -62,6 +62,9 @@ const state = {
   drawerTrigger: null,
   userSearch: "",
   theme: "dark",
+  updates: null,
+  updatesBusy: false,
+  updatesNotice: "",
   fleetStatusSignature: "",
   paletteItems: [],
   paletteIndex: 0,
@@ -745,29 +748,250 @@ function startLiveUpdates() {
   startPolling();
 }
 
-async function checkForUpdates() {
+function updateFeedLabel(data) {
+  if (!data?.enabled) return "Not configured";
+  if (data.feed_state === "error") return "Feed error";
+  if (data.feed_kind === "github") return "GitHub Releases";
+  if (data.feed_kind === "static") return "Static JSON feed";
+  return data.feed || "Configured";
+}
+
+function updateHashLabel(data) {
+  const asset = data?.selected_asset;
+  if (!asset) return "No server wheel asset";
+  if (asset.sha256) return `SHA-256 ${asset.sha256.slice(0, 12)}… (${asset.name || "wheel"})`;
+  return "SHA-256 unavailable";
+}
+
+function updateAssetSize(data) {
+  const size = Number(data?.selected_asset?.size || 0);
+  if (!size) return "—";
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${size} B`;
+}
+
+function renderUpdateBanner() {
   const banner = $("update-banner");
-  if (!banner || !state.permissions?.admin) {
-    if (banner) banner.hidden = true;
+  if (!banner) return;
+  const data = state.updates;
+  if (!state.permissions?.admin || !data?.update_available) {
+    banner.hidden = true;
     return;
   }
-  try {
-    const data = await api("/api/update/status");
-    if (!data.update_available) {
-      banner.hidden = true;
-      return;
-    }
-    setText("update-banner-text", `Sextant ${data.latest_version} is available (you are on ${data.current_version}).`);
-    const link = $("update-banner-link");
+  const hashNote = data.hash_available ? "" : " SHA-256 is unavailable, so automatic apply is disabled.";
+  setText(
+    "update-banner-text",
+    `Sextant ${data.latest_version} is available (you are on ${data.current_version}).${hashNote}`,
+  );
+  const link = $("update-banner-link");
+  if (link) {
     if (data.url) {
       link.href = data.url;
       link.hidden = false;
     } else {
       link.hidden = true;
     }
-    banner.hidden = false;
-  } catch (_error) {
-    banner.hidden = true;
+  }
+  const check = $("update-banner-check");
+  if (check) check.disabled = state.updatesBusy;
+  const apply = $("update-banner-apply");
+  if (apply) {
+    apply.hidden = !data.apply_available;
+    apply.disabled = state.updatesBusy || !data.apply_available;
+    apply.title = data.apply_available ? "" : data.apply_disabled_reason || "Update cannot be applied.";
+  }
+  banner.hidden = false;
+}
+
+function renderUpdatesPanel() {
+  const panel = $("updates-panel");
+  if (!panel) return;
+  if (!state.permissions?.admin) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const data = state.updates;
+  const details = $("updates-details");
+  if (!details) return;
+  clear(details);
+  if (!data) {
+    setText("updates-state-label", "Loading…");
+    details.append(h("dt", {}, "Status"), h("dd", {}, "Reading update status…"));
+    return;
+  }
+  const checked = data.last_checked || data.checked_at;
+  const entries = [
+    ["Current version", data.current_version || state.settings?.version || "—"],
+    ["Check interval", `${Number(data.check_interval_hours || 24)} hours`],
+    ["Last checked", checked ? `${localTime(checked)} (${relativeTime(checked)})` : "never"],
+    ["Feed", updateFeedLabel(data)],
+    ["Latest version", data.latest_version || "—"],
+    ["Artifact", data.selected_asset?.name ? `${data.selected_asset.name} · ${updateAssetSize(data)}` : "—"],
+    ["SHA-256", updateHashLabel(data)],
+    ["Previous release", data.rollback_available ? `Rollback to ${data.previous_version || "previous release"}` : "None recorded"],
+    ["Restart", data.restart_pending ? "Requested; waiting for systemd" : "Not pending"],
+  ];
+  for (const [key, value] of entries) {
+    details.append(h("dt", {}, key), h("dd", {}, value));
+  }
+  const stateLabel = data.restart_pending
+    ? "Restart pending"
+    : data.feed_state === "error"
+      ? "Feed error"
+      : data.update_available
+        ? "Update available"
+        : data.enabled
+          ? "Up to date"
+          : "Updates not configured";
+  setText("updates-state-label", stateLabel);
+  const notes = $("updates-notes");
+  if (notes) {
+    if (data.url) {
+      notes.href = data.url;
+      notes.hidden = false;
+    } else {
+      notes.hidden = true;
+    }
+  }
+  const check = $("updates-check-now");
+  if (check) check.disabled = state.updatesBusy;
+  const apply = $("updates-apply");
+  if (apply) {
+    apply.hidden = !data.apply_available;
+    apply.disabled = state.updatesBusy || !data.apply_available;
+    apply.title = data.apply_available ? "" : data.apply_disabled_reason || "Update cannot be applied.";
+  }
+  const rollback = $("updates-rollback");
+  if (rollback) {
+    rollback.hidden = !data.rollback_available;
+    rollback.disabled = state.updatesBusy;
+  }
+  const error = $("updates-error");
+  if (error) {
+    error.textContent = data.error
+      ? data.error
+      : data.update_available && !data.apply_available
+        ? data.apply_disabled_reason || ""
+        : "";
+  }
+  const hint = $("updates-hint");
+  if (hint) {
+    hint.textContent =
+      state.updatesNotice ||
+      (data.update_available && !data.apply_available
+        ? data.apply_disabled_reason
+        : "Updates are staged and health-checked before the stable current symlink is switched. The server restarts through a root-owned systemd handoff.");
+  }
+}
+
+function applyUpdateState(data) {
+  state.updates = data;
+  renderUpdateBanner();
+  renderUpdatesPanel();
+}
+
+async function checkForUpdates(force = false) {
+  const banner = $("update-banner");
+  if (!state.permissions?.admin) {
+    if (banner) banner.hidden = true;
+    renderUpdatesPanel();
+    return;
+  }
+  state.updatesBusy = true;
+  if (force) state.updatesNotice = "";
+  renderUpdateBanner();
+  renderUpdatesPanel();
+  try {
+    const data = await api(
+      force ? "/api/update/check" : "/api/update/status",
+      force ? { method: "POST" } : {},
+    );
+    applyUpdateState(data);
+    if (force) toast("Update check complete.");
+  } catch (error) {
+    if (force) {
+      setText("updates-error", error.message);
+      toast(error.message, "error");
+    } else if (banner) {
+      banner.hidden = true;
+    }
+  } finally {
+    state.updatesBusy = false;
+    renderUpdateBanner();
+    renderUpdatesPanel();
+  }
+}
+
+async function applyServerUpdate() {
+  const data = state.updates;
+  if (!data?.apply_available || state.updatesBusy) return;
+  const version = data.latest_version;
+  const confirmed = await confirmAction(
+    "Install server update",
+    `Stage Sextant ${version}, verify its SHA-256, health-check it, switch /opt/sextant/current, and restart the service? Open sessions may disconnect briefly.`,
+    "Update now",
+  );
+  if (!confirmed) return;
+  state.updatesBusy = true;
+  state.updatesNotice = `Staging Sextant ${version}…`;
+  renderUpdateBanner();
+  renderUpdatesPanel();
+  try {
+    const result = await api("/api/update/apply", {
+      method: "POST",
+      body: { version },
+    });
+    if (result.update) state.updates = result.update;
+    state.updatesNotice =
+      result.instructions ||
+      (result.restarting
+        ? "Update staged. The service is restarting now."
+        : "Update staged. Restart the sextant service to start it.");
+    toast(result.restarting ? "Update staged. Restarting…" : "Update staged. Restart required.", result.restarting ? "ok" : "warn");
+  } catch (error) {
+    state.updatesNotice = "";
+    setText("updates-error", error.message);
+    toast(error.message, "error");
+  } finally {
+    state.updatesBusy = false;
+    renderUpdateBanner();
+    renderUpdatesPanel();
+  }
+}
+
+async function rollbackServerUpdate() {
+  const data = state.updates;
+  if (!data?.rollback_available || state.updatesBusy) return;
+  const target = data.previous_version || "the previous release";
+  const confirmed = await confirmAction(
+    "Roll back server update",
+    `Repoint /opt/sextant/current to ${target} and restart the service?`,
+    "Rollback",
+  );
+  if (!confirmed) return;
+  state.updatesBusy = true;
+  state.updatesNotice = `Rolling back to ${target}…`;
+  renderUpdateBanner();
+  renderUpdatesPanel();
+  try {
+    const result = await api("/api/update/rollback", { method: "POST" });
+    if (result.update) state.updates = result.update;
+    state.updatesNotice =
+      result.instructions ||
+      (result.restarting
+        ? "Rollback staged. The service is restarting now."
+        : "Rollback staged. Restart the sextant service to start it.");
+    toast(result.restarting ? "Rollback staged. Restarting…" : "Rollback staged. Restart required.", result.restarting ? "ok" : "warn");
+  } catch (error) {
+    state.updatesNotice = "";
+    setText("updates-error", error.message);
+    toast(error.message, "error");
+  } finally {
+    state.updatesBusy = false;
+    renderUpdateBanner();
+    renderUpdatesPanel();
   }
 }
 
@@ -6074,6 +6298,8 @@ function renderSecurity() {
   for (const [key, value] of entries) {
     details.append(h("dt", {}, key), h("dd", {}, value));
   }
+  renderUpdatesPanel();
+  if (state.permissions.admin && !state.updates) void checkForUpdates();
   updateChrome();
 }
 
@@ -8328,6 +8554,12 @@ function wireEvents() {
   $("remote-install-form").addEventListener("submit", startRemoteInstall);
   $("remote-install-test").addEventListener("click", testRemoteInstall);
   $("remote-install-os").addEventListener("change", updateRemoteInstallMode);
+
+  $("update-banner-check")?.addEventListener("click", () => checkForUpdates(true));
+  $("update-banner-apply")?.addEventListener("click", applyServerUpdate);
+  $("updates-check-now")?.addEventListener("click", () => checkForUpdates(true));
+  $("updates-apply")?.addEventListener("click", applyServerUpdate);
+  $("updates-rollback")?.addEventListener("click", rollbackServerUpdate);
 
   $("user-form").addEventListener("submit", async (event) => {
     event.preventDefault();

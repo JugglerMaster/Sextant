@@ -196,7 +196,12 @@ class Settings:
     store_max_blob_mb: int = 512
     store_max_total_gb: int = 20
     update_feed: str = ""
-    update_check_hours: int = 6
+    update_check_hours: int = 24
+    update_release_root: str = "/opt/sextant/releases"
+    update_current_link: str = "/opt/sextant/current"
+    update_restart_trigger: str = "/var/lib/sextant/restart-request"
+    update_download_max_mb: int = 256
+    graceful_shutdown_seconds: int = 10
     docker_enabled: bool = True
     docker_inventory_max_bytes: int = 2_000_000
     docker_inventory_stale_seconds: int = 900
@@ -237,6 +242,22 @@ class Settings:
         if self.docker_compose_dir:
             return Path(self.docker_compose_dir).expanduser().resolve()
         return (self.data_dir / "docker" / "compose").resolve()
+
+    @property
+    def update_release_path(self) -> Path:
+        return Path(self.update_release_root).expanduser().resolve()
+
+    @property
+    def update_current_path(self) -> Path:
+        return Path(self.update_current_link).expanduser()
+
+    @property
+    def update_restart_path(self) -> Path:
+        return Path(self.update_restart_trigger).expanduser()
+
+    @property
+    def update_state_path(self) -> Path:
+        return self.data_dir / "update-state.json"
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
@@ -325,7 +346,37 @@ class Settings:
             store_max_blob_mb=_int(env.get("SEXTANT_STORE_MAX_BLOB_MB"), 512, 1),
             store_max_total_gb=_int(env.get("SEXTANT_STORE_MAX_TOTAL_GB"), 20, 1),
             update_feed=env.get("SEXTANT_UPDATE_FEED", "").strip(),
-            update_check_hours=_int(env.get("SEXTANT_UPDATE_CHECK_HOURS"), 6, 1),
+            update_check_hours=_int_range(
+                env.get("SEXTANT_UPDATE_CHECK_HOURS"), 24, 1, 168
+            ),
+            update_release_root=(
+                env.get("SEXTANT_UPDATE_RELEASE_ROOT")
+                or env.get("SEXTANT_RELEASE_ROOT")
+                or "/opt/sextant/releases"
+            ).strip()
+            or "/opt/sextant/releases",
+            update_current_link=(
+                env.get("SEXTANT_UPDATE_CURRENT_LINK")
+                or env.get("SEXTANT_CURRENT_LINK")
+                or "/opt/sextant/current"
+            ).strip()
+            or "/opt/sextant/current",
+            update_restart_trigger=(
+                env.get("SEXTANT_UPDATE_RESTART_TRIGGER")
+                or env.get("SEXTANT_RESTART_TRIGGER")
+                or "/var/lib/sextant/restart-request"
+            ).strip()
+            or "/var/lib/sextant/restart-request",
+            update_download_max_mb=_int_range(
+                env.get("SEXTANT_UPDATE_DOWNLOAD_MAX_MB"), 256, 1, 4096
+            ),
+            graceful_shutdown_seconds=_int_range(
+                env.get("SEXTANT_GRACEFUL_SHUTDOWN_SECONDS")
+                or env.get("SEXTANT_SHUTDOWN_TIMEOUT"),
+                10,
+                1,
+                300,
+            ),
             docker_enabled=_bool(env.get("SEXTANT_DOCKER_ENABLED"), True),
             docker_inventory_max_bytes=max(
                 1024, _int(env.get("SEXTANT_DOCKER_INVENTORY_MAX_BYTES"), 2_000_000, 1024)

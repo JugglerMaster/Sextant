@@ -1,0 +1,9 @@
+[Unit]
+Description=Restart Sextant after an approved self-update
+Documentation=file:/opt/sextant/docs/SERVER_UPDATE.md
+
+[Service]
+Type=oneshot
+# Give the HTTP response that wrote the trigger time to reach the browser.
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/local/sbin/sextant-update-restart
