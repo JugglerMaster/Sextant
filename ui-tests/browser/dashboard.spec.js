@@ -47,6 +47,15 @@ for (const theme of THEMES) {
     await scan(page, `discovery ${theme}`);
     await page.locator('#discovery-drawer [aria-label="Close discovered device details"]').click();
 
+    await page.locator("#discovery-scan-source").selectOption("agent:agt_demo");
+    await expect(page.locator("#discovery-scan-scope")).toHaveValue("192.168.1.0/24");
+    await page.locator("#discovery-scan-start").click();
+    await expect(page.locator("#discovery-scan-progress")).toBeVisible();
+    await expect(page.locator("#discovery-scan-cancel")).toBeVisible();
+    await page.locator("#discovery-scan-cancel").click();
+    await expect(page.locator("#discovery-scan-progress")).toBeHidden();
+
+    await page.locator("#discovery-scan-source").selectOption("server");
     await page.locator("#discovery-scan-start").click();
     await expect(page.locator("#discovery-scan-progress")).toBeVisible();
     await expect(page.locator("#discovery-scan-cancel")).toBeVisible();
@@ -217,6 +226,16 @@ test("Discovery explains disabled and unacknowledged states", async ({ page }) =
   await page.locator("#discovery-ack-button").click();
   await expect(page.locator("#discovery-ack-panel")).toBeHidden();
   await expect(page.locator("#discovery-scan-panel")).toBeVisible();
+
+  page.__apiSession.discoveryRelayDisabled = true;
+  await page.locator('[data-page="overview"]').click();
+  await page.locator('[data-page="discovery"]').click();
+  await expect(page.locator("#discovery-scan-source option")).toHaveCount(1);
+  await expect(page.locator("#discovery-source-hint")).toContainText("SEXTANT_DISCOVERY_AGENT_RELAY");
+  page.__apiSession.discoveryRelayDisabled = false;
+  await page.locator('[data-page="overview"]').click();
+  await page.locator('[data-page="discovery"]').click();
+  await expect(page.locator("#discovery-scan-source option")).toHaveCount(2);
   await screenshot(page, "discovery-enabled-dark");
   await scan(page, "discovery enabled");
 });

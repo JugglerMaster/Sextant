@@ -49,6 +49,7 @@ Environment options for the installer:
 | `ALLOW_DOCKER_EXEC` | Set to `1` to enable one-shot exec inside containers |
 | `ALLOW_DOCKER_COMPOSE` | Set to `1` to enable D3 Compose deploy/down/restart/pull actions |
 | `ALLOW_DOCKER_PRUNE` | Set to `1` to enable Docker cleanup/prune actions |
+| `ALLOW_DISCOVERY` | Set to `1` to allow server-requested discovery scans of this agent's local VLAN (Linux only, default `0`) |
 | `DOCKER_SOCKET` | Override the Docker socket/`DOCKER_HOST` (default `unix:///var/run/docker.sock`) |
 | `DOCKER_COMMAND` | Override the Docker CLI command/path (default `docker`) |
 | `DOCKER_COMPOSE_DIR` | Agent-owned Compose runtime directory (default `/var/lib/sextant-agent/docker/stacks`) |
@@ -195,6 +196,7 @@ sudo systemctl daemon-reload
   "allow_docker_exec": false,
   "allow_docker_compose": false,
   "allow_docker_prune": false,
+  "allow_discovery": false,
   "docker_socket": "unix:///var/run/docker.sock",
   "docker_command": "docker",
   "docker_timeout": 60,
@@ -231,6 +233,7 @@ sudo systemctl daemon-reload
 | `allow_docker_exec` | Local ceiling for one-shot exec and the D4 interactive console; false by default |
 | `allow_docker_compose` | Local ceiling for D3 Compose deployment actions; false by default |
 | `allow_docker_prune` | Local ceiling for D2 cleanup actions; false by default |
+| `allow_discovery` | Hard local ceiling for agent-relayed discovery scans; false by default. Linux only. |
 | `docker_socket` | Docker socket or `DOCKER_HOST`; local config only |
 | `docker_command` | Docker CLI command/path |
 | `docker_timeout` | Docker CLI timeout in seconds (5–300) |
@@ -258,6 +261,7 @@ The file contains a bearer token. Keep it mode 0600 (Linux) and ACL-restricted (
 - **Docker (D1–D5, Linux only):** when `allow_docker` is true and the assigned profile enables the Docker module, the agent probes the local Docker CLI/socket and sends a compact heartbeat summary. It uploads a bounded full inventory (containers, images, volumes, networks) on the profile cadence, when the server requests it, or after a Docker action. Allowlisted lifecycle/update/rename/remove/clone actions, logs, one-shot exec, and cleanup use argv only (no host shell). Exec requires `allow_docker_exec`; cleanup requires `allow_docker_prune`; Compose deployment requires `allow_docker_compose`. The agent re-resolves targets with `docker inspect`, enforces a per-host mutation guard, caps output/timeouts, masks container environment values from raw inspect, and refreshes inventory after successful mutations. Inventory transitions create deduplicated `docker.health` events on the server; the agent does not send a separate alert stream.
 - **Container clone (D5):** `container.clone` builds `docker create --name <new> [--restart] [--memory] [--cpus] [--pids-limit] [--network <id>] <image-id> [argv…]` and attaches additional networks with `docker network connect`. It accepts no bind mounts, env values, devices, capabilities, privileged mode, or raw flags. The server canonicalizes the image/network IDs against inventory and blocks Compose-managed sources unless the operator sends `acknowledge_drift=true`.
 - **Compose deployment (D3):** the agent downloads the deployment bundle with its bearer token, verifies the bundle SHA-256/size and the extracted revision hash, rejects traversal/symlinks/hardlinks/oversize entries and `build:` services, extracts flat files under `docker_compose_dir/<project>/<revision>/`, runs `docker compose config --quiet`, then `up -d --remove-orphans`, `down` (volumes only when explicitly requested), `restart`, or `pull`. A mutation guard prevents overlapping Compose operations.
+- **Agent-relayed discovery (D3, Linux only):** when local `allow_discovery` is true and the server profile/policy allow relay, the agent accepts a `discovery.scan` command. It validates the supplied CIDR scope and excludes again, uses `ip neigh`/`arp -a`, PTR lookup, the shared OUI table, optional SSDP, and opt-in TCP/banner/TLS fingerprints on the configured port set. It never targets an address outside the scope, never opens an inbound port, and reports a bounded device/evidence payload to the server. The scan is one bounded command action (120-second local budget) and runs while the normal heartbeat loop is waiting. Windows agents report `unsupported`. Local denial always wins over server policy.
 - **Interactive console (D4):** a `console.open` command starts `docker exec -it ... <shell> -l` under a PTY in a background thread. The agent resolves the container again, enforces the `allow_docker_exec` gate, max sessions, idle timeout, bounded buffers, and terminates the process group/PTY on close, timeout, shutdown, or missed server polls. A poll thread forwards stdin/resize/close while a reader thread uploads bounded PTY output. Heartbeats and the normal command loop continue. No transcript is written. Windows agents report `unsupported_os` and never appear as Docker hosts.
 - Startup entries are listed read-only. Use the Services tab for start/stop/restart/enable/disable.
 - Watched services that are stopped produce a critical alert. Watched service inventory is refreshed on the inventory cadence (or immediately after a watch-list change or `refresh`).
@@ -273,6 +277,7 @@ The file contains a bearer token. Keep it mode 0600 (Linux) and ACL-restricted (
 | Power | shutdown/reboot/cancel, delay 0–600s | `shutdown` or `shutdown.exe` |
 | Package | 1–25 actions; manager ∈ {apt, dnf, winget, choco}; action ∈ {install, remove, upgrade}; validated name/version | argv-based package manager call, no shell; requires local `allow_packages` and profile package settings |
 | Docker | `inventory.refresh`, container lifecycle/rename/remove/update/clone/logs/inspect/exec, console open, image/volume/network remove, cleanup scopes, Compose up/down/restart/pull | argv-only allowlisted Docker CLI call; target re-resolved with `docker inspect`; exec/console require `allow_docker_exec`; cleanup requires `allow_docker_prune`; Compose requires `allow_docker_compose`; mutation guard and bounded output; clone allows only image/name/argv/restart/limits/networks |
+| Discovery | `discovery.scan` with validated scope, excludes, methods, ports, timeout, concurrency, host cap, and budget | revalidates locally; local + server gate; Linux only; bounded scan; reports to the server over the outbound connection |
 | Refresh | no args | Immediate success; next heartbeat refreshes metrics and Docker inventory when enabled |
 
 Linux power commands use `shutdown -h +N` / `shutdown -r +N` for a delay (minimum one minute due to the tool), and `now` for zero. Windows uses `shutdown.exe /s|/r /t N`.

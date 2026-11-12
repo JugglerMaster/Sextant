@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Annotated, Any, Literal, Union
 
@@ -75,6 +76,7 @@ class AgentUpdateIn(BaseModel):
     allow_docker_exec: bool | None = None
     allow_docker_compose: bool | None = None
     allow_docker_prune: bool | None = None
+    allow_discovery: bool | None = None
 
 
 class EnrollmentTokenIn(BaseModel):
@@ -127,6 +129,7 @@ class ProfileModules(BaseModel):
     package_management: bool = True
     self_update: bool = True
     docker: bool = False
+    discovery: bool = False
 
 
 class ProfileCollection(BaseModel):
@@ -719,7 +722,7 @@ class HeartbeatIn(BaseModel):
 
 
 class CommandIn(BaseModel):
-    kind: Literal["shell", "power", "service", "refresh", "package", "docker"]
+    kind: Literal["shell", "power", "service", "refresh", "package", "docker", "discovery"]
     args: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -814,6 +817,57 @@ class DiscoverySettingsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     acknowledged: bool
     acknowledgement: str = Field(default="", max_length=500)
+
+
+class DiscoveryReportDeviceIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ip: str = Field(min_length=1, max_length=64)
+    mac: str = Field(default="", max_length=64)
+    hostname: str = Field(default="", max_length=255)
+    vendor: str = Field(default="", max_length=255)
+    open_ports: list[int] = Field(default_factory=list, max_length=64)
+    services: dict[str, Any] = Field(default_factory=dict)
+    mdns: dict[str, Any] = Field(default_factory=dict)
+    ssdp: dict[str, Any] = Field(default_factory=dict)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("ip")
+    @classmethod
+    def _ip(cls, value: str) -> str:
+        import ipaddress
+
+        try:
+            return str(ipaddress.ip_address(value.strip()))
+        except ValueError:
+            raise ValueError("invalid IP address") from None
+
+    @field_validator("open_ports")
+    @classmethod
+    def _ports(cls, value: list[int]) -> list[int]:
+        for port in value:
+            if not 1 <= int(port) <= 65535:
+                raise ValueError("TCP ports must be between 1 and 65535")
+        return list(dict.fromkeys(int(port) for port in value))
+
+    @field_validator("services", "mdns", "ssdp", "evidence")
+    @classmethod
+    def _bounded_evidence(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if len(value) > 64:
+            raise ValueError("evidence objects are limited to 64 keys")
+        if len(json.dumps(value, separators=(",", ":"), default=str)) > 8192:
+            raise ValueError("evidence object exceeds 8192 bytes")
+        return value
+
+
+class DiscoveryReportIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scan_id: str = Field(pattern=r"^dsc_[A-Za-z0-9]+$")
+    source: str = Field(default="", max_length=128)
+    collected_at: str = Field(default="", max_length=64)
+    segment: str = Field(default="", max_length=128)
+    devices: list[DiscoveryReportDeviceIn] = Field(default_factory=list, max_length=512)
+    truncated: bool = False
+    error: str = Field(default="", max_length=4000)
 
 
 class CommandResultIn(BaseModel):

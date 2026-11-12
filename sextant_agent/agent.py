@@ -194,6 +194,9 @@ class AgentRunner:
         if kind == "docker":
             self._execute_docker(command)
             return
+        if kind == "discovery":
+            self._execute_discovery(command)
+            return
         if kind == "refresh":
             self.collector.request_inventory_refresh()
             self.docker.request_inventory()
@@ -334,6 +337,69 @@ class AgentRunner:
         result["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self._post_result(command_id, result)
 
+    def _execute_discovery(self, command: dict[str, Any]) -> None:
+        from .discovery import AgentDiscoveryError, discovery_allowed, run_agent_scan
+
+        command_id = str(command.get("id", ""))
+        args = command.get("args") if isinstance(command.get("args"), dict) else {}
+        started = time.time()
+        if not discovery_allowed(self.config, self.remote_policy):
+            result = {
+                "status": "failed",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "error": "Agent discovery is disabled by local config or server policy.",
+            }
+        elif str(args.get("action", "")).lower() != "discovery.scan":
+            result = {
+                "status": "failed",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "error": "Unsupported discovery action.",
+            }
+        else:
+            scan_id = str(args.get("scan_id", "") or "")
+            try:
+                if not scan_id:
+                    raise AgentDiscoveryError("scan_id is required")
+                report = run_agent_scan(
+                    scope=args.get("scope") or [],
+                    methods=args.get("methods") or [],
+                    ports=args.get("ports") or [],
+                    timeout_ms=int(args.get("timeout_ms", 600)),
+                    concurrency=int(args.get("concurrency", 16)),
+                    max_hosts=int(args.get("max_hosts", 512)),
+                    excludes=args.get("exclude") or [],
+                    deadline_seconds=float(args.get("budget_seconds") or 120.0),
+                )
+                if report.get("status") != "succeeded":
+                    raise AgentDiscoveryError(str(report.get("error") or "Discovery scan failed."))
+                self.client.report_discovery(scan_id, report)
+                result = {
+                    "status": "succeeded",
+                    "exit_code": 0,
+                    "stdout": (
+                        f"Discovery scan {scan_id} reported "
+                        f"{len(report.get('devices') or [])} device(s) for "
+                        f"{report.get('segment') or 'the agent segment'}."
+                    ),
+                    "stderr": "",
+                    "error": "",
+                }
+            except Exception as exc:
+                result = {
+                    "status": "failed",
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "error": f"Discovery scan failed: {exc}"[:4000],
+                }
+        result["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started))
+        result["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self._post_result(command_id, result)
+
     def _upload_docker_inventory(self, force: bool = False) -> bool:
         payload = self.docker.collect_inventory(force=force)
         if payload is None:
@@ -429,6 +495,9 @@ class AgentRunner:
         self.remote_policy["allow_docker_prune"] = bool(
             self.remote_policy.get("allow_docker_prune", False)
         ) and bool(modules.get("docker", False))
+        self.remote_policy["allow_discovery"] = bool(
+            self.remote_policy.get("allow_discovery", False)
+        ) and bool(modules.get("discovery", False))
         self.collector.set_profile(profile)
         self.docker.set_profile(profile)
         self.docker.set_policy(self.remote_policy)
@@ -448,6 +517,7 @@ class AgentRunner:
             "allow_docker_exec": bool(policy.get("allow_docker_exec", False)),
             "allow_docker_compose": bool(policy.get("allow_docker_compose", False)),
             "allow_docker_prune": bool(policy.get("allow_docker_prune", False)),
+            "allow_discovery": bool(policy.get("allow_discovery", False)),
         }
         self.docker.set_policy(self.remote_policy)
 

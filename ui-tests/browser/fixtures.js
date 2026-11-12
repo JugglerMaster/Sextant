@@ -566,6 +566,7 @@ const discoverySettings = {
   methods: ["neigh", "dns", "oui", "ssdp", "tcp"],
   probe_ports: [22, 80, 443, 8006],
   active_probes: true,
+  agent_relay: true,
   interval_hours: 0,
   max_hosts: 1024,
   concurrency: 32,
@@ -709,10 +710,37 @@ function createApi(session) {
           ...discoverySettings,
           enabled: !session.discoveryDisabled,
           acknowledged,
+          agent_relay: !session.discoveryRelayDisabled,
           acknowledged_at: acknowledged ? discoverySettings.acknowledged_at : null,
           disabled_reasons: session.discoveryDisabled
             ? ["SEXTANT_DISCOVERY_ENABLED is 0."]
             : [],
+        },
+      };
+    }
+    if (key === "/api/discovery/agents") {
+      return {
+        status: 200,
+        body: {
+          relay_enabled: !session.discoveryRelayDisabled,
+          agents: session.discoveryRelayDisabled
+            ? []
+            : [
+                {
+                  id: "agt_demo",
+                  name: "Studio PC",
+                  hostname: "studio-pc",
+                  os: "linux",
+                  ip: "192.168.1.20",
+                  segment: "192.168.1.0/24",
+                  online: true,
+                  eligible: true,
+                  reasons: [],
+                  discovery_module: true,
+                  allow_discovery: true,
+                },
+              ],
+          local_flag_required: true,
         },
       };
     }
@@ -783,6 +811,33 @@ function createApi(session) {
           limit: 50,
           offset: 0,
           active_scan_id: activeScan?.status === "running" ? activeScan.id : null,
+        },
+      };
+    }
+    if (method === "POST" && /^\/api\/agents\/[^/]+\/discover$/.test(key)) {
+      const agentId = key.split("/")[3];
+      activeScan = {
+        id: "dsc_agent",
+        started_at: "2026-11-06T08:05:00Z",
+        finished_at: null,
+        scope: body?.scope || ["192.168.1.0/24"],
+        methods: body?.methods || ["neigh"],
+        initiated_by: "admin",
+        agent_id: agentId,
+        source: `agent:${agentId}`,
+        command_id: "cmd_discovery",
+        status: "queued",
+        hosts_found: 0,
+        error: "",
+        progress: 0,
+        hosts_scanned: 0,
+        cancel_requested: false,
+      };
+      return {
+        status: 200,
+        body: {
+          scan: activeScan,
+          command: { id: "cmd_discovery", kind: "discovery", args: { action: "discovery.scan" }, status: "queued" },
         },
       };
     }

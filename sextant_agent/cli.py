@@ -50,6 +50,7 @@ def cmd_enroll(args: argparse.Namespace) -> int:
         allow_docker_exec=bool(getattr(args, "allow_docker_exec", False)),
         allow_docker_compose=bool(getattr(args, "allow_docker_compose", False)),
         allow_docker_prune=bool(getattr(args, "allow_docker_prune", False)),
+        allow_discovery=bool(getattr(args, "allow_discovery", False)),
         docker_socket=getattr(args, "docker_socket", "") or "unix:///var/run/docker.sock",
         docker_command=getattr(args, "docker_command", "") or "docker",
         docker_timeout=int(getattr(args, "docker_timeout", 60)),
@@ -87,6 +88,7 @@ def cmd_enroll(args: argparse.Namespace) -> int:
         allow_docker_exec=bool(getattr(args, "allow_docker_exec", False)),
         allow_docker_compose=bool(getattr(args, "allow_docker_compose", False)),
         allow_docker_prune=bool(getattr(args, "allow_docker_prune", False)),
+        allow_discovery=bool(getattr(args, "allow_discovery", False)),
         docker_socket=getattr(args, "docker_socket", "") or "unix:///var/run/docker.sock",
         docker_command=getattr(args, "docker_command", "") or "docker",
         docker_timeout=int(getattr(args, "docker_timeout", 60)),
@@ -189,6 +191,11 @@ def build_parser() -> argparse.ArgumentParser:
     enroll.add_argument("--allow-docker-exec", action="store_true", help="Reserved for Docker exec/console support")
     enroll.add_argument("--allow-docker-compose", action="store_true", help="Reserved for Docker Compose support")
     enroll.add_argument("--allow-docker-prune", action="store_true", help="Reserved for Docker prune support")
+    enroll.add_argument(
+        "--allow-discovery",
+        action="store_true",
+        help="Allow server-requested discovery scans of this agent's local subnet (Linux only)",
+    )
     enroll.add_argument("--docker-socket", default="", help="Docker socket or DOCKER_HOST (default unix:///var/run/docker.sock)")
     enroll.add_argument("--docker-command", default="", help="Docker CLI command/path (default docker)")
     enroll.add_argument("--docker-timeout", type=int, default=60)

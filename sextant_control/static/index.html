@@ -273,6 +273,8 @@
               <div><p class="eyebrow">Server-side</p><h2>Scan the allowlist</h2></div>
             </div>
             <form id="discovery-scan-form" class="form-stack">
+              <label class="field"><span>Scan source</span><select id="discovery-scan-source"></select></label>
+              <p class="form-hint" id="discovery-source-hint"></p>
               <label class="field"><span>Scope</span><select id="discovery-scan-scope" required></select></label>
               <fieldset class="field discovery-methods">
                 <legend>Methods</legend>
@@ -528,6 +530,7 @@
                 <label class="checkbox-row"><input type="checkbox" name="module_package_management" checked><span>Package management</span></label>
                 <label class="checkbox-row"><input type="checkbox" name="module_self_update" checked><span>Self-update</span></label>
                 <label class="checkbox-row"><input type="checkbox" name="module_docker"><span>Docker (read-only inventory)</span></label>
+                <label class="checkbox-row"><input type="checkbox" name="module_discovery"><span>Discovery (agent-relayed scans)</span></label>
               </div>
               <p class="eyebrow">Action gates</p>
               <div class="checkbox-grid">
@@ -670,6 +673,7 @@
         <label class="checkbox-row"><input type="checkbox" name="allow_shell"> Remote shell</label>
         <label class="checkbox-row"><input type="checkbox" name="allow_power"> Power actions</label>
         <label class="checkbox-row"><input type="checkbox" name="allow_service"> Service control</label>
+        <label class="checkbox-row"><input type="checkbox" name="allow_discovery"> Agent-relayed discovery</label>
       </div>
       <p class="form-hint">Server policy can restrict actions, but it cannot override a local agent config that already denies them. Changes apply on the next heartbeat.</p>
       <p class="form-error" id="agent-edit-error" role="alert"></p>

@@ -98,6 +98,9 @@ fi
 if [[ "${ALLOW_DOCKER_PRUNE:-0}" == "1" ]]; then
   ENROLL_ARGS+=(--allow-docker-prune)
 fi
+if [[ "${ALLOW_DISCOVERY:-0}" == "1" ]]; then
+  ENROLL_ARGS+=(--allow-discovery)
+fi
 if [[ -n "${DOCKER_SOCKET:-}" ]]; then
   ENROLL_ARGS+=(--docker-socket "$DOCKER_SOCKET")
 fi

@@ -450,6 +450,21 @@ const discoveryScans = [
     cancel_requested: false,
   },
 ];
+const discoveryAgents = [
+  {
+    id: "agt_demo",
+    name: "Studio PC",
+    hostname: "studio-pc",
+    os: "linux",
+    ip: "192.168.1.20",
+    segment: "192.168.1.0/24",
+    online: true,
+    eligible: true,
+    reasons: [],
+    discovery_module: true,
+    allow_discovery: true,
+  },
+];
 let discoveryActiveScan = null;
 
 const responses = {
@@ -576,6 +591,10 @@ const responses = {
   },
   "/api/remote-install": { status: 200, body: { jobs: [] } },
   "/api/discovery/settings": { status: 200, body: discoverySettings },
+  "/api/discovery/agents": {
+    status: 200,
+    body: { relay_enabled: true, agents: discoveryAgents, local_flag_required: true },
+  },
   "/api/discovery/devices": {
     status: 200,
     body: { devices: discoveryDevices, total: discoveryDevices.length, limit: 50, offset: 0, summary: discoverySummary },
@@ -747,6 +766,15 @@ window.fetch = async (path, options = {}) => {
         disabled_reasons: ["SEXTANT_DISCOVERY_ENABLED is 0."],
       },
     };
+  } else if (method === "GET" && key === "/api/discovery/agents" && (window.__discoveryRelayDisabled || window.__discoveryNoAgents)) {
+    response = {
+      status: 200,
+      body: {
+        relay_enabled: !window.__discoveryRelayDisabled,
+        agents: window.__discoveryNoAgents ? [] : discoveryAgents,
+        local_flag_required: true,
+      },
+    };
   } else if (method === "PATCH" && key === "/api/discovery/settings") {
     discoverySettings.acknowledged = Boolean(body?.acknowledged);
     discoverySettings.acknowledged_at = body?.acknowledged ? "2026-11-06T08:05:00Z" : null;
@@ -816,6 +844,33 @@ window.fetch = async (path, options = {}) => {
         limit: 50,
         offset: 0,
         active_scan_id: discoveryActiveScan?.status === "running" ? discoveryActiveScan.id : null,
+      },
+    };
+  } else if (method === "POST" && /^\/api\/agents\/[^/]+\/discover$/.test(key)) {
+    const agentId = key.split("/")[3];
+    const scan = {
+      id: "dsc_agent",
+      started_at: "2026-11-06T08:05:00Z",
+      finished_at: null,
+      scope: body?.scope || ["192.168.1.0/24"],
+      methods: body?.methods || ["neigh"],
+      initiated_by: "admin",
+      agent_id: agentId,
+      source: `agent:${agentId}`,
+      command_id: "cmd_discovery",
+      status: "queued",
+      hosts_found: 0,
+      error: "",
+      progress: 0,
+      hosts_scanned: 0,
+      cancel_requested: false,
+    };
+    discoveryActiveScan = scan;
+    response = {
+      status: 200,
+      body: {
+        scan,
+        command: { id: "cmd_discovery", kind: "discovery", args: { action: "discovery.scan", scan_id: "dsc_agent" }, status: "queued" },
       },
     };
   } else if (method === "POST" && key === "/api/discovery/scan") {
@@ -1980,6 +2035,36 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   await sleep(30);
   if (!discoveryDrawer.hidden) throw new Error("Discovery drawer did not close");
 
+  const discoverySource = window.document.getElementById("discovery-scan-source");
+  if (![...discoverySource.options].some((option) => option.textContent.includes("Studio PC"))) {
+    throw new Error("Discovery agent source option is missing");
+  }
+  discoverySource.value = "agent:agt_demo";
+  discoverySource.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(30);
+  if (window.document.getElementById("discovery-scan-scope").value !== "192.168.1.0/24") {
+    throw new Error("Discovery agent source did not select the agent segment");
+  }
+  window.document.getElementById("discovery-scan-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(100);
+  const agentScanRequest = window.__requests.find(
+    (request) => request.method === "POST" && request.path === "/api/agents/agt_demo/discover",
+  );
+  if (!agentScanRequest || agentScanRequest.body.scope[0] !== "192.168.1.0/24") {
+    throw new Error("Agent-relayed discovery scan was not started");
+  }
+  if (window.document.getElementById("discovery-scan-progress").hidden) {
+    throw new Error("Agent discovery progress did not appear");
+  }
+  window.document.getElementById("discovery-scan-cancel").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(100);
+  if (!window.document.getElementById("discovery-scan-progress").hidden) {
+    throw new Error("Agent discovery progress should hide after cancellation");
+  }
+  discoverySource.value = "server";
+  discoverySource.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(30);
+
   const discoveryStart = window.document.getElementById("discovery-scan-start");
   window.document.getElementById("discovery-scan-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
   await sleep(100);
@@ -2030,6 +2115,19 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!window.document.getElementById("discovery-ack-panel").hidden) {
     throw new Error("Discovery acknowledgement panel should hide after authorization");
   }
+
+  window.__discoveryRelayDisabled = true;
+  window.document.querySelector('[data-page="overview"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  window.document.querySelector('[data-page="discovery"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  const relaySource = window.document.getElementById("discovery-scan-source");
+  if (relaySource.options.length !== 1 || relaySource.value !== "server") {
+    throw new Error("Discovery relay-disabled source state is wrong");
+  }
+  if (!window.document.getElementById("discovery-source-hint").textContent.includes("SEXTANT_DISCOVERY_AGENT_RELAY")) {
+    throw new Error("Discovery relay-disabled hint is missing");
+  }
+  window.__discoveryRelayDisabled = false;
 
   const themeToggle = window.document.getElementById("theme-toggle");
   if (!themeToggle) throw new Error("theme toggle missing");
@@ -2100,7 +2198,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/table/drawer/edit/scan-start/cancel/disabled/unacknowledged states, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/table/drawer/edit/server-and-agent scan source/start/cancel/relay-disabled/disabled/unacknowledged states, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

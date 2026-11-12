@@ -131,6 +131,16 @@ class AgentClient:
             timeout=max(15, self.config.timeout),
         )
 
+    def report_discovery(self, scan_id: str, report: dict[str, Any]) -> dict[str, Any]:
+        agent_id = urllib.parse.quote(self.config.agent_id, safe="")
+        return self._request(
+            "POST",
+            f"/api/agent/{agent_id}/discovery/report",
+            {"scan_id": scan_id, "source": f"agent:{self.config.agent_id}", **report},
+            token=self.config.agent_token,
+            timeout=max(30, self.config.timeout),
+        )
+
     def upload_docker_inventory(self, payload: dict[str, Any]) -> dict[str, Any]:
         agent_id = urllib.parse.quote(self.config.agent_id, safe="")
         return self._request(

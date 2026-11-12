@@ -84,7 +84,7 @@ Key properties:
 | `docker_deployments` | Per-host Compose deploy/update/down/restart/pull history, command link, active revision, Compose config-hash baseline, bounded log |
 | `docker_console_sessions` | Console session metadata: agent/container/shell/user/status/timestamps/exit/error; no stdin or output |
 | `discovered_devices` | One row per merged discovery identity: MAC/IP/hostname/vendor, type/OS/confidence, segment/source, bounded evidence, state, agent/wake links, tags/notes, randomized-MAC flag |
-| `discovery_scans` | Requested scope/methods, initiator, status, progress, host counts, cancellation flag, bounded error |
+| `discovery_scans` | Requested scope/methods, initiator, source (`server` or `agent:<id>`), agent/command binding, status, progress, host counts, cancellation flag, bounded error |
 | `discovery_events` | Deduplicated `new_device`, `new_port`, `service_changed`, `identity_conflict`, `went_dark`, and reserved `promoted` events |
 | `discovery_settings` | Single-row audited acknowledgement of the network-scan authorization statement |
 | `agent_profiles` | Server-managed behavior profiles (cadence, modules, action gates, update policy) |
@@ -162,6 +162,20 @@ are never merged and produce an `identity_conflict` event. Agents and wake
 targets are linked by MAC. Change events are deduplicated by
 `(device_id, kind, detail)`; devices are retained until deleted/ignored while
 scans and events share `SEXTANT_DISCOVERY_RETENTION_DAYS`.
+
+Agent relay (D3) reuses the existing outbound command/heartbeat path rather than
+opening an inbound port. `POST /api/agents/{id}/discover` creates a scan row with
+`agent_id`, `source=agent:<id>`, and a `command_id`, then queues a `discovery`
+command containing only validated scope/excludes/methods/ports/timeout/
+concurrency/host-cap data. The Linux agent revalidates locally, runs a bounded
+scan of its own VLAN, and posts a capped report to
+`POST /api/agent/{id}/discovery/report` with its bearer token. The server binds
+the report to the scan's agent, rejects out-of-scope or excluded device IPs,
+merges all devices in one transaction (`merge_observations`), applies the same
+classification/event deduplication, and marks the scan finished. Windows agents
+return `unsupported`. The effective gate is the intersection of the relay switch,
+the profile `discovery` module, the per-agent `allow_discovery` policy, and the
+local agent `allow_discovery` flag; the local denial always wins.
 
 Discovery is disabled by default and requires both the environment switch and
 the stored acknowledgement. Raw sockets, packet capture, exploit modules, and

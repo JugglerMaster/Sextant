@@ -31,12 +31,15 @@ from .config import Settings
 from .db import Database, DEFAULT_PROFILES, dumps, loads, parse_iso, utcnow, utcnow_iso
 from .discovery import (
     ACKNOWLEDGEMENT,
+    DeviceObservation,
     DiscoveryBusy,
     DiscoveryError,
     DiscoveryManager,
     DiscoveryRateLimited,
     expand_targets,
+    merge_observations,
     parse_scope,
+    segment_for_ip,
     validate_allowlist,
     validate_excludes,
     validate_methods,
@@ -71,6 +74,7 @@ from .models import (
     DockerInventoryIn,
     DockerSettingsIn,
     DiscoveryDevicePatchIn,
+    DiscoveryReportIn,
     DiscoveryScanIn,
     DiscoverySettingsIn,
     DockerStackIn,
@@ -1020,6 +1024,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 status_code=409,
                                 detail="Another Docker mutation is already active for this host.",
                             )
+            if kind == "discovery":
+                if (
+                    not config.discovery.enabled
+                    or not config.discovery.agent_relay
+                    or str(agent["os"]).lower() != "linux"
+                    or not _discovery_module_enabled(profile_row)
+                    or agent_policy.get("allow_discovery", False) is not True
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Agent discovery is disabled by the server relay switch, "
+                            "agent profile, or server policy."
+                        ),
+                    )
+                active_discovery = conn.execute(
+                    """SELECT 1 FROM commands
+                       WHERE agent_id = ? AND kind = 'discovery'
+                         AND status IN ('queued', 'dispatched', 'running')
+                       LIMIT 1""",
+                    (agent_id,),
+                ).fetchone()
+                if active_discovery is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Another discovery scan is already active for this agent.",
+                    )
             last_seen = parse_iso(agent["last_seen"])
             online = bool(
                 last_seen and (utcnow() - last_seen).total_seconds() <= config.offline_after_seconds
@@ -3387,6 +3418,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 payload.allow_docker_exec,
                 payload.allow_docker_compose,
                 payload.allow_docker_prune,
+                payload.allow_discovery,
             )
         ):
             raise HTTPException(status_code=400, detail="No agent changes supplied.")
@@ -3433,6 +3465,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "allow_docker_exec",
                 "allow_docker_compose",
                 "allow_docker_prune",
+                "allow_discovery",
             ):
                 value = getattr(payload, flag)
                 if value is not None:
@@ -3456,6 +3489,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "allow_docker_exec": bool(policy.get("allow_docker_exec", False)),
                             "allow_docker_compose": bool(policy.get("allow_docker_compose", False)),
                             "allow_docker_prune": bool(policy.get("allow_docker_prune", False)),
+                            "allow_discovery": bool(policy.get("allow_discovery", False)),
                         }
                     ),
                     agent_id,
@@ -3478,6 +3512,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "allow_docker_exec": bool(policy.get("allow_docker_exec", False)),
                     "allow_docker_compose": bool(policy.get("allow_docker_compose", False)),
                     "allow_docker_prune": bool(policy.get("allow_docker_prune", False)),
+                    "allow_discovery": bool(policy.get("allow_discovery", False)),
                 },
                 ip=client_ip(request, config.trust_proxy),
                 conn=conn,
@@ -4402,15 +4437,436 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail="The scan is already finished.")
         manager: DiscoveryManager = request.app.state.discovery_manager
         manager.cancel(scan_id)
+        cancelled_now = False
+        if row["agent_id"]:
+            with database.transaction() as conn:
+                if row["command_id"]:
+                    command_row = conn.execute(
+                        "SELECT * FROM commands WHERE id = ? AND agent_id = ?",
+                        (row["command_id"], row["agent_id"]),
+                    ).fetchone()
+                    if command_row is not None and command_row["status"] == "queued":
+                        conn.execute(
+                            """UPDATE commands SET status = 'cancelled', completed_at = ?, error = ?
+                               WHERE id = ? AND status = 'queued'""",
+                            (utcnow_iso(), "Cancelled by the operator.", row["command_id"]),
+                        )
+                        if row["status"] == "queued":
+                            database.update_discovery_scan(
+                                scan_id,
+                                status="cancelled",
+                                finished_at=utcnow_iso(),
+                                error="Cancelled before dispatch.",
+                                conn=conn,
+                            )
+                            cancelled_now = True
         database.audit(
             actor=user["username"],
             action="discovery.scan_cancel_requested",
             target=scan_id,
-            detail={"status": row["status"]},
+            detail={
+                "status": row["status"],
+                "agent_id": row["agent_id"],
+                "cancelled_now": cancelled_now,
+            },
             ip=client_ip(request, config.trust_proxy),
         )
+        if cancelled_now:
+            database.audit(
+                actor=user["username"],
+                action="discovery.scan_cancelled",
+                target=scan_id,
+                detail={"source": row["source"], "agent_id": row["agent_id"]},
+                ip=client_ip(request, config.trust_proxy),
+            )
         updated = database.get_discovery_scan(scan_id)
         return {"scan": discovery_scan_to_dict(updated) if updated is not None else None}
+
+    @app.get("/api/discovery/agents")
+    def list_discovery_agents(
+        user: dict[str, Any] = Depends(current_user),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        del user
+        try:
+            allowlist = validate_allowlist(config.discovery.cidrs)
+        except DiscoveryError:
+            allowlist = []
+        with database.connection() as conn:
+            rows = conn.execute("SELECT * FROM agents ORDER BY name COLLATE NOCASE").fetchall()
+        agents: list[dict[str, Any]] = []
+        now = utcnow()
+        for row in rows:
+            profile_row = database.get_profile_by_id(
+                row["profile_id"]
+            ) or database.get_profile_by_slug("workstation")
+            policy = loads(row["policy"], {})
+            if not isinstance(policy, dict):
+                policy = {}
+            agent_ip = str(row["ip"] or "")
+            segment = ""
+            try:
+                address = ipaddress.ip_address(agent_ip)
+            except ValueError:
+                address = None
+            if address is not None:
+                containing = [network for network in allowlist if address in network]
+                if containing:
+                    segment = str(max(containing, key=lambda item: item.prefixlen))
+            reasons: list[str] = []
+            if not config.discovery.agent_relay:
+                reasons.append("SEXTANT_DISCOVERY_AGENT_RELAY is 0.")
+            if str(row["os"]).lower() != "linux":
+                reasons.append("Agent-relayed discovery is Linux only.")
+            if not _discovery_module_enabled(profile_row):
+                reasons.append("The agent profile does not enable the discovery module.")
+            if policy.get("allow_discovery", False) is not True:
+                reasons.append("The per-agent policy does not allow discovery.")
+            if address is None:
+                reasons.append("The agent has not reported an IP address.")
+            elif not segment:
+                reasons.append("The agent IP is not inside SEXTANT_DISCOVERY_CIDRS.")
+            last_seen = parse_iso(row["last_seen"])
+            agents.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "hostname": row["hostname"],
+                    "os": row["os"],
+                    "ip": agent_ip,
+                    "segment": segment,
+                    "online": bool(
+                        last_seen
+                        and (now - last_seen).total_seconds() <= config.offline_after_seconds
+                    ),
+                    "eligible": not reasons,
+                    "reasons": reasons,
+                    "discovery_module": _discovery_module_enabled(profile_row),
+                    "allow_discovery": policy.get("allow_discovery", False) is True,
+                }
+            )
+        return {
+            "relay_enabled": config.discovery.agent_relay,
+            "agents": agents,
+            "local_flag_required": True,
+        }
+
+    @app.post("/api/agents/{agent_id}/discover")
+    def start_agent_discovery(
+        agent_id: str,
+        payload: DiscoveryScanIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_operator),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if not config.discovery.enabled:
+            raise HTTPException(
+                status_code=403,
+                detail="Discovery is disabled. Set SEXTANT_DISCOVERY_ENABLED=1 first.",
+            )
+        if not config.discovery.agent_relay:
+            raise HTTPException(
+                status_code=403,
+                detail="Agent-relayed discovery is disabled (SEXTANT_DISCOVERY_AGENT_RELAY=0).",
+            )
+        acknowledgement = database.get_discovery_settings()
+        if acknowledgement is None or not acknowledgement["acknowledged_at"]:
+            raise HTTPException(
+                status_code=403,
+                detail="Discovery authorization acknowledgement is required.",
+            )
+        with database.connection() as conn:
+            agent_row = conn.execute(
+                "SELECT * FROM agents WHERE id = ?", (agent_id,)
+            ).fetchone()
+        if agent_row is None:
+            raise HTTPException(status_code=404, detail="Agent not found.")
+        profile_row = database.get_profile_by_id(
+            agent_row["profile_id"]
+        ) or database.get_profile_by_slug("workstation")
+        if not _discovery_effective_allowed(agent_row, profile_row, config):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Agent discovery is blocked by the relay switch, platform, "
+                    "agent profile, or per-agent policy."
+                ),
+            )
+        try:
+            allowlist = validate_allowlist(config.discovery.cidrs)
+            excludes = validate_excludes(config.discovery.exclude)
+            if payload.scope:
+                scope = parse_scope(payload.scope, allowlist)
+            else:
+                scope = []
+                try:
+                    agent_address = ipaddress.ip_address(str(agent_row["ip"] or ""))
+                except ValueError:
+                    raise DiscoveryError(
+                        "The agent has no reported IP address; choose an allowlisted scope explicitly."
+                    ) from None
+                containing = [network for network in allowlist if agent_address in network]
+                if not containing:
+                    raise DiscoveryError(
+                        "The agent IP is outside the configured discovery allowlist."
+                    )
+                scope = [max(containing, key=lambda item: item.prefixlen)]
+            if str(agent_row["ip"] or "").strip():
+                try:
+                    agent_address = ipaddress.ip_address(str(agent_row["ip"]))
+                except ValueError:
+                    agent_address = None
+                if agent_address is not None and not any(
+                    agent_address in network for network in scope
+                ):
+                    raise DiscoveryError(
+                        "The selected scope does not contain the agent's reported IP address."
+                    )
+            methods = validate_methods(config.discovery, payload.methods)
+            targets = expand_targets(scope, excludes, config.discovery.max_hosts)
+            if not targets:
+                raise DiscoveryError("The selected scope has no scan targets.")
+        except DiscoveryError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+        if database.active_agent_discovery_scan(agent_id) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Another discovery scan is already active for this agent.",
+            )
+        scan = database.create_discovery_scan(
+            [str(network) for network in scope],
+            methods,
+            user["username"],
+            agent_id=agent_id,
+            source=f"agent:{agent_id}",
+        )
+        args = {
+            "action": "discovery.scan",
+            "scan_id": scan["id"],
+            "scope": [str(network) for network in scope],
+            "methods": methods,
+            "ports": list(config.discovery.probe_ports),
+            "timeout_ms": config.discovery.timeout_ms,
+            "concurrency": min(32, config.discovery.concurrency),
+            "max_hosts": config.discovery.max_hosts,
+            "budget_seconds": 120,
+            "exclude": [str(network) for network in excludes],
+        }
+        try:
+            command = queue_command(
+                agent_id,
+                "discovery",
+                args,
+                user,
+                request,
+                database,
+                config,
+                audit_action="discovery.scan_started",
+                extra_detail={
+                    "scan_id": scan["id"],
+                    "source": f"agent:{agent_id}",
+                    "scope": [str(network) for network in scope],
+                    "methods": methods,
+                    "targets": len(targets),
+                },
+            )
+        except HTTPException:
+            database.update_discovery_scan(
+                scan["id"],
+                status="failed",
+                finished_at=utcnow_iso(),
+                error="The discovery command could not be queued.",
+            )
+            raise
+        database.update_discovery_scan(scan["id"], command_id=command["id"])
+        updated = database.get_discovery_scan(scan["id"])
+        return {
+            "scan": discovery_scan_to_dict(updated) if updated is not None else None,
+            "command": command,
+        }
+
+    @app.post("/api/agent/{agent_id}/discovery/report")
+    def agent_discovery_report(
+        agent_id: str,
+        payload: DiscoveryReportIn,
+        request: Request,
+        agent: dict[str, Any] = Depends(agent_auth),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        del agent
+        if not config.discovery.enabled or not config.discovery.agent_relay:
+            raise HTTPException(status_code=404, detail="Agent discovery is disabled.")
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > 1_000_000:
+                    raise HTTPException(
+                        status_code=413, detail="Discovery report exceeds the 1 MB limit."
+                    )
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid Content-Length.") from None
+        scan = database.get_discovery_scan(payload.scan_id)
+        if scan is None or str(scan["agent_id"] or "") != agent_id:
+            raise HTTPException(status_code=404, detail="Discovery scan not found for this agent.")
+        if scan["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail="Discovery scan was cancelled.")
+        if scan["status"] in {"succeeded", "failed"}:
+            return {
+                "scan": discovery_scan_to_dict(scan),
+                "devices_merged": 0,
+                "idempotent": True,
+            }
+        if bool(scan["cancel_requested"]):
+            database.update_discovery_scan(
+                scan["id"],
+                status="cancelled",
+                finished_at=utcnow_iso(),
+                error="Cancelled before the agent report arrived.",
+            )
+            database.audit(
+                actor=scan["initiated_by"],
+                action="discovery.scan_cancelled",
+                target=scan["id"],
+                detail={"source": scan["source"], "agent_id": agent_id},
+            )
+            raise HTTPException(status_code=409, detail="Discovery scan was cancelled.")
+        def fail_report(message: str, status_code: int = 400) -> None:
+            database.update_discovery_scan(
+                scan["id"],
+                status="failed",
+                finished_at=utcnow_iso(),
+                error=message[:4000],
+            )
+            database.audit(
+                actor=scan["initiated_by"],
+                action="discovery.scan_finished",
+                target=scan["id"],
+                detail={
+                    "status": "failed",
+                    "source": scan["source"],
+                    "agent_id": agent_id,
+                    "error": message[:500],
+                },
+            )
+            notify_dashboard()
+            raise HTTPException(status_code=status_code, detail=message)
+
+        if payload.error:
+            database.update_discovery_scan(
+                scan["id"],
+                status="failed",
+                finished_at=utcnow_iso(),
+                error=payload.error[:4000],
+            )
+            database.audit(
+                actor=scan["initiated_by"],
+                action="discovery.scan_finished",
+                target=scan["id"],
+                detail={
+                    "status": "failed",
+                    "source": scan["source"],
+                    "agent_id": agent_id,
+                    "error": payload.error[:500],
+                },
+            )
+            notify_dashboard()
+            return {"scan": discovery_scan_to_dict(database.get_discovery_scan(scan["id"])), "devices_merged": 0}
+
+        try:
+            scope = [validate_network(value) for value in loads(scan["scope"], [])]
+            excludes = validate_excludes(config.discovery.exclude)
+        except DiscoveryError as exc:
+            fail_report(str(exc))
+        observations: list[DeviceObservation] = []
+        for device in payload.devices:
+            address = ipaddress.ip_address(device.ip)
+            if not any(address in network for network in scope):
+                fail_report(f"Reported device {device.ip} is outside the scan scope.")
+            if any(address in network for network in excludes):
+                fail_report(f"Reported device {device.ip} is excluded from scanning.")
+            segment = segment_for_ip(device.ip, scope) or (
+                payload.segment[:128] if payload.segment in {str(item) for item in scope} else ""
+            )
+            evidence = dict(device.evidence or {})
+            evidence.update(
+                {
+                    "agent_id": agent_id,
+                    "reported_segment": payload.segment[:128],
+                    "reported_source": payload.source[:128],
+                    "collected_at": payload.collected_at[:64],
+                    "agent_relay": True,
+                }
+            )
+            observations.append(
+                DeviceObservation(
+                    ip=device.ip,
+                    mac=device.mac,
+                    hostname=device.hostname,
+                    vendor=device.vendor,
+                    source=f"agent:{agent_id}",
+                    segment=segment,
+                    open_ports=device.open_ports,
+                    services=device.services,
+                    mdns=device.mdns,
+                    ssdp=device.ssdp,
+                    evidence=evidence,
+                )
+            )
+        stamp = payload.collected_at if parse_iso(payload.collected_at) else utcnow_iso()
+        try:
+            merged = merge_observations(
+                database, observations, scan_id=scan["id"], now=stamp
+            )
+        except Exception as exc:  # noqa: BLE001 - report failures must be visible
+            database.update_discovery_scan(
+                scan["id"],
+                status="failed",
+                finished_at=utcnow_iso(),
+                error=f"Report merge failed: {type(exc).__name__}",
+            )
+            database.audit(
+                actor=scan["initiated_by"],
+                action="discovery.scan_finished",
+                target=scan["id"],
+                detail={
+                    "status": "failed",
+                    "source": scan["source"],
+                    "agent_id": agent_id,
+                    "error": type(exc).__name__,
+                },
+            )
+            raise HTTPException(status_code=400, detail="Discovery report could not be merged.") from None
+        database.update_discovery_scan(
+            scan["id"],
+            status="succeeded",
+            finished_at=utcnow_iso(),
+            hosts_found=len(merged),
+            hosts_scanned=len(observations),
+            progress=100,
+            error="",
+        )
+        database.audit(
+            actor=scan["initiated_by"],
+            action="discovery.scan_finished",
+            target=scan["id"],
+            detail={
+                "status": "succeeded",
+                "source": scan["source"],
+                "agent_id": agent_id,
+                "hosts_found": len(merged),
+                "truncated": bool(payload.truncated),
+            },
+        )
+        notify_dashboard()
+        updated = database.get_discovery_scan(scan["id"])
+        return {
+            "scan": discovery_scan_to_dict(updated) if updated is not None else None,
+            "devices_merged": len(merged),
+            "truncated": bool(payload.truncated),
+        }
 
     @app.post("/api/agents/{agent_id}/rotate-token")
     def rotate_agent_token(
@@ -4543,6 +4999,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "allow_docker_prune",
             ):
                 policy_defaults[docker_gate] = True
+            policy_defaults.setdefault("allow_discovery", False)
             default_policy = dumps(policy_defaults)
             agent_id = existing["id"] if existing else "agt_" + secrets.token_hex(12)
             agent_token = new_token("sextant_agent_")
@@ -4878,6 +5335,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         profile_row = profile_row_for_docker
         profile_settings = _profile_settings(profile_row)
         profile_actions = _policy_from_settings(profile_settings)
+        profile_modules = (
+            profile_settings.get("modules")
+            if isinstance(profile_settings.get("modules"), dict)
+            else {}
+        )
         watch_services = loads(agent["watch_services"], [])
         if not isinstance(watch_services, list):
             watch_services = []
@@ -4893,6 +5355,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             and profile_actions["allow_docker_compose"],
             "allow_docker_prune": bool(policy.get("allow_docker_prune", True))
             and profile_actions["allow_docker_prune"],
+            "allow_discovery": bool(policy.get("allow_discovery", False))
+            and bool(profile_modules.get("discovery", False)),
             "watch_services": watch_services,
         }
         request_docker_inventory = ""
@@ -5155,6 +5619,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=404, detail="Command not found.")
             conn.execute("UPDATE agents SET last_seen = ? WHERE id = ?", (utcnow_iso(), agent_id))
             updated = conn.execute("SELECT * FROM commands WHERE id = ?", (command_id,)).fetchone()
+            if row["kind"] == "discovery":
+                scan_row = conn.execute(
+                    "SELECT * FROM discovery_scans WHERE command_id = ? LIMIT 1",
+                    (command_id,),
+                ).fetchone()
+                if scan_row is not None and scan_row["status"] in {"queued", "running"}:
+                    scan_status = final_status
+                    scan_error = payload.error[:4000]
+                    if final_status == "succeeded":
+                        scan_status = "failed"
+                        scan_error = "Agent finished without a discovery report."
+                    if bool(scan_row["cancel_requested"]):
+                        scan_status = "cancelled"
+                        scan_error = "Cancelled by the operator."
+                    database.update_discovery_scan(
+                        scan_row["id"],
+                        status=scan_status,
+                        finished_at=utcnow_iso(),
+                        error=scan_error,
+                        conn=conn,
+                    )
+                    database.audit(
+                        actor=row["created_by"],
+                        action="discovery.scan_finished",
+                        target=scan_row["id"],
+                        detail={
+                            "status": scan_status,
+                            "source": scan_row["source"],
+                            "agent_id": agent_id,
+                            "error": scan_error[:500],
+                        },
+                        conn=conn,
+                    )
             if row["kind"] == "docker":
                 docker_args = loads(row["args"], {})
                 if not isinstance(docker_args, dict):
@@ -6258,6 +6755,26 @@ def _docker_module_enabled(profile_row: Any) -> bool:
     settings = _profile_settings(profile_row)
     modules = settings.get("modules") if isinstance(settings.get("modules"), dict) else {}
     return bool(modules.get("docker", False))
+
+
+def _discovery_module_enabled(profile_row: Any) -> bool:
+    settings = _profile_settings(profile_row)
+    modules = settings.get("modules") if isinstance(settings.get("modules"), dict) else {}
+    return bool(modules.get("discovery", False))
+
+
+def _discovery_effective_allowed(agent_row: Any, profile_row: Any, config: Settings) -> bool:
+    if not config.discovery.enabled or not config.discovery.agent_relay:
+        return False
+    os_name = str(agent_row["os"] if "os" in agent_row.keys() else agent_row.get("os", "")).lower()
+    if os_name != "linux":
+        return False
+    if not _discovery_module_enabled(profile_row):
+        return False
+    policy = loads(agent_row["policy"] if "policy" in agent_row.keys() else agent_row.get("policy"), {})
+    if not isinstance(policy, dict):
+        policy = {}
+    return bool(policy.get("allow_discovery", False))
 
 
 def _docker_effective_allowed(agent_row: Any, profile_row: Any, config: Settings) -> bool:

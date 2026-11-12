@@ -71,6 +71,9 @@ const state = {
     devices: [],
     summary: null,
     scans: [],
+    agents: [],
+    relayEnabled: false,
+    source: "server",
     activeScanId: null,
     detail: null,
     selectedId: null,
@@ -3223,6 +3226,7 @@ function openAgentEditDialog(agent) {
   form.elements.allow_shell.checked = agent.policy?.allow_shell !== false;
   form.elements.allow_power.checked = agent.policy?.allow_power !== false;
   form.elements.allow_service.checked = agent.policy?.allow_service !== false;
+  form.elements.allow_discovery.checked = agent.policy?.allow_discovery === true;
   setText("agent-edit-error", "");
   $("agent-edit-dialog").showModal();
 }
@@ -3616,6 +3620,7 @@ const PROFILE_MODULE_FIELDS = [
   "package_management",
   "self_update",
   "docker",
+  "discovery",
 ];
 const PROFILE_ACTION_FIELDS = ["allow_shell", "allow_power", "allow_service", "allow_packages", "allow_docker"];
 const PROFILE_FUTURE_ACTION_FIELDS = ["allow_docker_exec", "allow_docker_compose", "allow_docker_prune"];
@@ -6290,6 +6295,7 @@ function renderDiscovery() {
   renderDiscoverySummary();
   renderDiscoveryFilters();
   renderDiscoveryMethods();
+  renderDiscoverySources();
   renderDiscoveryScanHistory();
   renderDiscoveryTable();
 }
@@ -6418,6 +6424,57 @@ function renderDiscoveryMethods() {
   );
 }
 
+function discoveryAgentName(agentId) {
+  return (
+    (state.discovery.agents || []).find((agent) => agent.id === agentId)?.name ||
+    (state.dashboard?.agents || []).find((agent) => agent.id === agentId)?.name ||
+    agentId
+  );
+}
+
+function renderDiscoverySources() {
+  const select = $("discovery-scan-source");
+  if (!select) return;
+  const discovery = state.discovery;
+  const eligible = discovery.relayEnabled
+    ? (discovery.agents || []).filter((agent) => agent.eligible)
+    : [];
+  clear(select);
+  select.append(h("option", { value: "server" }, "This server"));
+  for (const agent of eligible) {
+    select.append(
+      h(
+        "option",
+        { value: `agent:${agent.id}` },
+        `${agent.name}${agent.online ? "" : " (offline)"} · ${agent.ip || agent.hostname || "no address"}${agent.segment ? ` · ${agent.segment}` : ""}`,
+      ),
+    );
+  }
+  const values = ["server", ...eligible.map((agent) => `agent:${agent.id}`)];
+  if (!values.includes(discovery.source)) discovery.source = "server";
+  select.value = discovery.source;
+
+  if (!discovery.relayEnabled) {
+    setText(
+      "discovery-source-hint",
+      "Agent-relayed scans are disabled. Set SEXTANT_DISCOVERY_AGENT_RELAY=1 to let an enrolled Linux agent scan its own VLAN.",
+    );
+    return;
+  }
+  if (!eligible.length) {
+    const reasons = [...new Set((discovery.agents || []).flatMap((agent) => agent.reasons || []))];
+    setText(
+      "discovery-source-hint",
+      `No agent is currently eligible for relayed discovery.${reasons.length ? ` ${reasons.join(" ")}` : ""} The agent must also have allow_discovery=true locally.`,
+    );
+    return;
+  }
+  setText(
+    "discovery-source-hint",
+    "Each agent scans only its own allowlisted segment and reports back over its outbound heartbeat connection. The local agent flag is a hard ceiling.",
+  );
+}
+
 function discoveryStateKind(value) {
   return value === "new" ? "warning" : value === "promoted" ? "online" : value === "ignored" ? "offline" : "neutral";
 }
@@ -6506,6 +6563,9 @@ function renderDiscoveryScanHistory() {
           : scan.status === "cancelled"
             ? "offline"
             : "warning";
+    const sourceLabel = scan.agent_id
+      ? `Agent ${discoveryAgentName(scan.agent_id)}`
+      : "Server";
     container.append(
       h(
         "div",
@@ -6517,7 +6577,7 @@ function renderDiscoveryScanHistory() {
           h(
             "small",
             {},
-            `${(scan.methods || []).join(", ")} · ${localTime(scan.started_at)} · ${scan.initiated_by}`,
+            `${sourceLabel} · ${(scan.methods || []).join(", ")} · ${localTime(scan.started_at)} · ${scan.initiated_by}`,
           ),
           scan.error ? h("small", {}, scan.error) : null,
         ),
@@ -6554,7 +6614,7 @@ async function loadDiscovery() {
     discovery.settings = await api("/api/discovery/settings");
     renderDiscovery();
     if (!discoveryReady()) return;
-    await Promise.all([loadDiscoveryDevices(), loadDiscoveryScans()]);
+    await Promise.all([loadDiscoveryDevices(), loadDiscoveryScans(), loadDiscoveryAgents()]);
     renderDiscovery();
     armDiscoveryPoll();
   } catch (error) {
@@ -6591,6 +6651,20 @@ async function loadDiscoveryScans() {
   state.discovery.scans = data.scans || [];
   state.discovery.activeScanId = data.active_scan_id || null;
   renderDiscoveryScanHistory();
+}
+
+async function loadDiscoveryAgents() {
+  const data = await api("/api/discovery/agents");
+  state.discovery.agents = data.agents || [];
+  state.discovery.relayEnabled = Boolean(data.relay_enabled);
+  if (state.discovery.source !== "server") {
+    const sourceId = state.discovery.source.slice("agent:".length);
+    const current = state.discovery.agents.find(
+      (agent) => agent.id === sourceId && agent.eligible,
+    );
+    if (!current) state.discovery.source = "server";
+  }
+  renderDiscoverySources();
 }
 
 function stopDiscoveryPoll() {
@@ -6639,12 +6713,22 @@ async function startDiscoveryScan(event) {
   }
   const start = $("discovery-scan-start");
   if (start) start.disabled = true;
+  const source = state.discovery.source || "server";
   try {
-    await api("/api/discovery/scan", {
-      method: "POST",
-      body: { scope: [scope], methods },
-    });
-    toast("Discovery scan queued.");
+    if (source.startsWith("agent:")) {
+      const agentId = source.slice("agent:".length);
+      await api(`/api/agents/${encodeURIComponent(agentId)}/discover`, {
+        method: "POST",
+        body: { scope: [scope], methods },
+      });
+      toast("Agent discovery scan queued.");
+    } else {
+      await api("/api/discovery/scan", {
+        method: "POST",
+        body: { scope: [scope], methods },
+      });
+      toast("Discovery scan queued.");
+    }
     await loadDiscoveryScans();
     armDiscoveryPoll();
   } catch (error) {
@@ -7119,6 +7203,19 @@ function wireEvents() {
     });
   });
   $("discovery-ack-button")?.addEventListener("click", acknowledgeDiscovery);
+  $("discovery-scan-source")?.addEventListener("change", (event) => {
+    const source = event.target.value || "server";
+    state.discovery.source = source;
+    if (source.startsWith("agent:")) {
+      const agentId = source.slice("agent:".length);
+      const agent = (state.discovery.agents || []).find((item) => item.id === agentId);
+      const scope = $("discovery-scan-scope");
+      if (agent?.segment && scope && [...scope.options].some((option) => option.value === agent.segment)) {
+        scope.value = agent.segment;
+      }
+    }
+    renderDiscoverySources();
+  });
   $("discovery-scan-form")?.addEventListener("submit", startDiscoveryScan);
   $("discovery-scan-cancel")?.addEventListener("click", cancelDiscoveryScan);
   document.querySelectorAll("[data-close-discovery-drawer]").forEach((el) => {
@@ -7384,6 +7481,7 @@ function wireEvents() {
           allow_shell: form.elements.allow_shell.checked,
           allow_power: form.elements.allow_power.checked,
           allow_service: form.elements.allow_service.checked,
+          allow_discovery: form.elements.allow_discovery.checked,
         },
       });
       $("agent-edit-dialog").close();

@@ -14,8 +14,11 @@ semantic versioning.
   connect/banner/TLS fingerprinting, device classification, MAC/IP/hostname
   merging, deduplicated change events, a cancellable bounded scan worker, and a
   Discovery page with filters, device drawer, scan progress/history, and
-  disabled/unacknowledged states. Agent-relayed discovery, export, promotion,
-  and integrations remain future phases.
+  disabled/unacknowledged states. Agent-relayed discovery (D3) lets an eligible
+  Linux agent scan its own allowlisted VLAN over the existing outbound command
+  channel and report bounded results back; local, profile, per-agent policy, and
+  server relay gates all apply. Export, promotion, and integrations remain future
+  phases.
 
 ## [0.4.1] - 2026-11-11
 

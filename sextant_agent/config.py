@@ -45,6 +45,7 @@ class AgentConfig:
     allow_docker_exec: bool = False
     allow_docker_compose: bool = False
     allow_docker_prune: bool = False
+    allow_discovery: bool = False
     docker_socket: str = "unix:///var/run/docker.sock"
     docker_command: str = "docker"
     docker_timeout: int = 60

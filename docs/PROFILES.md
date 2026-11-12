@@ -54,7 +54,8 @@ The selected profile is stored on the agent at enrollment. Its settings live on 
     "service_control": true,
     "package_management": true,
     "self_update": true,
-    "docker": false
+    "docker": false,
+    "discovery": false
   },
   "collection": {
     "service_inventory_seconds": 21600,
@@ -91,7 +92,7 @@ Ranges:
 | `docker_inventory_seconds` | 60–86400 |
 | `max_output_bytes` | 1,024–1,000,000 |
 
-Modules disable collection or action paths. Disabling telemetry still leaves the heartbeat/liveness channel working but sends empty metrics. Disabling `package_management` forces package actions off even if `allow_packages` is true. Docker is off by default in both built-in profiles: enable `modules.docker` **and** `actions.allow_docker`, then install/enroll the Linux agent with `ALLOW_DOCKER=1`. Local agent config remains a hard ceiling. D2 uses `allow_docker_exec` for one-shot exec and `allow_docker_prune` for cleanup; D3 uses `allow_docker_compose` for Compose deploy/down/restart/pull. D4 uses the same `allow_docker_exec` gate for the interactive container console (there is no separate console-toggle profile flag). Enabling Compose therefore requires local `allow_docker_compose`, the profile module, and profile `allow_docker_compose`; enabling console/one-shot exec requires local `allow_docker_exec` plus profile `allow_docker_exec`.
+Modules disable collection or action paths. Disabling telemetry still leaves the heartbeat/liveness channel working but sends empty metrics. Disabling `package_management` forces package actions off even if `allow_packages` is true. Docker is off by default in both built-in profiles: enable `modules.docker` **and** `actions.allow_docker`, then install/enroll the Linux agent with `ALLOW_DOCKER=1`. Local agent config remains a hard ceiling. Agent-relayed discovery is off by default: enable `modules.discovery`, set the per-agent policy `allow_discovery`, enable `SEXTANT_DISCOVERY_AGENT_RELAY=1`, and install/enroll the Linux agent with `ALLOW_DISCOVERY=1`. The agent's local flag is the final hard ceiling. D2 uses `allow_docker_exec` for one-shot exec and `allow_docker_prune` for cleanup; D3 uses `allow_docker_compose` for Compose deploy/down/restart/pull. D4 uses the same `allow_docker_exec` gate for the interactive container console (there is no separate console-toggle profile flag). Enabling Compose therefore requires local `allow_docker_compose`, the profile module, and profile `allow_docker_compose`; enabling console/one-shot exec requires local `allow_docker_exec` plus profile `allow_docker_exec`.
 
 ---
 
@@ -99,7 +100,7 @@ Modules disable collection or action paths. Disabling telemetry still leaves the
 
 1. At enrollment, the server resolves the requested profile slug and stores `profile_id` on the agent. The enrollment response includes the profile slug and heartbeat interval, and the agent's per-agent policy is initialized from the profile's action gates.
 2. Every heartbeat response includes the full `profile` object and its revision.
-3. The agent applies heartbeat interval, collection cadences, module flags (including `docker`), Docker inventory cadence, max output, and self-update policy immediately. No reinstall is needed.
+3. The agent applies heartbeat interval, collection cadences, module flags (including `docker` and `discovery`), Docker inventory cadence, max output, and self-update policy immediately. No reinstall is needed. Discovery also requires the per-agent policy `allow_discovery` and the local agent flag.
 4. Profile edits bump the revision; agents apply the new settings on their next heartbeat. The per-agent policy remains a **narrowing** override only — it can restrict an action further but cannot widen the profile.
 5. If an agent is offline, it keeps its last profile until the next heartbeat.
 

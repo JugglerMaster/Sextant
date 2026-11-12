@@ -55,7 +55,7 @@ sextant = "sextant_control.cli:main"
 sextant-agent = "sextant_agent.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["sextant_control*", "sextant_agent*"]
+include = ["sextant_common*", "sextant_control*", "sextant_agent*"]
 
 [tool.setuptools.package-data]
 sextant_control = ["static/*"]

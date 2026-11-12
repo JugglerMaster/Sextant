@@ -649,8 +649,81 @@ returns `409`. The worker notices the request between hosts and records
 `discovery.scan_cancelled`; a normal finish records
 `discovery.scan_finished`.
 
-No agent-relay scan route exists in D1–D2; `SEXTANT_DISCOVERY_AGENT_RELAY` is
-parsed for the future D3 work.
+### Agent relay (D3)
+
+`GET /api/discovery/agents` (viewer+) returns relay eligibility:
+
+```json
+{
+  "relay_enabled": true,
+  "local_flag_required": true,
+  "agents": [{
+    "id": "agt_…", "name": "VLAN 20 scanner", "hostname": "scan-20",
+    "os": "linux", "ip": "192.168.20.10", "segment": "192.168.20.0/24",
+    "online": true, "eligible": true, "reasons": [],
+    "discovery_module": true, "allow_discovery": true
+  }]
+}
+```
+
+Relay is eligible only when `SEXTANT_DISCOVERY_ENABLED=1`,
+`SEXTANT_DISCOVERY_AGENT_RELAY=1`, the agent is Linux, the profile enables
+`modules.discovery`, and the per-agent policy has `allow_discovery=true`. The
+agent's local `allow_discovery` flag is a separate hard ceiling and is not
+visible to the server.
+
+`POST /api/agents/{agent_id}/discover` (operator+, CSRF) queues a scan for one
+agent:
+
+```json
+{"scope": ["192.168.20.0/24"], "methods": ["neigh", "dns", "oui", "ssdp", "tcp"]}
+```
+
+`scope` is optional; when omitted the server uses the allowlisted CIDR that
+contains the agent's reported IP. Every supplied scope must contain the agent
+IP, be inside `SEXTANT_DISCOVERY_CIDRS`, and respect excludes and
+`SEXTANT_DISCOVERY_MAX_HOSTS`. The response contains the `scan` row and the
+queued `discovery` command. One scan may be active per agent. The scan records
+`agent_id`, `source=agent:<id>`, and `command_id`; `GET /api/discovery/scans`
+includes those fields.
+
+The agent posts bounded results with its bearer token:
+
+```http
+POST /api/agent/{agent_id}/discovery/report
+Authorization: Bearer sextant_agent_…
+Content-Type: application/json
+
+{
+  "scan_id": "dsc_…",
+  "source": "agent:agt_…",
+  "collected_at": "2026-11-12T08:00:00Z",
+  "segment": "192.168.20.0/24",
+  "devices": [{
+    "ip": "192.168.20.40",
+    "mac": "b8:27:eb:11:22:33",
+    "hostname": "printer.lan",
+    "vendor": "Raspberry Pi Foundation",
+    "open_ports": [22, 80, 631],
+    "services": {"22": {"protocol": "ssh", "banner": "SSH-2.0-OpenSSH_9.6"}},
+    "mdns": {},
+    "ssdp": {},
+    "evidence": {"methods": ["neigh", "dns", "oui", "tcp"], "neighbor": true}
+  }],
+  "truncated": false,
+  "error": ""
+}
+```
+
+The report must belong to the authenticated agent's scan and the scan must still
+be queued/running. Failed reports mark the scan failed. Devices outside the scan
+scope or inside an exclude return `400` and fail the scan. Limits: 512 devices,
+64 ports and 8 KiB per evidence/service object, and a 1 MB request body (`413`
+above that). Merging is atomic and uses the same MAC → IP → hostname rules,
+classification, linkage, and event deduplication as server scans.
+`source=agent:<id>`, the computed segment, and relay evidence are stored on each
+device. Cancelling a queued agent scan also cancels its queued command; a report
+that arrives after cancellation is rejected and the scan stays cancelled.
 
 ## Docker Hosts (D1–D5)
 

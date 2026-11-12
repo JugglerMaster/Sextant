@@ -274,6 +274,7 @@ Optional installer variables:
 | `ALLOW_DOCKER` | Set to `1` to enable read-only Docker discovery/inventory (default `0`) |
 | `ALLOW_DOCKER_EXEC` / `ALLOW_DOCKER_PRUNE` | Enable one-shot container exec / cleanup actions locally |
 | `ALLOW_DOCKER_COMPOSE` | Reserved for future Compose support; stored in the agent config |
+| `ALLOW_DISCOVERY` | Set to `1` to allow server-requested discovery of this agent's local VLAN (Linux only, default `0`) |
 | `DOCKER_SOCKET` / `DOCKER_COMMAND` | Optional local Docker socket/CLI overrides |
 | `DOCKER_COMPOSE_DIR` | Agent-owned Compose runtime directory (default `/var/lib/sextant-agent/docker/stacks`) |
 | `DOCKER_CONSOLE_MAX_SESSIONS` / `DOCKER_CONSOLE_IDLE_SECONDS` | Optional concurrent-console and idle-timeout overrides |
@@ -288,6 +289,11 @@ The installer creates `/opt/sextant-agent/.venv`, the `current -> .venv` symlink
 Docker inventory also needs the assigned profile to enable `modules.docker` and
 `actions.allow_docker`; `ALLOW_DOCKER=1` only raises the local ceiling. Windows
 Docker is not supported.
+
+Agent-relayed discovery also needs the server relay switch, the profile
+`modules.discovery`, and the per-agent policy `allow_discovery`;
+`ALLOW_DISCOVERY=1` only raises the local ceiling. It is Linux only and the
+agent scans only the server-supplied allowlisted CIDR.
 
 ### 3.2 Manual install
 

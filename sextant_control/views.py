@@ -65,6 +65,65 @@ def validate_command_args(kind: str, args: dict[str, Any]) -> dict[str, Any]:
 
         return normalize_docker_command_args(args)
 
+    if kind == "discovery":
+        from .discovery import validate_excludes, validate_network
+
+        action = str(args.get("action", "")).strip().lower()
+        if action != "discovery.scan":
+            raise ValueError("discovery action must be discovery.scan")
+        scan_id = str(args.get("scan_id", "")).strip()
+        if not re.match(r"^dsc_[A-Za-z0-9]+$", scan_id):
+            raise ValueError("invalid discovery scan id")
+        scope = args.get("scope")
+        if not isinstance(scope, list) or not scope or len(scope) > 16:
+            raise ValueError("discovery scope must contain 1-16 CIDRs")
+        normalized_scope = [str(validate_network(str(item))) for item in scope]
+        methods = args.get("methods")
+        if not isinstance(methods, list) or not methods:
+            raise ValueError("discovery methods are required")
+        normalized_methods = [str(item).strip().lower() for item in methods]
+        allowed_methods = {"neigh", "dns", "oui", "ssdp", "tcp"}
+        if any(item not in allowed_methods for item in normalized_methods):
+            raise ValueError("unsupported discovery method")
+        ports = args.get("ports")
+        if not isinstance(ports, list) or not ports or len(ports) > 64:
+            raise ValueError("discovery ports must contain 1-64 ports")
+        normalized_ports: list[int] = []
+        for item in ports:
+            port = int(item)
+            if not 1 <= port <= 65535:
+                raise ValueError("discovery ports must be between 1 and 65535")
+            if port not in normalized_ports:
+                normalized_ports.append(port)
+        timeout_ms = int(args.get("timeout_ms", 600))
+        if not 100 <= timeout_ms <= 5000:
+            raise ValueError("discovery timeout_ms must be between 100 and 5000")
+        concurrency = int(args.get("concurrency", 16))
+        if not 1 <= concurrency <= 128:
+            raise ValueError("discovery concurrency must be between 1 and 128")
+        max_hosts = int(args.get("max_hosts", 512))
+        if not 1 <= max_hosts <= 4096:
+            raise ValueError("discovery max_hosts must be between 1 and 4096")
+        budget_seconds = int(args.get("budget_seconds", 120))
+        if not 5 <= budget_seconds <= 300:
+            raise ValueError("discovery budget_seconds must be between 5 and 300")
+        excludes = args.get("exclude") or []
+        if not isinstance(excludes, list) or len(excludes) > 32:
+            raise ValueError("discovery exclude must contain at most 32 CIDRs")
+        normalized_excludes = [str(item) for item in validate_excludes([str(item) for item in excludes])]
+        return {
+            "action": "discovery.scan",
+            "scan_id": scan_id,
+            "scope": list(dict.fromkeys(normalized_scope)),
+            "methods": list(dict.fromkeys(normalized_methods)),
+            "ports": normalized_ports,
+            "timeout_ms": timeout_ms,
+            "concurrency": concurrency,
+            "max_hosts": max_hosts,
+            "budget_seconds": budget_seconds,
+            "exclude": normalized_excludes,
+        }
+
     if kind == "package":
         actions = args.get("actions")
         if not isinstance(actions, list) or not actions:
@@ -615,6 +674,9 @@ def discovery_scan_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "scope": loads(row["scope"], []),
         "methods": loads(row["methods"], []),
         "initiated_by": row["initiated_by"],
+        "agent_id": row["agent_id"] if "agent_id" in row.keys() else "",
+        "source": row["source"] if "source" in row.keys() else "server",
+        "command_id": row["command_id"] if "command_id" in row.keys() else "",
         "status": row["status"],
         "hosts_found": int(row["hosts_found"] or 0),
         "error": row["error"],

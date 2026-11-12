@@ -1,12 +1,12 @@
 # Discovery — plan
 
-**Status:** D1–D2 implemented in 0.5.0. D3–D6 remain proposed.
+**Status:** D1–D3 implemented. D4–D6 remain proposed.
 
 **Scope:** find, identify, and analyze devices on the networks this console is authorized to manage, then offer a path from "found" to "managed" (wake target or enrolled agent).
 
-**Implemented now:** CIDR-scoped server-side discovery with allowlists and excludes, neighbour-table/PTR/OUI/SSDP collection, opt-in TCP connect and banner/TLS fingerprinting, classification, MAC/IP/hostname merging, deduplicated change events, a bounded background scan worker with cancellation, a read/write API, and a Discovery page. See [Implementation notes](#implementation-notes-d1d2) at the end of this document for the exact route and data-model decisions.
+**Implemented now:** CIDR-scoped server-side discovery with allowlists and excludes, neighbour-table/PTR/OUI/SSDP collection, opt-in TCP connect and banner/TLS fingerprinting, classification, MAC/IP/hostname merging, deduplicated change events, a bounded background scan worker with cancellation, a read/write API, a Discovery page, and opt-in agent-relayed scans for an enrolled Linux agent's local VLAN over the existing outbound command/heartbeat path. See [Implementation notes](#implementation-notes-d1d3) at the end of this document for the exact route and data-model decisions.
 
-**Not implemented yet:** agent-relayed scans (D3), analysis/reporting and export (D4), promotion/onboarding (D5), and DHCP/AP/hypervisor/SNMP integrations (D6).
+**Not implemented yet:** analysis/reporting and export (D4), promotion/onboarding (D5), and DHCP/AP/hypervisor/SNMP integrations (D6).
 
 Discovery is a separate concern from remote control. It answers *what is on the network*; control remains the existing agent path (queued shell, service management, power actions, WoL). Discovery does not add RDP/VNC/SSH/PTY support.
 
@@ -201,6 +201,8 @@ Analysis layer (what makes the list useful):
 | GET | `/api/discovery/scans/{id}` | viewer+ | progress/results |
 | POST | `/api/discovery/scan` | operator+ | start server-side scan |
 | POST | `/api/agents/{id}/discover` | operator+ | queue agent-relayed scan |
+| POST | `/api/agent/{id}/discovery/report` | agent bearer | ingest a bounded agent scan report |
+| GET | `/api/discovery/agents` | viewer+ | eligible agent sources and segments |
 | GET | `/api/discovery/export?format=csv` | admin | bounded export |
 | DELETE | `/api/discovery/devices/{id}` | admin | delete |
 
@@ -234,7 +236,7 @@ New **Discovery** page:
 | `SEXTANT_DISCOVERY_CONCURRENCY` | `32` | Probe concurrency |
 | `SEXTANT_DISCOVERY_TIMEOUT_MS` | `600` | Per-probe timeout |
 | `SEXTANT_DISCOVERY_RETENTION_DAYS` | `90` | Events/scan retention |
-| `SEXTANT_DISCOVERY_AGENT_RELAY` | `0` | Allow agent-relayed scans |
+| `SEXTANT_DISCOVERY_AGENT_RELAY` | `0` | Allow agent-relayed scans. Also requires the profile `discovery` module, per-agent `allow_discovery`, and local agent `allow_discovery` |
 | `SEXTANT_DISCOVERY_EXPORT_LIMIT` | `10000` | Max export rows |
 
 Agent-side: `allow_discovery` in `config.json` (default `false`), settable by installer, and server policy can restrict but never widen it.
@@ -259,7 +261,7 @@ Non-negotiable:
 |---|---|---|---|---|
 | **D1** ✅ | Schema + engine skeleton; server-side neighbor/PTR/OUI/SSDP; Discovery page read-only; API; audit; default off | M | low | A scan of an allowlisted CIDR returns devices with IP/MAC/vendor; no packets sent when disabled; viewer can read, operator can scan |
 | **D2** ✅ | Opt-in TCP fingerprint + banners + classifier + drift/new-device events | M | medium | New device/new port events are deduplicated; scan is rate-limited and cancellable; unknown stays unknown |
-| **D3** | Agent-relayed discovery for other VLANs (dedicated job channel, `allow_discovery`) | M | medium | An agent scans its own subnet and reports; server policy can disable; no inbound port opened |
+| **D3** ✅ | Agent-relayed discovery for other VLANs (`discovery.scan` over the existing outbound command/heartbeat path, `allow_discovery`) | M | medium | An agent scans its own subnet and reports; server policy can disable; local agent denial wins; no inbound port opened |
 | **D4** | Analysis: exposure report, identity conflicts, wake verification, CSV/JSON export | S–M | low | False-positive rate acceptable on a test LAN; exports are bounded and audited |
 | **D5** | Onboarding: promote to wake target; enrollment token + install command; link to agent | S | low | Promoted device is marked and auditable; no duplicate wake targets |
 | **D6** | Integrations: DHCP leases, UniFi/RouterOS/OPNsense, Proxmox/ESXi, SNMP | L each | low–medium | Import/merge does not overwrite operator metadata; failures are visible |
@@ -413,7 +415,7 @@ These are alternatives to the hybrid recommendation, not additions to it. Choose
 
 ---
 
-# Implementation notes (D1–D2)
+# Implementation notes (D1–D3)
 
 ## Configuration
 
@@ -430,7 +432,7 @@ These are alternatives to the hybrid recommendation, not additions to it. Choose
 | `SEXTANT_DISCOVERY_CONCURRENCY` | `32` | Probe worker cap (1–128), also bounded by the number of targets. |
 | `SEXTANT_DISCOVERY_TIMEOUT_MS` | `600` | Per-connect/banner timeout (100–5000 ms). |
 | `SEXTANT_DISCOVERY_RETENTION_DAYS` | `90` | Scans and discovery events older than this are pruned at startup and after each scan. Devices are retained until deleted or ignored. |
-| `SEXTANT_DISCOVERY_AGENT_RELAY` | `0` | Parsed and exposed for the future D3 path; D3 scan routes are not implemented. |
+| `SEXTANT_DISCOVERY_AGENT_RELAY` | `0` | Enables `POST /api/agents/{id}/discover` and agent report ingestion. Relay also requires the profile `discovery` module and per-agent `allow_discovery`; the agent's local `allow_discovery` is a hard ceiling. |
 | `SEXTANT_DISCOVERY_EXPORT_LIMIT` | `10000` | Parsed and exposed for the future D4 export; export is not implemented. |
 
 ## Safety model
@@ -441,6 +443,44 @@ These are alternatives to the hybrid recommendation, not additions to it. Choose
 - One scan runs at a time. Submissions are bounded by a small in-process queue and a five-second start rate limit; the UI can cancel a queued or running scan.
 - The scan worker is a daemon thread started by the FastAPI lifespan and stopped on shutdown. Cancellation is checked between hosts and futures. No work runs on the event loop.
 - DNS, neighbour, SSDP, and TCP work is best-effort. A failed host or port never aborts the scan or the worker.
+
+## Agent relay (D3)
+
+`POST /api/agents/{agent_id}/discover` (operator+) queues a `discovery.scan`
+command for an enrolled **Linux** agent and creates a `discovery_scans` row with
+`agent_id`, `source=agent:<id>`, and the queued `command_id`. The server passes
+only validated data: allowlisted CIDR scope, excludes, methods, the documented
+port set, timeout, concurrency, host cap, and a bounded budget. The agent
+validates all of it again locally, filters every candidate IP to the supplied
+scope, and refuses public, loopback, link-local, multicast, unspecified,
+reserved, and documentation ranges. Windows agents report `unsupported`.
+
+The effective relay gate is the intersection of:
+
+1. `SEXTANT_DISCOVERY_ENABLED=1`;
+2. `SEXTANT_DISCOVERY_AGENT_RELAY=1`;
+3. the assigned profile's `modules.discovery`;
+4. the per-agent policy `allow_discovery`;
+5. the agent's local `allow_discovery` (default `false`).
+
+The agent reports through the existing outbound connection to
+`POST /api/agent/{id}/discovery/report`. Reports are bearer-authenticated and
+bound to the scan's `agent_id`. Devices must be inside the scan scope and not
+excluded; row count is capped at 512, evidence objects are bounded, and the
+whole report body is capped at 1 MB. Merging and change detection are performed
+atomically through `merge_observations`, with `source=agent:<id>`, the computed
+segment, and relay evidence attached. The scan becomes `succeeded` only after a
+valid report; a command failure marks it failed, cancellation marks queued work
+cancelled immediately, and a report that arrives after cancellation is rejected.
+The agent uses the existing `ip neigh`/`arp -a`, PTR, shared OUI table, optional
+SSDP, and opt-in TCP/banner/TLS methods. It runs the scan as one bounded command
+action with a local deadline; no inbound port is opened and the heartbeat model
+is unchanged.
+
+The Discovery page adds a **Scan source** selector. It shows only eligible
+agents, their reported IP and allowlisted segment, and a relay-disabled or
+no-eligible-agent explanation. Selecting an agent scopes the form to that
+agent's segment; selecting **This server** uses the server-side worker from D1–D2.
 
 ## Data model
 
@@ -476,7 +516,8 @@ The top-level **Discovery** page is available to every signed-in user. It render
 
 ## Known limitations
 
-- Server-side discovery only sees the server's own L2 segment and its neighbour table. Agent-relayed multi-VLAN coverage is D3.
+- Server-side discovery only sees the server's own L2 segment and its neighbour table. Coverage of other VLANs requires an enrolled Linux agent on each segment with relay and local discovery enabled.
+- Agent-relayed scans run as a bounded command action while the agent's normal heartbeat loop is waiting; a very large active scan can delay that heartbeat for the scan budget (currently 120 seconds). No separate worker process or inbound listener is opened.
 - Passive SSDP requires the server to be able to bind UDP 1900; otherwise SSDP collection returns no results without failing the scan.
 - Reverse DNS depends on the host resolver and is best-effort.
 - TLS subject/SAN extraction uses the CPython stdlib X.509 test decoder; platforms that omit it still report an open TLS port but no certificate names.

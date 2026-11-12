@@ -165,8 +165,21 @@ Discovery is a network-scanning capability and is therefore **off by default**.
   implemented in D1–D2.
 - The scan worker is a bounded daemon thread with a cancellation event and a
   clean lifespan shutdown. It never blocks the FastAPI event loop.
-- Agent-relayed discovery (D3) is not implemented. `SEXTANT_DISCOVERY_AGENT_RELAY`
-  is parsed only so the future path can be gated explicitly.
+- Agent-relayed discovery (D3) is opt-in and uses the existing outbound
+  heartbeat/command path; no inbound port or new listening service is opened.
+  Relay requires `SEXTANT_DISCOVERY_AGENT_RELAY=1`, the profile `discovery`
+  module, the per-agent policy `allow_discovery`, and the local agent
+  `allow_discovery` flag. Local denial is a hard ceiling.
+- The server sends only validated scope/excludes/methods/ports/timeout/
+  concurrency/host-cap data to the agent. The agent revalidates it, filters every
+  candidate address to the supplied CIDR, never scans public/loopback/
+  link-local/multicast/unspecified/reserved/documentation ranges, and runs a
+  bounded action with a local deadline. Windows reports `unsupported`.
+- Agent reports are bearer-authenticated and bound to the scan's `agent_id`.
+  The server rejects reports for another agent's scan, out-of-scope or excluded
+  device IPs, more than 512 devices, oversized evidence objects, and bodies over
+  1 MB. Merging is atomic; report failure/cancellation marks the scan failed or
+  cancelled. A late report after cancellation is rejected.
 
 ## Docker inventory and actions (D1–D5)
 

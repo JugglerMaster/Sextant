@@ -25,6 +25,7 @@ param(
     [string]$Profile = "workstation",
     [switch]$AllowPackages,
     [switch]$NoPackages,
+    [switch]$AllowDiscovery,
     [switch]$NoSelfUpdate
 )
 
@@ -102,6 +103,7 @@ $enrollArgs = @(
 if ($CaFile) { $enrollArgs += @('--ca-file', $CaFile) }
 if ($AllowPackages) { $enrollArgs += '--allow-packages' }
 if ($NoPackages) { $enrollArgs += '--no-packages' }
+if ($AllowDiscovery) { $enrollArgs += '--allow-discovery' }
 if ($NoSelfUpdate) { $enrollArgs += '--no-self-update' }
 foreach ($service in $WatchServices) {
     if ($service) { $enrollArgs += @('--watch-service', $service) }

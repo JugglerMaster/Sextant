@@ -521,6 +521,9 @@ CREATE TABLE IF NOT EXISTS discovery_scans (
     scope TEXT NOT NULL DEFAULT '[]',
     methods TEXT NOT NULL DEFAULT '[]',
     initiated_by TEXT NOT NULL,
+    agent_id TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'server',
+    command_id TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'queued'
         CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
     hosts_found INTEGER NOT NULL DEFAULT 0,
@@ -589,6 +592,8 @@ CREATE INDEX IF NOT EXISTS idx_discovered_devices_last_seen ON discovered_device
 CREATE INDEX IF NOT EXISTS idx_discovered_devices_type ON discovered_devices(device_type);
 CREATE INDEX IF NOT EXISTS idx_discovery_scans_started ON discovery_scans(started_at);
 CREATE INDEX IF NOT EXISTS idx_discovery_scans_status ON discovery_scans(status);
+CREATE INDEX IF NOT EXISTS idx_discovery_scans_agent ON discovery_scans(agent_id, status);
+CREATE INDEX IF NOT EXISTS idx_discovery_scans_command ON discovery_scans(command_id);
 CREATE INDEX IF NOT EXISTS idx_discovery_events_at ON discovery_events(at);
 CREATE INDEX IF NOT EXISTS idx_discovery_events_device_at ON discovery_events(device_id, at);
 CREATE INDEX IF NOT EXISTS idx_discovery_events_kind ON discovery_events(kind, at);
@@ -615,6 +620,7 @@ DEFAULT_PROFILES = [
                 "package_management": True,
                 "self_update": True,
                 "docker": False,
+                "discovery": False,
             },
             "collection": {
                 "service_inventory_seconds": 21600,
@@ -656,6 +662,7 @@ DEFAULT_PROFILES = [
                 "package_management": True,
                 "self_update": True,
                 "docker": False,
+                "discovery": False,
             },
             "collection": {
                 "service_inventory_seconds": 3600,
@@ -761,8 +768,10 @@ class Database:
                 self._enable_profile_packages(conn)
             if old_version < 7:
                 self._ensure_docker_profile_defaults(conn)
+            if old_version < 13:
+                self._ensure_discovery_profile_defaults(conn)
             conn.executescript(INDEXES)
-            conn.execute("PRAGMA user_version=12")
+            conn.execute("PRAGMA user_version=13")
             conn.execute("UPDATE agents SET profile_id = 'prof_workstation' WHERE profile_id = ''")
         try:
             self.path.chmod(0o600)
@@ -840,6 +849,15 @@ class Database:
         if remote_columns and "watch_services" not in remote_columns:
             conn.execute("ALTER TABLE remote_install_jobs ADD COLUMN watch_services TEXT NOT NULL DEFAULT '[]'")
 
+        discovery_scan_columns = columns("discovery_scans")
+        if discovery_scan_columns:
+            if "agent_id" not in discovery_scan_columns:
+                conn.execute("ALTER TABLE discovery_scans ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''")
+            if "source" not in discovery_scan_columns:
+                conn.execute("ALTER TABLE discovery_scans ADD COLUMN source TEXT NOT NULL DEFAULT 'server'")
+            if "command_id" not in discovery_scan_columns:
+                conn.execute("ALTER TABLE discovery_scans ADD COLUMN command_id TEXT NOT NULL DEFAULT ''")
+
     @staticmethod
     def _seed_profiles(conn: sqlite3.Connection) -> None:
         now = utcnow_iso()
@@ -899,6 +917,34 @@ class Database:
                     "UPDATE agent_profiles SET settings = ?, revision = revision + 1 WHERE id = ?",
                     (dumps(settings), row["id"]),
                 )
+
+    @staticmethod
+    def _ensure_discovery_profile_defaults(conn: sqlite3.Connection) -> None:
+        """Add discovery-off defaults to profiles and agents from schema v12."""
+        for row in conn.execute("SELECT id, settings, revision FROM agent_profiles").fetchall():
+            settings = loads(row["settings"], {})
+            if not isinstance(settings, dict):
+                continue
+            modules = settings.get("modules")
+            if not isinstance(modules, dict):
+                modules = {}
+                settings["modules"] = modules
+            changed = False
+            if "discovery" not in modules:
+                modules["discovery"] = False
+                changed = True
+            if changed:
+                conn.execute(
+                    "UPDATE agent_profiles SET settings = ?, revision = revision + 1 WHERE id = ?",
+                    (dumps(settings), row["id"]),
+                )
+        for agent in conn.execute("SELECT id, policy FROM agents").fetchall():
+            policy = loads(agent["policy"], {})
+            if not isinstance(policy, dict):
+                policy = {}
+            if "allow_discovery" not in policy:
+                policy["allow_discovery"] = False
+                conn.execute("UPDATE agents SET policy = ? WHERE id = ?", (dumps(policy), agent["id"]))
 
     @staticmethod
     def _enable_profile_packages(conn: sqlite3.Connection) -> None:
@@ -3442,15 +3488,28 @@ class Database:
         initiated_by: str,
         *,
         status: str = "queued",
+        agent_id: str = "",
+        source: str = "server",
+        command_id: str = "",
     ) -> sqlite3.Row:
         scan_id = "dsc_" + secrets.token_hex(8)
         now = utcnow_iso()
         with self.connection() as conn:
             conn.execute(
                 """INSERT INTO discovery_scans
-                   (id, started_at, scope, methods, initiated_by, status)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (scan_id, now, dumps(scope), dumps(methods), initiated_by[:255], status),
+                   (id, started_at, scope, methods, initiated_by, agent_id, source, command_id, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    scan_id,
+                    now,
+                    dumps(scope),
+                    dumps(methods),
+                    initiated_by[:255],
+                    agent_id[:64],
+                    source[:128],
+                    command_id[:64],
+                    status,
+                ),
             )
             return conn.execute(
                 "SELECT * FROM discovery_scans WHERE id = ?", (scan_id,)
@@ -3460,6 +3519,26 @@ class Database:
         with self.connection() as conn:
             return conn.execute(
                 "SELECT * FROM discovery_scans WHERE id = ?", (scan_id,)
+            ).fetchone()
+
+    def get_discovery_scan_by_command(self, command_id: str) -> sqlite3.Row | None:
+        if not command_id:
+            return None
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT * FROM discovery_scans WHERE command_id = ? LIMIT 1",
+                (command_id,),
+            ).fetchone()
+
+    def active_agent_discovery_scan(self, agent_id: str) -> sqlite3.Row | None:
+        if not agent_id:
+            return None
+        with self.connection() as conn:
+            return conn.execute(
+                """SELECT * FROM discovery_scans
+                   WHERE agent_id = ? AND status IN ('queued', 'running')
+                   ORDER BY started_at DESC LIMIT 1""",
+                (agent_id,),
             ).fetchone()
 
     def list_discovery_scans(
@@ -3497,6 +3576,7 @@ class Database:
         progress: int | None = None,
         hosts_scanned: int | None = None,
         cancel_requested: bool | None = None,
+        command_id: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> None:
         fields: list[str] = []
@@ -3509,6 +3589,7 @@ class Database:
             ("progress", progress),
             ("hosts_scanned", hosts_scanned),
             ("cancel_requested", None if cancel_requested is None else int(cancel_requested)),
+            ("command_id", None if command_id is None else command_id[:64]),
         ):
             if value is not None:
                 fields.append(f"{column} = ?")

@@ -8,10 +8,10 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from sextant_control.config import DiscoverySettings, Settings
-from sextant_control.db import Database, utcnow
+from sextant_control.db import Database, dumps, loads, utcnow
 from sextant_control.discovery import ACKNOWLEDGEMENT, DeviceObservation, merge_observation
 from sextant_control.server import create_app
-from tests.helpers import ADMIN_PASSWORD, headers, login
+from tests.helpers import ADMIN_PASSWORD, enroll_agent, headers, login
 
 STATIC_DIR = Path(__file__).resolve().parents[1] / "sextant_control" / "static"
 
@@ -417,3 +417,328 @@ def test_discovery_retention_prunes_scans_and_events_but_keeps_devices(tmp_path)
     assert events >= 1
     assert database.get_discovery_scan("dsc_old") is None
     assert database.get_discovered_device(device["id"]) is not None
+
+
+def _eligible_agent(app, admin, name: str = "relay-box", ip: str = "192.168.1.10") -> dict:
+    agent = enroll_agent(admin, hostname=name)
+    database = app.state.db
+    with database.transaction() as conn:
+        row = conn.execute("SELECT profile_id, policy FROM agents WHERE id = ?", (agent["agent_id"],)).fetchone()
+        profile = conn.execute(
+            "SELECT settings FROM agent_profiles WHERE id = ?", (row["profile_id"],)
+        ).fetchone()
+        settings = loads(profile["settings"], {})
+        modules = settings.get("modules") if isinstance(settings.get("modules"), dict) else {}
+        modules["discovery"] = True
+        settings["modules"] = modules
+        conn.execute(
+            "UPDATE agent_profiles SET settings = ?, revision = revision + 1 WHERE id = ?",
+            (dumps(settings), row["profile_id"]),
+        )
+        policy = loads(row["policy"], {})
+        policy["allow_discovery"] = True
+        conn.execute(
+            "UPDATE agents SET policy = ?, ip = ? WHERE id = ?",
+            (dumps(policy), ip, agent["agent_id"]),
+        )
+    agent["client"] = admin["client"]
+    return agent
+
+
+def _agent_scan(admin, agent_id: str, scope=None, methods=None):
+    return admin["client"].post(
+        f"/api/agents/{agent_id}/discover",
+        json={
+            "scope": scope if scope is not None else ["192.168.1.0/24"],
+            "methods": methods if methods is not None else ["neigh", "dns", "oui"],
+        },
+        headers=headers(admin),
+    )
+
+
+def _report(agent: dict, scan_id: str, devices: list[dict], **overrides):
+    payload = {
+        "scan_id": scan_id,
+        "collected_at": "2026-11-12T08:00:00Z",
+        "segment": "192.168.1.0/24",
+        "devices": devices,
+        **overrides,
+    }
+    return agent["client"].post(
+        f"/api/agent/{agent['agent_id']}/discovery/report",
+        json=payload,
+        headers={"Authorization": f"Bearer {agent['agent_token']}"},
+    )
+
+
+def _report_device(**overrides):
+    values = {
+        "ip": "192.168.1.40",
+        "mac": "b8:27:eb:11:22:33",
+        "hostname": "printer.lan",
+        "vendor": "Raspberry Pi Foundation",
+        "open_ports": [22, 80, 631],
+        "services": {
+            "22": {"protocol": "ssh", "banner": "SSH-2.0-OpenSSH_9.6"},
+            "80": {"protocol": "http", "status": 200, "server": "nginx"},
+        },
+        "evidence": {"methods": ["neigh", "dns", "oui", "tcp"], "neighbor": True, "tcp": True},
+    }
+    values.update(overrides)
+    return values
+
+
+def test_agent_relay_disabled_and_eligibility(tmp_path):
+    app = create_app(_settings(tmp_path, agent_relay=False))
+    with TestClient(app) as client:
+        admin = login(client)
+        _ack(admin)
+        agent = _eligible_agent(app, admin)
+        rejected = _agent_scan(admin, agent["agent_id"])
+        assert rejected.status_code == 403
+        assert "AGENT_RELAY" in rejected.json()["detail"]
+        listing = client.get("/api/discovery/agents").json()
+        assert listing["relay_enabled"] is False
+        assert listing["agents"][0]["eligible"] is False
+        assert any("AGENT_RELAY" in reason for reason in listing["agents"][0]["reasons"])
+
+
+def test_agent_relay_profile_policy_and_platform_gates(tmp_path):
+    app = create_app(_settings(tmp_path, agent_relay=True))
+    with TestClient(app) as client:
+        admin = login(client)
+        _ack(admin)
+        agent = _eligible_agent(app, admin)
+        database = app.state.db
+        with database.transaction() as conn:
+            row = conn.execute("SELECT profile_id, policy FROM agents WHERE id = ?", (agent["agent_id"],)).fetchone()
+            profile = conn.execute(
+                "SELECT settings FROM agent_profiles WHERE id = ?", (row["profile_id"],)
+            ).fetchone()
+            settings = loads(profile["settings"], {})
+            settings["modules"]["discovery"] = False
+            conn.execute(
+                "UPDATE agent_profiles SET settings = ? WHERE id = ?",
+                (dumps(settings), row["profile_id"]),
+            )
+        blocked_profile = _agent_scan(admin, agent["agent_id"])
+        assert blocked_profile.status_code == 409
+        assert "profile" in blocked_profile.json()["detail"].lower()
+
+        with database.transaction() as conn:
+            profile = conn.execute(
+                "SELECT settings FROM agent_profiles WHERE id = ?", (row["profile_id"],)
+            ).fetchone()
+            settings = loads(profile["settings"], {})
+            settings["modules"]["discovery"] = True
+            conn.execute(
+                "UPDATE agent_profiles SET settings = ? WHERE id = ?",
+                (dumps(settings), row["profile_id"]),
+            )
+            policy = loads(row["policy"], {})
+            policy["allow_discovery"] = False
+            conn.execute(
+                "UPDATE agents SET policy = ? WHERE id = ?",
+                (dumps(policy), agent["agent_id"]),
+            )
+        blocked_policy = _agent_scan(admin, agent["agent_id"])
+        assert blocked_policy.status_code == 409
+
+        with database.transaction() as conn:
+            policy = loads(row["policy"], {})
+            policy["allow_discovery"] = True
+            conn.execute(
+                "UPDATE agents SET policy = ?, os = 'windows' WHERE id = ?",
+                (dumps(policy), agent["agent_id"]),
+            )
+        blocked_os = _agent_scan(admin, agent["agent_id"])
+        assert blocked_os.status_code == 409
+
+
+def test_agent_scan_lifecycle_cancel_and_ownership(tmp_path):
+    app = create_app(_settings(tmp_path, agent_relay=True))
+    with TestClient(app) as client:
+        admin = login(client)
+        _ack(admin)
+        agent = _eligible_agent(app, admin)
+        other = _eligible_agent(app, admin, name="other-box", ip="192.168.1.11")
+        started = _agent_scan(admin, agent["agent_id"])
+        assert started.status_code == 200, started.text
+        scan = started.json()["scan"]
+        assert scan["agent_id"] == agent["agent_id"]
+        assert scan["source"] == f"agent:{agent['agent_id']}"
+        assert scan["status"] == "queued"
+        command = started.json()["command"]
+        assert command["kind"] == "discovery"
+        assert command["args"]["action"] == "discovery.scan"
+        assert command["args"]["scan_id"] == scan["id"]
+        assert command["args"]["scope"] == ["192.168.1.0/24"]
+
+        # A different agent cannot report this scan.
+        wrong_owner = _report(other, scan["id"], [_report_device()])
+        assert wrong_owner.status_code == 404
+
+        cancelled = client.post(
+            f"/api/discovery/scans/{scan['id']}/cancel",
+            json={},
+            headers=headers(admin),
+        )
+        assert cancelled.status_code == 200
+        assert cancelled.json()["scan"]["status"] == "cancelled"
+        late = _report(agent, scan["id"], [_report_device()])
+        assert late.status_code == 409
+        assert client.get(f"/api/discovery/scans/{scan['id']}").json()["scan"]["status"] == "cancelled"
+        history = client.get("/api/discovery/scans").json()
+        assert history["scans"][0]["source"] == f"agent:{agent['agent_id']}"
+        audit_actions = {event["action"] for event in client.get("/api/audit").json()["events"]}
+        assert "discovery.scan_started" in audit_actions
+        assert "discovery.scan_cancelled" in audit_actions
+
+
+def test_agent_report_merges_source_segment_and_dedupes_events(tmp_path):
+    app = create_app(_settings(tmp_path, agent_relay=True))
+    with TestClient(app) as client:
+        admin = login(client)
+        _ack(admin)
+        agent = _eligible_agent(app, admin)
+        started = _agent_scan(admin, agent["agent_id"]).json()
+        first_scan = started["scan"]
+        reported = _report(agent, first_scan["id"], [_report_device()])
+        assert reported.status_code == 200, reported.text
+        assert reported.json()["devices_merged"] == 1
+        scan = client.get(f"/api/discovery/scans/{first_scan['id']}").json()["scan"]
+        assert scan["status"] == "succeeded"
+        assert scan["hosts_found"] == 1
+        assert scan["progress"] == 100
+
+        listing = client.get("/api/discovery/devices?q=printer").json()
+        assert listing["total"] == 1
+        device = listing["devices"][0]
+        assert device["source"] == f"agent:{agent['agent_id']}"
+        assert device["segment"] == "192.168.1.0/24"
+        assert device["device_type"] == "printer"
+        assert device["evidence"]["agent_id"] == agent["agent_id"]
+        assert device["evidence"]["agent_relay"] is True
+
+        # The same report is idempotent and does not duplicate events.
+        again = _report(agent, first_scan["id"], [_report_device()])
+        assert again.status_code == 200
+        assert again.json()["idempotent"] is True
+        with app.state.db.transaction() as conn:
+            conn.execute(
+                "UPDATE commands SET status = 'succeeded', completed_at = ? WHERE id = ?",
+                (utcnow().isoformat(timespec="seconds").replace("+00:00", "Z"), started["command"]["id"]),
+            )
+        events = client.get(
+            f"/api/discovery/devices/{device['id']}"
+        ).json()["events"]
+        assert [event["kind"] for event in events if event["kind"] == "new_device"] == ["new_device"]
+
+        # A second scan for the same device creates no duplicate new_device event.
+        second_scan = _agent_scan(admin, agent["agent_id"]).json()["scan"]
+        second_report = _report(agent, second_scan["id"], [_report_device()])
+        assert second_report.status_code == 200
+        assert second_report.json()["devices_merged"] == 1
+        events = client.get(
+            f"/api/discovery/devices/{device['id']}"
+        ).json()["events"]
+        assert [event["kind"] for event in events if event["kind"] == "new_device"] == ["new_device"]
+        listing = client.get("/api/discovery/devices").json()
+        assert listing["total"] == 1
+
+
+def test_agent_report_rejects_out_of_scope_and_unusual_caps(tmp_path):
+    app = create_app(_settings(tmp_path, agent_relay=True))
+    with TestClient(app) as client:
+        admin = login(client)
+        _ack(admin)
+        agent = _eligible_agent(app, admin)
+        scan = _agent_scan(admin, agent["agent_id"]).json()["scan"]
+        too_many = _report(
+            agent,
+            scan["id"],
+            [_report_device(ip=f"192.168.1.{index % 250 + 2}") for index in range(513)],
+        )
+        assert too_many.status_code == 422
+
+        oversized_device = _report_device(
+            evidence={"methods": ["neigh"], "blob": "a" * 8000}
+        )
+        oversized = _report(
+            agent,
+            scan["id"],
+            [oversized_device] * 130,
+        )
+        assert oversized.status_code == 413
+
+        out_of_scope = _report(agent, scan["id"], [_report_device(ip="192.168.2.40")])
+        assert out_of_scope.status_code == 400
+        assert "outside the scan scope" in out_of_scope.json()["detail"]
+
+
+def test_agent_scan_scope_and_host_cap_validation(tmp_path):
+    app = create_app(_settings(tmp_path, agent_relay=True, max_hosts=16))
+    with TestClient(app) as client:
+        admin = login(client)
+        _ack(admin)
+        agent = _eligible_agent(app, admin)
+        out_of_scope = _agent_scan(admin, agent["agent_id"], scope=["192.168.2.0/24"])
+        assert out_of_scope.status_code == 400
+        assert "outside" in out_of_scope.json()["detail"].lower()
+
+        too_large = _agent_scan(admin, agent["agent_id"], scope=["192.168.1.0/24"])
+        assert too_large.status_code == 400
+        assert "MAX_HOSTS" in too_large.json()["detail"]
+
+        wrong_segment = _agent_scan(admin, agent["agent_id"], scope=["10.20.0.0/24"])
+        assert wrong_segment.status_code == 400
+        assert "outside the configured discovery allowlist" in wrong_segment.json()["detail"]
+
+
+def test_agent_discovery_rbac_and_csrf(tmp_path):
+    app = create_app(_settings(tmp_path, agent_relay=True))
+    with TestClient(app) as client:
+        admin = login(client)
+        _ack(admin)
+        agent = _eligible_agent(app, admin)
+        created = client.post(
+            "/api/users",
+            json={
+                "username": "viewer2",
+                "display_name": "Viewer",
+                "role": "viewer",
+                "password": ADMIN_PASSWORD,
+            },
+            headers=headers(admin),
+        )
+        assert created.status_code == 200
+
+        no_csrf = client.post(
+            f"/api/agents/{agent['agent_id']}/discover",
+            json={"scope": ["192.168.1.0/24"], "methods": ["neigh"]},
+        )
+        assert no_csrf.status_code == 403
+
+        with TestClient(app) as viewer_client:
+            viewer = login(viewer_client, username="viewer2")
+            denied = viewer_client.post(
+                f"/api/agents/{agent['agent_id']}/discover",
+                json={"scope": ["192.168.1.0/24"], "methods": ["neigh"]},
+                headers=headers(viewer),
+            )
+            assert denied.status_code == 403
+
+
+def test_agent_discovery_profile_policy_sync_reaches_heartbeat(tmp_path):
+    app = create_app(_settings(tmp_path, agent_relay=True))
+    with TestClient(app) as client:
+        admin = login(client)
+        from tests.helpers import heartbeat
+
+        baseline_agent = enroll_agent(admin, hostname="sync-box")
+        baseline = heartbeat(admin, baseline_agent)
+        assert baseline["policy"]["allow_discovery"] is False
+
+        eligible = _eligible_agent(app, admin, name="sync-eligible")
+        synced = heartbeat(admin, eligible)
+        assert synced["policy"]["allow_discovery"] is True

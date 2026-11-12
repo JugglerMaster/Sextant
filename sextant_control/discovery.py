@@ -19,6 +19,7 @@ application lifespan.
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import ipaddress
 import logging
 import queue
@@ -911,6 +912,7 @@ def merge_observation(
     *,
     scan_id: str | None = None,
     now: str | None = None,
+    conn: Any | None = None,
 ) -> dict[str, Any]:
     """Normalize one observation into the device table and diff its state.
 
@@ -945,7 +947,10 @@ def merge_observation(
     source = str(observation.source or "server")[:128]
     segment = str(observation.segment or "")[:128]
 
-    with database.transaction() as conn:
+    transaction = (
+        contextlib.nullcontext(conn) if conn is not None else database.transaction()
+    )
+    with transaction as conn:
         row = None
         created = False
         added_ports: list[int] = []
@@ -1164,6 +1169,30 @@ def merge_observation(
             "SELECT * FROM discovered_devices WHERE id = ?", (device_id,)
         ).fetchone()
     return _device_dict(final)
+
+
+def merge_observations(
+    database: Database,
+    observations: Iterable[DeviceObservation],
+    *,
+    scan_id: str | None = None,
+    now: str | None = None,
+) -> list[dict[str, Any]]:
+    """Merge a report atomically: all device rows and events commit together."""
+    stamp = now or utcnow_iso()
+    merged: list[dict[str, Any]] = []
+    with database.transaction() as conn:
+        for observation in observations:
+            merged.append(
+                merge_observation(
+                    database,
+                    observation,
+                    scan_id=scan_id,
+                    now=stamp,
+                    conn=conn,
+                )
+            )
+    return merged
 
 
 def record_went_dark(
