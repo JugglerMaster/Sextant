@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,17 @@ def _split_csv(value: str | None) -> tuple[str, ...]:
     if not value:
         return ()
     return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def _split_groups(value: str | None) -> tuple[str, ...]:
+    """Split group lists without breaking DNs, which contain commas."""
+    if not value:
+        return ()
+    return tuple(
+        part.strip()
+        for part in re.split(r"[\n;]", value)
+        if part.strip()
+    )
 
 
 @dataclass(frozen=True)
@@ -480,9 +492,9 @@ def _ldap_from_env(env: dict[str, str]) -> LdapSettings | None:
         bind_dn=env["SEXTANT_LDAP_BIND_DN"],
         bind_password=env["SEXTANT_LDAP_BIND_PASSWORD"],
         user_filter=env.get("SEXTANT_LDAP_USER_FILTER", "(sAMAccountName={username})"),
-        admin_groups=_split_csv(env.get("SEXTANT_LDAP_ADMIN_GROUPS")),
-        operator_groups=_split_csv(env.get("SEXTANT_LDAP_OPERATOR_GROUPS")),
-        viewer_groups=_split_csv(env.get("SEXTANT_LDAP_VIEWER_GROUPS")),
+        admin_groups=_split_groups(env.get("SEXTANT_LDAP_ADMIN_GROUPS")),
+        operator_groups=_split_groups(env.get("SEXTANT_LDAP_OPERATOR_GROUPS")),
+        viewer_groups=_split_groups(env.get("SEXTANT_LDAP_VIEWER_GROUPS")),
         default_role=env.get("SEXTANT_LDAP_DEFAULT_ROLE", "viewer"),
         use_ssl=_bool(env.get("SEXTANT_LDAP_USE_SSL"), False),
         ca_cert=env.get("SEXTANT_LDAP_CA_CERT", ""),

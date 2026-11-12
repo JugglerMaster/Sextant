@@ -32,6 +32,32 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
+def test_ldap_group_dns_keep_their_commas(tmp_path):
+    settings = Settings.from_env(
+        {
+            "SEXTANT_DATA_DIR": str(tmp_path),
+            "SEXTANT_LDAP_ENABLED": "1",
+            "SEXTANT_LDAP_SERVER": "dc1.corp.example.com",
+            "SEXTANT_LDAP_BASE_DN": "DC=corp,DC=example,DC=com",
+            "SEXTANT_LDAP_BIND_DN": "CN=svc-sextant,DC=corp,DC=example,DC=com",
+            "SEXTANT_LDAP_BIND_PASSWORD": "secret",
+            "SEXTANT_LDAP_ADMIN_GROUPS": (
+                "CN=RC Admins,OU=Groups,DC=corp,DC=example,DC=com;"
+                "CN=Second Admins,OU=Groups,DC=corp,DC=example,DC=com"
+            ),
+            "SEXTANT_LDAP_OPERATOR_GROUPS": "CN=RC Operators,OU=Groups,DC=corp,DC=example,DC=com",
+        }
+    )
+    assert settings.ldap is not None
+    assert settings.ldap.admin_groups == (
+        "CN=RC Admins,OU=Groups,DC=corp,DC=example,DC=com",
+        "CN=Second Admins,OU=Groups,DC=corp,DC=example,DC=com",
+    )
+    assert settings.ldap.operator_groups == (
+        "CN=RC Operators,OU=Groups,DC=corp,DC=example,DC=com",
+    )
+
+
 def test_system_settings_persist_and_apply_without_restart(tmp_path):
     app = create_app(_settings(tmp_path))
     database = app.state.db

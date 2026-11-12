@@ -1514,6 +1514,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if "bind_password" in secrets:
             write_bind_password(request.app.state.base_settings, secrets["bind_password"])
+        elif (
+            merged.get("domain", {}).get("enabled")
+            and request.app.state.base_settings.ldap is not None
+            and request.app.state.base_settings.ldap.bind_password
+        ):
+            # Persist an environment-provided bind password the first time the
+            # domain is saved, so UI-managed configuration survives env changes.
+            if not (request.app.state.base_settings.data_dir / "secrets" / "ldap_bind_password").exists():
+                write_bind_password(
+                    request.app.state.base_settings,
+                    request.app.state.base_settings.ldap.bind_password,
+                )
         database.set_system_settings(merged, user["username"])
         request.app.state.system_settings_values = merged
         request.app.state.settings = apply_system_overrides(

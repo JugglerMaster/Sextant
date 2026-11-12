@@ -201,6 +201,19 @@ def _string_list(value: Any) -> list[str]:
     return list(dict.fromkeys(str(item).strip() for item in parts if str(item).strip()))
 
 
+def _group_list(value: Any) -> list[str]:
+    """Like _string_list but keeps DN commas intact."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = re.split(r"[\n;]", value)
+    elif isinstance(value, (list, tuple)):
+        parts = list(value)
+    else:
+        raise ValueError("Expected a list of group DNs.")
+    return list(dict.fromkeys(str(item).strip() for item in parts if str(item).strip()))
+
+
 def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -286,7 +299,7 @@ def normalize_patch(
                 merged["domain"][key] = raw[key]
         for key in ("admin_groups", "operator_groups", "viewer_groups"):
             if key in merged["domain"]:
-                merged["domain"][key] = _string_list(merged["domain"][key])
+                merged["domain"][key] = _group_list(merged["domain"][key])
         if "enabled" in merged["domain"]:
             merged["domain"]["enabled"] = _as_bool(merged["domain"]["enabled"])
         if "use_ssl" in merged["domain"]:

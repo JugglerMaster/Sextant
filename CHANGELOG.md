@@ -4,6 +4,16 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.6.1] - 2026-11-12
+
+### Fixed
+
+- LDAP/AD group lists preserve the commas inside a distinguished name. Use
+  semicolons or newlines between multiple group DNs. This fixes full-DN role
+  mapping and the group fields shown in Settings.
+- Saving domain settings persists an environment-provided bind password to the
+  managed secret file, so the configuration survives later env changes.
+
 ## [0.6.0] - 2026-11-12
 
 ### Added
@@ -265,6 +275,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.6.1]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.1
 [0.6.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.0
 [0.5.9]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.9
 [0.5.8]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.8
