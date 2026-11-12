@@ -4,7 +4,7 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
-## [Unreleased]
+## [0.5.0] - 2026-11-12
 
 ### Added
 
@@ -29,6 +29,10 @@ semantic versioning.
   audited, and use write-only in-memory secrets that are never persisted or
   logged. Live vendor connectors are marked unverified; ESXi is fixture-only.
   Credential-based Windows remote install remains future work.
+
+### Changed
+
+- Replaced the former light skin with a flat **Classic** theme: white panels, Windows blue accent, Segoe UI, square controls, and no gradient glows. The dark theme is still the default and now uses one teal accent for tags and statistics, with semantic colors reserved for status/alerts.
 
 ## [0.4.1] - 2026-11-11
 
@@ -115,6 +119,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.5.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.0
 [0.4.1]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.4.1
 [0.4.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.4.0
 [0.3.1]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.3.1

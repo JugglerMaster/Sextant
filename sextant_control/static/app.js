@@ -364,13 +364,13 @@ function applyTheme(theme, persist = true) {
   const schemeMeta = document.querySelector('meta[name="color-scheme"]');
   if (schemeMeta) schemeMeta.setAttribute("content", value);
   const themeColor = document.querySelector('meta[name="theme-color"]');
-  if (themeColor) themeColor.setAttribute("content", value === "light" ? "#eef2f6" : "#0b1118");
+  if (themeColor) themeColor.setAttribute("content", value === "light" ? "#f3f3f3" : "#0b1118");
   const toggle = $("theme-toggle");
   if (toggle) {
     const light = value === "light";
     toggle.setAttribute("aria-pressed", light ? "true" : "false");
-    toggle.setAttribute("aria-label", light ? "Switch to dark theme" : "Switch to light theme");
-    toggle.title = light ? "Switch to dark theme" : "Switch to light theme";
+    toggle.setAttribute("aria-label", light ? "Switch to dark theme" : "Switch to classic light theme");
+    toggle.title = light ? "Switch to dark theme" : "Switch to classic light theme";
   }
   const icon = $("theme-toggle-icon");
   if (icon) icon.textContent = value === "light" ? "☾" : "☀";

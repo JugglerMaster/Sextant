@@ -126,9 +126,9 @@ Priority: full pagination for Services and Users next.
 ### 5. Accessibility
 
 - Drawer focus trap, focus return, and sortable-header `aria-sort` are implemented.
-- `aria-live` status regions, a light/dark theme toggle, and a Ctrl/Cmd+K command palette are implemented.
+- `aria-live` status regions, a Classic light/dark theme toggle, and a Ctrl/Cmd+K command palette are implemented.
 - A Playwright + axe-core suite runs against real Chromium at desktop and a 390px mobile viewport in both themes. It covers login, the fleet dashboard, the drawer Overview/Trends tabs, command palette keyboard flow, and keyboard-only drawer opening with focus trap and focus return. Login, dashboard, drawer, and trends scans have no `serious` or `critical` axe violations in either theme.
-- Contrast fixes from the browser pass: the dark theme's dim text and terminal chrome were lightened, the light theme's accent was darkened so eyebrow and accent text clear 4.5:1, dialogs have accessible names, progress bars have labels, and the agent card no longer nests a checkbox inside a fake button role (its title is now a real button).
+- Contrast fixes from the browser pass: the dark theme's dim text and terminal chrome were lightened, the Classic light accent is Windows blue with flat white panels, dialogs have accessible names, progress bars have labels, and the agent card no longer nests a checkbox inside a fake button role (its title is now a real button).
 - Remaining: a full high-contrast theme, Firefox/WebKit runs, zoom/reflow checks, and committed pixel baselines. Screenshots are currently review artifacts, not failing visual diffs.
 
 ### 6. Live behavior

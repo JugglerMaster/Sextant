@@ -10,9 +10,9 @@ It is intentionally a single-tenant, self-hosted tool. There is no cloud relay. 
 
 ## Screenshots
 
-| Fleet dashboard (dark) | Fleet dashboard (light) |
+| Fleet dashboard (dark) | Fleet dashboard (Classic light) |
 | --- | --- |
-| ![Sextant fleet dashboard in the dark theme](docs/images/dashboard-dark.png) | ![Sextant fleet dashboard in the light theme](docs/images/dashboard-light.png) |
+| ![Sextant fleet dashboard in the dark theme](docs/images/dashboard-dark.png) | ![Sextant fleet dashboard in the classic light theme](docs/images/dashboard-light.png) |
 
 ![Sextant trends, persistent event timeline, and What changed summary](docs/images/trends-dark.png)
 
