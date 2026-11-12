@@ -4,6 +4,18 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.5.5] - 2026-11-12
+
+### Changed
+
+- Removed the top-right Refresh now button. Fleet data already refreshes through
+  live SSE with polling fallback.
+- Moved server updates to their own admin **Updates** tab.
+- Added an update-only topbar shortcut with an up-arrow icon. It appears only
+  while a newer release is known and navigates to the Updates tab.
+- Changed the command-palette trigger to a search icon and a Search tooltip,
+  while keeping Ctrl/Cmd+K.
+
 ## [0.5.4] - 2026-11-12
 
 ### Fixed
@@ -179,6 +191,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.5.5]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.5
 [0.5.4]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.4
 [0.5.3]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.3
 [0.5.2]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.2

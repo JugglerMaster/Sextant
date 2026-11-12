@@ -117,6 +117,10 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h9l3 3h4v13H4zM7 11h10M7 15h10M7 7h5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>Compose Files</span>
         </button>
+        <button class="nav-item nav-admin" data-page="updates" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M7 10l5-5 5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Updates</span>
+        </button>
         <button class="nav-item" data-page="security" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.6-2.8 8-7 10-4.2-2-7-5.4-7-10V6z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M9 12l2 2 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>Security</span>
@@ -146,9 +150,9 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M16 16l4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
             <input id="search-input" type="search" aria-label="Search machines by name, OS, IP, or tag" placeholder="Search name, OS, IP, tag" autocomplete="off">
           </label>
-          <button class="icon-button palette-trigger" id="command-palette-button" type="button" title="Command palette (Ctrl/Cmd+K)" aria-label="⌘K command palette" aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K"><span aria-hidden="true">⌘K</span></button>
+          <button class="icon-button palette-trigger" id="command-palette-button" type="button" title="Search (Ctrl/Cmd+K)" aria-label="Search (Ctrl/Cmd+K)" aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M16 16l4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
+          <button class="icon-button update-nav-button" id="update-nav-button" type="button" title="Update available" aria-label="Update available" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M7 10l5-5 5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <button class="icon-button theme-toggle" id="theme-toggle" type="button" title="Switch to classic light theme" aria-label="Switch to classic light theme" aria-pressed="false"><span id="theme-toggle-icon" aria-hidden="true">☀</span></button>
-          <button class="icon-button" id="refresh-button" type="button" title="Refresh now" aria-label="Refresh now">↻</button>
         </div>
       </header>
 
@@ -644,6 +648,24 @@
         </div>
       </section>
 
+      <section class="page" id="page-updates" hidden>
+        <article class="panel" id="updates-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">Maintenance</p><h2>Server updates</h2></div>
+            <span class="form-hint" id="updates-state-label" aria-live="polite"></span>
+          </div>
+          <dl class="detail-list" id="updates-details"></dl>
+          <div class="update-panel-actions">
+            <button class="button button-secondary button-small" id="updates-check-now" type="button">Check now</button>
+            <button class="button button-primary button-small" id="updates-apply" type="button" hidden>Update now</button>
+            <button class="button button-secondary button-small" id="updates-rollback" type="button" hidden>Rollback</button>
+            <a id="updates-notes" class="button button-ghost button-small" href="#" target="_blank" rel="noopener" hidden>Release notes</a>
+          </div>
+          <p class="form-hint" id="updates-hint">Updates are staged and health-checked before the stable current symlink is switched. The server restarts through a root-owned systemd handoff.</p>
+          <p class="form-error" id="updates-error" role="alert"></p>
+        </article>
+      </section>
+
       <section class="page" id="page-security" hidden>
         <div class="panel-grid">
           <article class="panel">
@@ -662,21 +684,6 @@
             <p class="form-hint">AD/Samba login uses LDAP bind. Group membership maps to admin, operator, or viewer roles. Configure it with <code>SEXTANT_LDAP_*</code> environment variables.</p>
           </article>
         </div>
-        <article class="panel nav-admin" id="updates-panel" hidden>
-          <div class="panel-head">
-            <div><p class="eyebrow">Maintenance</p><h2>Server updates</h2></div>
-            <span class="form-hint" id="updates-state-label" aria-live="polite"></span>
-          </div>
-          <dl class="detail-list" id="updates-details"></dl>
-          <div class="update-panel-actions">
-            <button class="button button-secondary button-small" id="updates-check-now" type="button">Check now</button>
-            <button class="button button-primary button-small" id="updates-apply" type="button" hidden>Update now</button>
-            <button class="button button-secondary button-small" id="updates-rollback" type="button" hidden>Rollback</button>
-            <a id="updates-notes" class="button button-ghost button-small" href="#" target="_blank" rel="noopener" hidden>Release notes</a>
-          </div>
-          <p class="form-hint" id="updates-hint">Updates are staged and health-checked before the stable current symlink is switched. The server restarts through a root-owned systemd handoff.</p>
-          <p class="form-error" id="updates-error" role="alert"></p>
-        </article>
       </section>
     </main>
   </div>

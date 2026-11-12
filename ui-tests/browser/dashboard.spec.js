@@ -29,7 +29,10 @@ for (const theme of THEMES) {
     await expect(page.locator("#update-banner")).toBeVisible();
     await expect(page.locator("#update-banner-check")).toBeVisible();
     await expect(page.locator("#update-banner-apply")).toBeVisible();
-    await page.locator('[data-page="security"]').click();
+    await expect(page.locator("#refresh-button")).toHaveCount(0);
+    await expect(page.locator("#update-nav-button")).toBeVisible();
+    await page.locator('[data-page="updates"]').click();
+    await expect(page.locator("#page-updates")).toBeVisible();
     await expect(page.locator("#updates-panel")).toBeVisible();
     await expect(page.locator("#updates-details")).toContainText("Current version");
     await expect(page.locator("#updates-details")).toContainText("24 hours");
@@ -380,7 +383,7 @@ test("Ctrl/Cmd+K opens, filters, activates, and closes the command palette", asy
   await page.keyboard.press("Control+k");
   await expect(palette).toBeVisible();
   await expect(input).toBeFocused();
-  await expect(list.getByRole("option")).toHaveCount(14);
+  await expect(list.getByRole("option")).toHaveCount(15);
   await screenshot(page, "command-palette-dark");
 
   await input.fill("studio");

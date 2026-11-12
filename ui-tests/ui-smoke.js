@@ -2691,8 +2691,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   }
   window.__discoveryRelayDisabled = false;
 
-  window.document.querySelector('[data-page="security"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  window.document.querySelector('[data-page="updates"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(80);
+  if (window.document.getElementById("refresh-button")) throw new Error("top-right refresh button should be removed");
+  if (window.document.getElementById("update-nav-button").hidden) throw new Error("update nav button should be visible when an update is available");
   const updatesPanel = window.document.getElementById("updates-panel");
   if (!updatesPanel || updatesPanel.hidden) throw new Error("admin updates panel is missing");
   const updatesDetails = window.document.getElementById("updates-details");
@@ -2775,6 +2777,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   await sleep(10);
   if (window.document.documentElement.dataset.theme !== "dark") throw new Error("theme toggle did not switch back to dark");
 
+  const paletteButton = window.document.getElementById("command-palette-button");
+  if (!paletteButton || !paletteButton.getAttribute("aria-label").startsWith("Search")) {
+    throw new Error("command palette button should use the search label");
+  }
+  if (!paletteButton.querySelector("svg")) throw new Error("command palette button should use a search icon");
+  if (window.document.getElementById("refresh-button")) throw new Error("top-right refresh button should be removed");
   const palette = window.document.getElementById("command-palette");
   const paletteInput = window.document.getElementById("command-palette-input");
   const paletteList = window.document.getElementById("command-palette-list");

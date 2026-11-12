@@ -1136,3 +1136,10 @@ html[data-theme="light"] .login-copy h1 { font-size: clamp(36px, 4.6vw, 64px); }
 html[data-theme="light"] .stat-card { min-height: 108px; }
 .fact .tag { color: var(--accent); }
 .fact .tag-warn { color: var(--warn-text); }
+.update-nav-button {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.update-nav-button svg { width: 17px; height: 17px; }
+.palette-trigger svg { width: 17px; height: 17px; }

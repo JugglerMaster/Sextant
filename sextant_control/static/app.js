@@ -111,7 +111,7 @@ const HISTORY_PAGE_SIZES = [25, 50, 100];
 const HISTORY_STATUS_FILTERS = ["all", "queued", "dispatched", "succeeded", "failed", "cancelled"];
 const HISTORY_SEARCH_DELAY = 300;
 const FLEET_STATUS_VALUES = ["all", "online", "offline", "alerts"];
-const ADMIN_PAGES = ["enroll", "audit", "users", "profiles", "remote-install"];
+const ADMIN_PAGES = ["enroll", "audit", "users", "profiles", "remote-install", "updates"];
 const THEME_KEY = "sextant.theme";
 const PAGE_META = {
   overview: ["Fleet", "Live machines and health at a glance."],
@@ -124,6 +124,7 @@ const PAGE_META = {
   users: ["Users", "Local accounts and role-based access."],
   profiles: ["Profiles", "Global agent behavior, cadence, modules, and tag assignments."],
   "remote-install": ["Remote install", "Install a Linux agent over key-based SSH."],
+  updates: ["Updates", "Server release checks, self-update, and rollback."],
   security: ["Security", "Session, identity provider, and account settings."],
 };
 
@@ -771,8 +772,21 @@ function updateAssetSize(data) {
   return `${size} B`;
 }
 
+function syncUpdateNavButton() {
+  const button = $("update-nav-button");
+  if (!button) return;
+  const show = Boolean(state.permissions?.admin && state.updates?.update_available);
+  button.hidden = !show;
+  if (show) {
+    const version = state.updates?.latest_version || "";
+    button.title = version ? `Sextant ${version} is available` : "Update available";
+    button.setAttribute("aria-label", button.title);
+  }
+}
+
 function renderUpdateBanner() {
   const banner = $("update-banner");
+  syncUpdateNavButton();
   if (!banner) return;
   const data = state.updates;
   if (!state.permissions?.admin || !data?.update_available) {
@@ -1066,6 +1080,10 @@ function navigate(page, load = true) {
   if (page === "users") loadUsers();
   if (page === "profiles") loadProfiles();
   if (page === "remote-install") loadRemoteInstall();
+  if (page === "updates") {
+    renderUpdatesPanel();
+    if (!state.updates) void checkForUpdates();
+  }
   if (page === "security") renderSecurity();
 }
 
@@ -8294,13 +8312,7 @@ function wireEvents() {
     $("sidebar-scrim").hidden = true;
   });
 
-  $("refresh-button").addEventListener("click", async () => {
-    if (state.page === "overview") await loadDashboard(true);
-    else navigate(state.page);
-    if (state.detailId) loadAgentDetail(state.detailId);
-    announceFleetStatus(fleetSummary("Fleet refreshed"));
-  });
-
+  $("update-nav-button")?.addEventListener("click", () => navigate("updates"));
   $("docker-refresh-list")?.addEventListener("click", () => loadDockerHosts());
   $("docker-refresh-host")?.addEventListener("click", refreshDockerHost);
   $("docker-close-host")?.addEventListener("click", closeDockerHost);
