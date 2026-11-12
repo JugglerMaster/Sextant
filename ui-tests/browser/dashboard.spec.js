@@ -61,18 +61,26 @@ for (const theme of THEMES) {
     await expect(page.locator("#discovery-table-body")).toContainText("esxi.lan");
     await expect(page.locator("#discovery-summary")).toContainText("Exposure");
     await expect(page.locator("#discovery-summary")).toContainText("Conflicts");
+    await expect(page.locator("#discovery-summary")).toContainText("Changed");
+    await page.locator('[data-discovery-tab="topology"]').click();
     await expect(page.locator("#discovery-segment-list")).toContainText("Gateway hint: 192.168.1.1");
+    await page.locator('[data-discovery-tab="discover"]').click();
 
     await page.locator("#discovery-filter-exposure").check();
     await expect(page.locator("#discovery-table-body")).toContainText("printer.lan");
     await expect(page.locator("#discovery-table-body")).not.toContainText("esxi.lan");
     await page.locator("#discovery-filter-exposure").uncheck();
-    await page.locator("#discovery-filter-conflict").check();
+    await page.locator("#discovery-filter-state").selectOption("conflict");
     await expect(page.locator("#discovery-table-body")).toContainText("conflict");
     await expect(page.locator("#discovery-table-body")).not.toContainText("esxi.lan");
-    await page.locator("#discovery-filter-conflict").uncheck();
+    await page.locator("#discovery-filter-state").selectOption("changed");
     await expect(page.locator("#discovery-table-body")).toContainText("esxi.lan");
+    await expect(page.locator("#discovery-table-body")).toContainText("IP changed");
+    await expect(page.locator("#discovery-table-body")).not.toContainText("printer.lan");
+    await page.locator("#discovery-filter-state").selectOption("");
+    await expect(page.locator("#discovery-table-body")).toContainText("printer.lan");
 
+    await page.locator('[data-discovery-tab="imports"]').click();
     await expect(page.locator("#discovery-import-panel")).toBeVisible();
     await page.locator("#discovery-import-content").fill(
       "192.168.1.77 aa:bb:cc:dd:ee:77 Imported Devices",
@@ -83,9 +91,10 @@ for (const theme of THEMES) {
     await expect(page.locator("#discovery-import-status")).toContainText("Imported 1");
     await expect(page.locator("#discovery-import-history")).toContainText("nmap-xml");
 
-    const integrationList = page.locator("#discovery-integration-list");
+    await page.locator('[data-discovery-tab="snmp"]').click();
+    const integrationList = page.locator("#discovery-integration-snmp");
     await expect(integrationList).toContainText("SNMP v2c");
-    await expect(integrationList).toContainText("fixture-only");
+    await expect(integrationList.locator("section", { hasText: "SNMP v2c" })).toBeVisible();
     const snmpCard = integrationList.locator("section", { hasText: "SNMP v2c" });
     const secretValue = "TOPSECRETCOMMUNITY";
     await snmpCard.locator('input[data-secret="community"]').fill(secretValue);
@@ -99,6 +108,7 @@ for (const theme of THEMES) {
     await refreshedSnmp.getByRole("button", { name: "Test connection" }).click();
     await expect(page.locator("#toast-region")).toContainText("Connection succeeded");
 
+    await page.locator('[data-discovery-tab="discover"]').click();
     await page.locator("#discovery-table-body").getByRole("button", { name: /printer\.lan details/ }).click();
     await expect(page.locator("#discovery-drawer")).toBeVisible();
     await expect(page.locator("#discovery-drawer-body")).toContainText("Device record");

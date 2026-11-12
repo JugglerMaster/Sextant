@@ -638,6 +638,11 @@ def store_release_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    parsed = loads(value, {})
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def discovered_device_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
@@ -653,10 +658,10 @@ def discovered_device_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "source": row["source"],
         "segment": row["segment"],
         "open_ports": loads(row["open_ports"], []),
-        "services": loads(row["services"], {}),
-        "mdns": loads(row["mdns"], {}),
-        "ssdp": loads(row["ssdp"], {}),
-        "evidence": loads(row["evidence"], {}),
+        "services": _json_object(row["services"]),
+        "mdns": _json_object(row["mdns"]),
+        "ssdp": _json_object(row["ssdp"]),
+        "evidence": _json_object(row["evidence"]),
         "state": row["state"],
         "agent_id": row["agent_id"],
         "wake_target_id": row["wake_target_id"],
@@ -665,6 +670,17 @@ def discovered_device_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "mac_randomized": bool(row["mac_randomized"]),
         "wake_status": row["wake_status"] if "wake_status" in row.keys() else "",
         "wake_verified_at": row["wake_verified_at"] if "wake_verified_at" in row.keys() else None,
+        "change_kind": row["change_kind"] if "change_kind" in row.keys() else "",
+        "change": _json_object(row["change_detail"])
+        if "change_detail" in row.keys()
+        else {},
+        "changed_at": row["changed_at"] if "changed_at" in row.keys() else None,
+        "conflict_detail": _json_object(row["conflict_detail"])
+        if "conflict_detail" in row.keys()
+        else {},
+        "conflict": bool(row["conflict_at"])
+        if "conflict_at" in row.keys()
+        else False,
     }
 
 

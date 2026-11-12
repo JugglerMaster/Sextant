@@ -491,16 +491,44 @@ agents, their reported IP and allowlisted segment, and a relay-disabled or
 no-eligible-agent explanation. Selecting an agent scopes the form to that
 agent's segment; selecting **This server** uses the server-side worker from D1–D2.
 
+The page is organized into tabs so the inventory stays focused: **Discover**
+(summary, scan form, scan history, device list), **Topology** (segments), and
+**Imports**. Each connector has its own admin tab — **SNMP**, **UniFi**,
+**RouterOS**, **OPNsense**, **Proxmox**, and **ESXi** — with its own settings,
+Test connection, and Poll now actions.
+
+## Identity state and changes
+
+The operator state (`new`, `known`, `ignored`, `promoted`) is separate from
+identity drift:
+
+- A device seen in a later observation moves from `new` to `known` automatically.
+  Operator decisions (`ignored`, `promoted`) are never overridden.
+- A new IP for the same MAC records an **IP changed** marker on the row. A new
+  MAC for a name/IP that was last seen more than 15 minutes ago records a
+  **MAC changed** marker and absorbs the older row. A hostname change records a
+  **hostname changed** marker. These appear as `changed` in the state column and
+  in the **Changed** summary card.
+- Saving any state in the device drawer acknowledges the change and clears the
+  marker. The event history keeps the `identity_changed` record.
+- A `conflict` is reserved for current rows that still disagree: two recent
+  rows with different MACs on one IP, or a reused hostname with different
+  non-random MACs. Historical `identity_conflict` events are not treated as
+  current conflicts.
+- The **State** filter includes **Changed** and **Conflict** alongside the
+  operator states, so both are filterable without a separate checkbox.
+
 ## Analysis, export, verification, and promotion (D4–D5)
 
 - **Exposure:** devices with any of `22, 3389, 5900, 5985, 5986, 8006` open and
   no linked agent. `GET /api/discovery/devices?exposure=true`, the summary
   `exposure` count, and the UI **Exposure only** filter use the same rule.
-- **Identity conflicts:** `GET /api/discovery/conflicts` groups same-MAC/
-  multiple-IP events, multiple MACs on one IP, and reused hostnames with
-  different MACs/vendors. `GET /api/discovery/devices?conflict=true` filters the
-  inventory, the table shows a **conflict** badge, and device detail includes the
-  conflict evidence. Existing `identity_conflict` events remain in the event log.
+- **Identity conflicts:** `GET /api/discovery/conflicts` reports current rows
+  that disagree: two recent MACs on one IP, or a reused hostname with different
+  non-random MACs. `GET /api/discovery/devices?state=conflict` (and the legacy
+  `?conflict=true`) filters the inventory, the table shows a **conflict** badge,
+  and device detail includes the conflict evidence. Historical
+  `identity_conflict` events remain in the event log but are not current state.
 - **Segments:** the summary carries per-segment counts for total/new/managed/
   unmanaged/exposure, plus a gateway hint derived from a router/switch device,
   a `.1` host, or the first address of the CIDR (explicitly labelled as a guess).
@@ -553,10 +581,10 @@ agent's segment; selecting **This server** uses the server-side worker from D1�
 
 ## Data model
 
-- `discovered_devices` stores identity, classifier output, source/segment, bounded JSON evidence (`open_ports`, `services`, `mdns`, `ssdp`, `evidence`), operator metadata, and agent/wake-target links.
+- `discovered_devices` stores identity, classifier output, source/segment, bounded JSON evidence (`open_ports`, `services`, `mdns`, `ssdp`, `evidence`), operator metadata, agent/wake-target links, and identity markers (`change_kind`, `change_detail`, `changed_at`, `conflict_detail`, `conflict_at`).
 - `discovery_scans` stores the requested scope/methods, initiator, status (`queued`, `running`, `succeeded`, `failed`, `cancelled`), host count, progress, and cancellation flag.
-- `discovery_events` stores `new_device`, `new_port`, `service_changed`, `identity_conflict`, `went_dark`, and reserved `promoted` rows. Events are deduplicated by `(device_id, kind, detail)`.
-- Merge order is MAC → stable IP when the MAC is unknown → hostname when no MAC/IP match exists. Two different known MACs are never merged; the existing row receives an `identity_conflict` event and a new device row is created.
+- `discovery_events` stores `new_device`, `new_port`, `service_changed`, `identity_changed`, `identity_conflict`, `went_dark`, and reserved `promoted` rows. Events are deduplicated by `(device_id, kind, detail)`.
+- Merge order is MAC → stable IP → hostname. A MAC-less observation merges into the row that already owns that IP, preserving the MAC. A different MAC is merged as drift only when the previous row is stale (more than 15 minutes); two recent rows with different MACs remain separate and are reported as a conflict. Obvious duplicates (MAC-less rows on the same IP, or stale rows sharing a hostname) are absorbed into the freshest row, with their events moved.
 - A locally-administered MAC bit is labelled `mac_randomized`. Randomized MACs still merge by IP/hostname and lose ten confidence points.
 - `went_dark` is emitted once per device and `last_seen` value when a device in a scanned segment has not been seen for 24 hours.
 

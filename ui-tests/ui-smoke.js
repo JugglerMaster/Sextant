@@ -388,6 +388,9 @@ const discoveryDevices = [
     wake_status: "sent",
     wake_verified_at: "2026-11-06T07:58:00Z",
     identity_conflict: true,
+    conflict: true,
+    change_kind: "",
+    change: {},
     tags: ["office"],
     notes: "",
     mac_randomized: false,
@@ -416,6 +419,9 @@ const discoveryDevices = [
     wake_status: "woke",
     wake_verified_at: "2026-11-06T07:59:00Z",
     identity_conflict: false,
+    conflict: false,
+    change_kind: "ip",
+    change: { kind: "ip", from: "192.168.1.51", to: "192.168.1.50", at: "2026-11-06T07:55:00Z" },
     tags: [],
     notes: "VM host",
     mac_randomized: false,
@@ -425,7 +431,8 @@ const discoverySummary = {
   total: 2,
   new: 1,
   new_count: 1,
-  states: { new: 1, known: 1, ignored: 0, promoted: 0 },
+  changed: 1,
+  states: { new: 1, known: 1, ignored: 0, promoted: 0, changed: 1, conflict: 1 },
   types: [
     { type: "printer", count: 1 },
     { type: "hypervisor", count: 1 },
@@ -971,7 +978,14 @@ window.fetch = async (path, options = {}) => {
     const type = params.get("type") || "";
     const segment = params.get("segment") || "";
     const vendor = params.get("vendor") || "";
-    if (state) filtered = filtered.filter((device) => device.state === state);
+    const hasConflict = (device) => device.conflict === true || device.identity_conflict === true;
+    if (state === "changed") {
+      filtered = filtered.filter((device) => device.change_kind);
+    } else if (state === "conflict") {
+      filtered = filtered.filter(hasConflict);
+    } else if (state) {
+      filtered = filtered.filter((device) => device.state === state);
+    }
     if (type) filtered = filtered.filter((device) => device.device_type === type);
     if (segment) filtered = filtered.filter((device) => device.segment === segment);
     if (vendor) filtered = filtered.filter((device) => device.vendor === vendor);
@@ -989,7 +1003,7 @@ window.fetch = async (path, options = {}) => {
       );
     }
     if (params.get("conflict") === "true") {
-      filtered = filtered.filter((device) => device.identity_conflict);
+      filtered = filtered.filter(hasConflict);
     }
     response = {
       status: 200,
@@ -2409,12 +2423,19 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   window.document.getElementById("discovery-filter-clear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(60);
   if (!discoveryTable.textContent.includes("esxi.lan")) throw new Error("Discovery filter clear did not restore devices");
+  window.document.querySelector('[data-discovery-tab="topology"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
   const segmentPanel = window.document.getElementById("discovery-segment-list");
   if (!segmentPanel.textContent.includes("Gateway hint") || !segmentPanel.textContent.includes("192.168.1.1")) {
     throw new Error("Discovery segment summary did not render the gateway hint");
   }
+  window.document.querySelector('[data-discovery-tab="discover"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
   if (!discoverySummaryNode.textContent.includes("Exposure") || !discoverySummaryNode.textContent.includes("Conflicts")) {
     throw new Error("Discovery summary is missing exposure/conflict counts");
+  }
+  if (!discoverySummaryNode.textContent.includes("Changed")) {
+    throw new Error("Discovery summary is missing the changed count");
   }
   const exposureFilter = window.document.getElementById("discovery-filter-exposure");
   exposureFilter.checked = true;
@@ -2425,19 +2446,31 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   }
   exposureFilter.checked = false;
   exposureFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
-  const conflictFilter = window.document.getElementById("discovery-filter-conflict");
-  conflictFilter.checked = true;
-  conflictFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
+  discoveryStateFilter.value = "conflict";
+  discoveryStateFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
   await sleep(60);
   if (!discoveryTable.textContent.includes("conflict") || discoveryTable.textContent.includes("esxi.lan")) {
-    throw new Error("Discovery conflict filter/badge did not render");
+    throw new Error("Discovery conflict state filter did not narrow the table");
   }
-  conflictFilter.checked = false;
-  conflictFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
+  discoveryStateFilter.value = "changed";
+  discoveryStateFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await sleep(60);
+  if (
+    !discoveryTable.textContent.includes("esxi.lan") ||
+    !discoveryTable.textContent.includes("changed") ||
+    !discoveryTable.textContent.includes("IP changed") ||
+    discoveryTable.textContent.includes("printer.lan")
+  ) {
+    throw new Error("Discovery changed state filter did not show the changed device");
+  }
+  discoveryStateFilter.value = "";
+  discoveryStateFilter.dispatchEvent(new window.Event("change", { bubbles: true }));
   await sleep(60);
   if (!findButton(window.document.getElementById("discovery-filters"), "Export CSV")) {
     throw new Error("Discovery export buttons are missing");
   }
+  window.document.querySelector('[data-discovery-tab="imports"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
   if (window.document.getElementById("discovery-import-panel").hidden) {
     throw new Error("Discovery import panel is hidden for an admin");
   }
@@ -2460,13 +2493,22 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     throw new Error("Discovery import history did not render");
   }
 
-  const integrationList = window.document.getElementById("discovery-integration-list");
-  if (window.document.getElementById("discovery-integrations-panel").hidden || !integrationList.textContent.includes("SNMP v2c")) {
+  window.document.querySelector('[data-discovery-tab="snmp"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
+  const integrationList = window.document.getElementById("discovery-integration-snmp");
+  if (window.document.getElementById("discovery-integration-panel-snmp").hidden || !integrationList.textContent.includes("SNMP v2c")) {
     throw new Error("Discovery integrations panel did not render");
   }
-  if (!integrationList.textContent.includes("fixture-only")) {
+  if (!integrationList.textContent.includes("SNMP v2c")) {
+    throw new Error("Discovery SNMP connector did not render");
+  }
+  window.document.querySelector('[data-discovery-tab="esxi"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
+  if (!window.document.getElementById("discovery-integration-esxi").textContent.includes("fixture-only")) {
     throw new Error("Discovery fixture-only adapter state is missing");
   }
+  window.document.querySelector('[data-discovery-tab="snmp"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
   const snmpCard = [...integrationList.querySelectorAll("section")].find((item) => item.textContent.includes("SNMP v2c"));
   const community = "TOPSECRETCOMMUNITY";
   const communityInput = snmpCard.querySelector('input[data-secret="community"]');

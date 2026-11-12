@@ -1143,3 +1143,7 @@ html[data-theme="light"] .stat-card { min-height: 108px; }
 }
 .update-nav-button svg { width: 17px; height: 17px; }
 .palette-trigger svg { width: 17px; height: 17px; }
+
+.discovery-tabs { margin-bottom: 16px; padding: 0; }
+.discovery-tabs .tab { padding: 10px 12px; }
+.discovery-tab-panel { margin-top: 4px; }

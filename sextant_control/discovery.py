@@ -47,6 +47,10 @@ SSH_PORTS = frozenset({22})
 HTTP_PORTS = frozenset({80, 631, 8080, 32400})
 TLS_PORTS = frozenset({443, 8006, 5986, 8443})
 DARK_AFTER_HOURS = 24
+# A MAC change against a device seen within this window is ambiguous: two
+# devices may be claiming the same address. Beyond it, treat the new MAC as
+# identity drift (NIC replaced, VM rebuilt, or randomized address rotated).
+IDENTITY_CHANGE_WINDOW = timedelta(minutes=15)
 SCAN_RATE_LIMIT_SECONDS = 5.0
 SCAN_QUEUE_LIMIT = 8
 TLS_HANDSHAKE_TIMEOUT = 3.0
@@ -867,6 +871,11 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _dict_value(value: Any) -> dict[str, Any]:
+    parsed = loads(value, {})
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _device_dict(row: Any) -> dict[str, Any]:
     return {
         "id": row["id"],
@@ -882,10 +891,10 @@ def _device_dict(row: Any) -> dict[str, Any]:
         "source": row["source"],
         "segment": row["segment"],
         "open_ports": loads(row["open_ports"], []),
-        "services": loads(row["services"], {}),
-        "mdns": loads(row["mdns"], {}),
-        "ssdp": loads(row["ssdp"], {}),
-        "evidence": loads(row["evidence"], {}),
+        "services": _dict_value(row["services"]),
+        "mdns": _dict_value(row["mdns"]),
+        "ssdp": _dict_value(row["ssdp"]),
+        "evidence": _dict_value(row["evidence"]),
         "state": row["state"],
         "agent_id": row["agent_id"],
         "wake_target_id": row["wake_target_id"],
@@ -894,6 +903,17 @@ def _device_dict(row: Any) -> dict[str, Any]:
         "mac_randomized": bool(row["mac_randomized"]),
         "wake_status": row["wake_status"] if "wake_status" in row.keys() else "",
         "wake_verified_at": row["wake_verified_at"] if "wake_verified_at" in row.keys() else None,
+        "change_kind": row["change_kind"] if "change_kind" in row.keys() else "",
+        "change": _dict_value(row["change_detail"])
+        if "change_detail" in row.keys()
+        else {},
+        "changed_at": row["changed_at"] if "changed_at" in row.keys() else None,
+        "conflict_detail": _dict_value(row["conflict_detail"])
+        if "conflict_detail" in row.keys()
+        else {},
+        "conflict": bool(row["conflict_at"])
+        if "conflict_at" in row.keys()
+        else False,
     }
 
 
@@ -906,6 +926,145 @@ def _merge_event(
     at: str,
 ) -> None:
     database.record_discovery_event(device_id, kind, detail, at=at, conn=conn)
+
+
+def _absorb_duplicate_devices(
+    database: Database,
+    conn: Any,
+    device_id: str,
+    *,
+    ip: str,
+    hostname: str,
+    mac: str,
+    stamp: str,
+) -> None:
+    """Fold obvious duplicate rows into the row that was just observed.
+
+    MAC-less observations used to create a second row for an IP that already
+    had a MAC, and rotating private MACs used to leave one row per address.
+    Both are the same device, so keep the freshest row and move its history.
+    """
+    keep = conn.execute(
+        "SELECT * FROM discovered_devices WHERE id = ?", (device_id,)
+    ).fetchone()
+    if keep is None:
+        return
+    candidates = conn.execute(
+        """SELECT * FROM discovered_devices
+           WHERE id != ? AND (
+             (? != '' AND ip = ?) OR (? != '' AND hostname = ? COLLATE NOCASE)
+           )""",
+        (device_id, ip, ip, hostname, hostname),
+    ).fetchall()
+    keep_mac = str(keep["mac"] or "")
+    for candidate in candidates:
+        candidate_mac = str(candidate["mac"] or "")
+        same_ip = bool(ip) and str(candidate["ip"] or "") == ip
+        same_name = bool(hostname) and (
+            str(candidate["hostname"] or "").lower() == hostname.lower()
+        )
+        previous_seen = parse_iso(candidate["last_seen"])
+        stale = (
+            previous_seen is None
+            or utcnow() - previous_seen > IDENTITY_CHANGE_WINDOW
+        )
+        absorb = False
+        if same_ip and not candidate_mac:
+            absorb = True
+        elif same_ip and not mac and candidate_mac:
+            absorb = True
+        elif same_name and not candidate_mac:
+            absorb = True
+        elif (
+            (same_ip or same_name)
+            and candidate_mac
+            and mac
+            and candidate_mac.lower() != mac.lower()
+            and stale
+        ):
+            absorb = True
+        if not absorb:
+            continue
+
+        keep_ports = {
+            int(port)
+            for port in loads(keep["open_ports"], [])
+            if str(port).isdigit()
+        }
+        candidate_ports = {
+            int(port)
+            for port in loads(candidate["open_ports"], [])
+            if str(port).isdigit()
+        }
+        merged_services = {
+            **_dict_value(candidate["services"]),
+            **_dict_value(keep["services"]),
+        }
+        merged_mdns = {**_dict_value(candidate["mdns"]), **_dict_value(keep["mdns"])}
+        merged_ssdp = {**_dict_value(candidate["ssdp"]), **_dict_value(keep["ssdp"])}
+        merged_evidence = {
+            **_dict_value(candidate["evidence"]),
+            **_dict_value(keep["evidence"]),
+        }
+        tags = list(
+            dict.fromkeys(
+                [
+                    *loads(candidate["tags"], []),
+                    *loads(keep["tags"], []),
+                ]
+            )
+        )[:32]
+        new_mac = keep_mac or candidate_mac
+        change: dict[str, Any] = {}
+        if keep_mac and candidate_mac and keep_mac.lower() != candidate_mac.lower():
+            change = {
+                "kind": "mac",
+                "from": candidate_mac,
+                "to": keep_mac,
+                "at": stamp,
+            }
+        conn.execute(
+            """UPDATE discovered_devices SET
+                 first_seen = ?, mac = ?, open_ports = ?, services = ?,
+                 mdns = ?, ssdp = ?, evidence = ?, tags = ?,
+                 notes = CASE WHEN notes = '' THEN ? ELSE notes END,
+                 mac_randomized = ?, agent_id = COALESCE(agent_id, ?),
+                 wake_target_id = COALESCE(wake_target_id, ?),
+                 change_kind = CASE WHEN ? != '' THEN ? ELSE change_kind END,
+                 change_detail = CASE WHEN ? != '' THEN ? ELSE change_detail END,
+                 changed_at = CASE WHEN ? != '' THEN ? ELSE changed_at END
+               WHERE id = ?""",
+            (
+                min(str(keep["first_seen"]), str(candidate["first_seen"])),
+                new_mac,
+                dumps(sorted(keep_ports | candidate_ports)),
+                dumps(merged_services),
+                dumps(merged_mdns),
+                dumps(merged_ssdp),
+                dumps(merged_evidence),
+                dumps(tags),
+                str(candidate["notes"] or ""),
+                int(bool(keep["mac_randomized"]) or bool(candidate["mac_randomized"])),
+                candidate["agent_id"],
+                candidate["wake_target_id"],
+                change.get("kind", ""),
+                change.get("kind", ""),
+                dumps(change),
+                dumps(change),
+                change.get("kind", ""),
+                stamp if change else None,
+                device_id,
+            ),
+        )
+        conn.execute(
+            "UPDATE discovery_events SET device_id = ? WHERE device_id = ?",
+            (device_id, str(candidate["id"])),
+        )
+        conn.execute(
+            "DELETE FROM discovered_devices WHERE id = ?", (str(candidate["id"]),)
+        )
+        if change:
+            _merge_event(database, conn, device_id, "identity_changed", change, stamp)
 
 
 def merge_observation(
@@ -975,6 +1134,44 @@ def merge_observation(
         created = False
         added_ports: list[int] = []
         conflict_row = None
+        change_kind = ""
+
+        def find_ip_candidate() -> Any:
+            if not ip:
+                return None
+            return conn.execute(
+                """SELECT * FROM discovered_devices
+                   WHERE ip = ?
+                   ORDER BY (mac != '') DESC, last_seen DESC LIMIT 1""",
+                (ip,),
+            ).fetchone()
+
+        def find_hostname_candidate() -> Any:
+            if not hostname:
+                return None
+            return conn.execute(
+                """SELECT * FROM discovered_devices
+                   WHERE hostname = ? COLLATE NOCASE
+                   ORDER BY last_seen DESC LIMIT 1""",
+                (hostname,),
+            ).fetchone()
+
+        def can_be_mac_change(candidate: Any) -> bool:
+            """Decide whether a different MAC is drift or a live conflict.
+
+            A stale previous sighting looks like the same device with a new
+            NIC or a rotated private address. Two recent rows with different
+            MACs are a genuine conflict.
+            """
+            previous_mac = str(candidate["mac"] or "")
+            if not previous_mac or not mac:
+                return True
+            previous_seen = parse_iso(candidate["last_seen"])
+            return (
+                previous_seen is None
+                or utcnow() - previous_seen > IDENTITY_CHANGE_WINDOW
+            )
+
         if mac:
             row = conn.execute(
                 """SELECT * FROM discovered_devices
@@ -982,44 +1179,40 @@ def merge_observation(
                    ORDER BY last_seen DESC LIMIT 1""",
                 (mac,),
             ).fetchone()
-        if row is None and ip:
-            row = conn.execute(
-                """SELECT * FROM discovered_devices
-                   WHERE ip = ? AND (mac = '' OR mac IS NULL)
-                   ORDER BY last_seen DESC LIMIT 1""",
-                (ip,),
-            ).fetchone()
-            if row is None and mac:
-                conflict_row = conn.execute(
-                    """SELECT * FROM discovered_devices
-                       WHERE ip = ? AND mac != '' AND mac != ? COLLATE NOCASE
-                       ORDER BY last_seen DESC LIMIT 1""",
-                    (ip, mac),
-                ).fetchone()
-        if row is None and hostname:
-            row = conn.execute(
-                """SELECT * FROM discovered_devices
-                   WHERE hostname = ? COLLATE NOCASE
-                     AND (mac = '' OR mac IS NULL)
-                   ORDER BY last_seen DESC LIMIT 1""",
-                (hostname,),
-            ).fetchone()
-        if row is not None and row["mac"] and mac and row["mac"].lower() != mac:
-            # Never merge two different known MACs, even through hostname.
-            conflict_row = row
-            row = None
+
+        if row is None:
+            candidate = find_ip_candidate() or find_hostname_candidate()
+            if candidate is not None:
+                previous_mac = str(candidate["mac"] or "")
+                if mac and previous_mac and previous_mac.lower() != mac:
+                    if can_be_mac_change(candidate):
+                        row = candidate
+                        change_kind = "mac"
+                    else:
+                        conflict_row = candidate
+                else:
+                    row = candidate
 
         if row is None:
             created = True
             device_id = "dev_" + secrets.token_hex(8)
+            new_conflict = {}
+            if conflict_row is not None:
+                new_conflict = {
+                    "kind": "mac",
+                    "ip": ip,
+                    "known_mac": str(conflict_row["mac"] or ""),
+                    "observed_mac": mac,
+                    "known_device_id": str(conflict_row["id"]),
+                }
             conn.execute(
                 """INSERT INTO discovered_devices
                    (id, first_seen, last_seen, mac, ip, hostname, vendor,
                     device_type, os_guess, confidence, source, segment,
                     open_ports, services, mdns, ssdp, evidence, state,
-                    tags, notes, mac_randomized)
+                    tags, notes, mac_randomized, conflict_detail, conflict_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           'new', '[]', '', ?)""",
+                           'new', '[]', '', ?, ?, ?)""",
                 (
                     device_id,
                     stamp,
@@ -1039,6 +1232,8 @@ def merge_observation(
                     dumps(ssdp),
                     dumps(evidence),
                     int(random_mac),
+                    dumps(new_conflict),
+                    stamp if new_conflict else None,
                 ),
             )
             _merge_event(
@@ -1051,27 +1246,65 @@ def merge_observation(
             )
             old_ports: set[int] = set()
             old_services: dict[str, Any] = {}
+            survivor_mac = mac
         else:
             device_id = str(row["id"])
             old_ports = {int(port) for port in loads(row["open_ports"], []) if str(port).isdigit()}
-            old_services = loads(row["services"], {})
+            old_services = _dict_value(row["services"])
             existing_mac = str(row["mac"] or "")
+            previous_ip = str(row["ip"] or "")
+            previous_hostname = str(row["hostname"] or "")
             merged_mac = mac or existing_mac
-            merged_hostname = hostname or str(row["hostname"] or "")
+            merged_hostname = hostname or previous_hostname
             merged_vendor = vendor or str(row["vendor"] or "")
             # A TCP-enabled scan is authoritative for the configured port set.
             # Passive-observation scans preserve previously fingerprinted ports.
             merged_ports = sorted(set(ports) if tcp_scanned else old_ports | set(ports))
             merged_services = services if tcp_scanned else {**old_services, **services}
-            merged_mdns = {**loads(row["mdns"], {}), **mdns}
-            merged_ssdp = {**loads(row["ssdp"], {}), **ssdp}
-            merged_evidence = {**loads(row["evidence"], {}), **evidence}
+            merged_mdns = {**_dict_value(row["mdns"]), **mdns}
+            merged_ssdp = {**_dict_value(row["ssdp"]), **ssdp}
+            merged_evidence = {**_dict_value(row["evidence"]), **evidence}
+
+            if not change_kind:
+                if mac and existing_mac and existing_mac.lower() != mac:
+                    change_kind = "mac"
+                elif ip and previous_ip and previous_ip != ip:
+                    change_kind = "ip"
+                elif (
+                    hostname
+                    and previous_hostname
+                    and previous_hostname.lower() != hostname.lower()
+                ):
+                    change_kind = "hostname"
+            change_detail: dict[str, Any] = {}
+            if change_kind:
+                change_detail = {
+                    "kind": change_kind,
+                    "from": {
+                        "mac": existing_mac,
+                        "ip": previous_ip,
+                        "hostname": previous_hostname,
+                    }.get(change_kind, ""),
+                    "to": {"mac": mac, "ip": ip, "hostname": hostname}.get(
+                        change_kind, ""
+                    ),
+                    "at": stamp,
+                }
+
+            # A device seen in a later observation is no longer "new". Operator
+            # decisions (ignored/promoted) are preserved.
+            next_state = str(row["state"])
+            if next_state == "new" and not change_kind:
+                next_state = "known"
+
             conn.execute(
                 """UPDATE discovered_devices SET
                      last_seen = ?, mac = ?, ip = ?, hostname = ?, vendor = ?,
                      device_type = ?, os_guess = ?, confidence = ?, source = ?,
                      segment = ?, open_ports = ?, services = ?, mdns = ?,
-                     ssdp = ?, evidence = ?, mac_randomized = ?
+                     ssdp = ?, evidence = ?, mac_randomized = ?, state = ?,
+                     change_kind = ?, change_detail = ?, changed_at = ?,
+                     conflict_detail = '{}', conflict_at = NULL
                    WHERE id = ?""",
                 (
                     stamp,
@@ -1092,9 +1325,23 @@ def merge_observation(
                     dumps(merged_ssdp),
                     dumps(merged_evidence),
                     int(random_mac or bool(row["mac_randomized"])),
+                    next_state,
+                    change_kind,
+                    dumps(change_detail),
+                    stamp if change_kind else None,
                     device_id,
                 ),
             )
+            if change_kind:
+                _merge_event(
+                    database,
+                    conn,
+                    device_id,
+                    "identity_changed",
+                    change_detail,
+                    stamp,
+                )
+            survivor_mac = merged_mac
             added_ports = sorted(set(ports) - old_ports)
             for port in added_ports:
                 _merge_event(
@@ -1117,31 +1364,38 @@ def merge_observation(
                         {"port": port, "from": previous, "to": current},
                         stamp,
                     )
-            if mac and row["ip"] and ip and str(row["ip"]) != ip:
-                previous_seen = parse_iso(row["last_seen"])
-                if previous_seen is not None and utcnow() - previous_seen < timedelta(hours=DARK_AFTER_HOURS):
-                    _merge_event(
-                        database,
-                        conn,
-                        device_id,
-                        "identity_conflict",
-                        {"mac": mac, "previous_ip": str(row["ip"]), "ip": ip},
-                        stamp,
-                    )
 
         if conflict_row is not None:
+            detail = {
+                "kind": "mac",
+                "ip": ip,
+                "known_mac": str(conflict_row["mac"] or ""),
+                "observed_mac": mac,
+                "observed_device_id": device_id,
+            }
+            conn.execute(
+                """UPDATE discovered_devices SET conflict_detail = ?, conflict_at = ?
+                   WHERE id = ?""",
+                (dumps(detail), stamp, str(conflict_row["id"])),
+            )
             _merge_event(
                 database,
                 conn,
                 str(conflict_row["id"]),
                 "identity_conflict",
-                {
-                    "ip": ip,
-                    "known_mac": str(conflict_row["mac"]),
-                    "observed_mac": mac,
-                },
+                detail,
                 stamp,
             )
+
+        _absorb_duplicate_devices(
+            database,
+            conn,
+            device_id,
+            ip=ip,
+            hostname=hostname,
+            mac=survivor_mac,
+            stamp=stamp,
+        )
 
         agent = None
         if mac:
@@ -1218,14 +1472,15 @@ def merge_observations(
 def detect_identity_conflicts(
     database: Database, device_id: str | None = None
 ) -> list[dict[str, Any]]:
-    """Return current MAC/IP/hostname conflicts and recent conflict events."""
+    """Return current identity conflicts.
+
+    Historical ``identity_conflict`` events are not conflicts: once a device is
+    merged after an IP or MAC change, the old event is just history. Conflicts
+    come from rows whose current identities disagree.
+    """
     conflicts: list[dict[str, Any]] = []
     with database.connection() as conn:
         rows = conn.execute("SELECT * FROM discovered_devices").fetchall()
-        event_rows = conn.execute(
-            """SELECT * FROM discovery_events WHERE kind = 'identity_conflict'
-               ORDER BY id DESC LIMIT 200"""
-        ).fetchall()
 
     by_mac: dict[str, list[Any]] = {}
     by_ip: dict[str, list[Any]] = {}
@@ -1233,14 +1488,21 @@ def detect_identity_conflicts(
     for row in rows:
         if row["mac"]:
             by_mac.setdefault(str(row["mac"]).lower(), []).append(row)
-        if row["ip"]:
-            by_ip.setdefault(str(row["ip"]), []).append(row)
-        if row["hostname"]:
-            by_hostname.setdefault(str(row["hostname"]).lower(), []).append(row)
+            if row["ip"]:
+                by_ip.setdefault(str(row["ip"]), []).append(row)
+            if row["hostname"]:
+                by_hostname.setdefault(str(row["hostname"]).lower(), []).append(row)
 
     grouped_ids: set[str] = set()
 
-    def add_conflict(kind: str, key: str, group: list[Any], **detail: Any) -> None:
+    def add_conflict(
+        kind: str,
+        key: str,
+        group: list[Any],
+        *,
+        detail: dict[str, Any] | None = None,
+        at: str | None = None,
+    ) -> None:
         ids = sorted({str(row["id"]) for row in group})
         grouped_ids.update(ids)
         conflicts.append(
@@ -1249,44 +1511,48 @@ def detect_identity_conflicts(
                 "key": key,
                 "device_ids": ids,
                 "devices": [_device_dict(row) for row in group],
-                "detail": detail,
+                "at": at,
+                "detail": detail or {},
             }
         )
 
     for mac, group in by_mac.items():
         ips = sorted({str(row["ip"]) for row in group if row["ip"]})
         if len(ips) > 1:
-            add_conflict("mac_multiple_ips", mac, group, mac=mac, ips=ips)
+            add_conflict(
+                "mac_multiple_ips", mac, group, detail={"mac": mac, "ips": ips}
+            )
     for ip, group in by_ip.items():
         macs = sorted({str(row["mac"]).lower() for row in group if row["mac"]})
         if len(macs) > 1:
-            add_conflict("ip_multiple_macs", ip, group, ip=ip, macs=macs)
+            add_conflict(
+                "ip_multiple_macs", ip, group, detail={"ip": ip, "macs": macs}
+            )
     for hostname, group in by_hostname.items():
         macs = sorted({str(row["mac"]).lower() for row in group if row["mac"]})
         vendors = sorted({str(row["vendor"]) for row in group if row["vendor"]})
-        if len(macs) > 1 or len(vendors) > 1:
+        if len(macs) > 1:
             add_conflict(
                 "hostname_multiple_identities",
                 hostname,
                 group,
-                hostname=hostname,
-                macs=macs,
-                vendors=vendors,
+                detail={
+                    "hostname": hostname,
+                    "macs": macs,
+                    "vendors": vendors,
+                },
             )
-    for event in event_rows:
-        event_device = str(event["device_id"])
-        if event_device in grouped_ids:
+    for row in rows:
+        row_id = str(row["id"])
+        if row_id in grouped_ids or not str(row["conflict_at"] or ""):
             continue
-        detail = loads(event["detail"], {})
-        conflicts.append(
-            {
-                "type": "event",
-                "key": event_device,
-                "device_ids": [event_device],
-                "devices": [],
-                "at": event["at"],
-                "detail": detail if isinstance(detail, dict) else {},
-            }
+        detail = loads(row["conflict_detail"], {})
+        add_conflict(
+            "identity_conflict",
+            row_id,
+            [row],
+            detail=detail if isinstance(detail, dict) else {},
+            at=str(row["conflict_at"]),
         )
     if device_id:
         conflicts = [

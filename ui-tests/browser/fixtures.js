@@ -604,6 +604,9 @@ const discoveryDevices = [
     wake_status: "sent",
     wake_verified_at: "2026-11-06T07:58:00Z",
     identity_conflict: true,
+    conflict: true,
+    change_kind: "",
+    change: {},
     tags: ["office"],
     notes: "",
     mac_randomized: false,
@@ -632,6 +635,9 @@ const discoveryDevices = [
     wake_status: "woke",
     wake_verified_at: "2026-11-06T07:59:00Z",
     identity_conflict: false,
+    conflict: false,
+    change_kind: "ip",
+    change: { kind: "ip", from: "192.168.1.51", to: "192.168.1.50", at: "2026-11-06T07:55:00Z" },
     tags: [],
     notes: "VM host",
     mac_randomized: false,
@@ -641,7 +647,8 @@ const discoverySummary = {
   total: 2,
   new: 1,
   new_count: 1,
-  states: { new: 1, known: 1, ignored: 0, promoted: 0 },
+  changed: 1,
+  states: { new: 1, known: 1, ignored: 0, promoted: 0, changed: 1, conflict: 1 },
   types: [
     { type: "printer", count: 1 },
     { type: "hypervisor", count: 1 },
@@ -894,7 +901,14 @@ function createApi(session) {
       const type = url.searchParams.get("type") || "";
       const segment = url.searchParams.get("segment") || "";
       const vendor = url.searchParams.get("vendor") || "";
-      if (state) filtered = filtered.filter((device) => device.state === state);
+      const hasConflict = (device) => device.conflict === true || device.identity_conflict === true;
+      if (state === "changed") {
+        filtered = filtered.filter((device) => device.change_kind);
+      } else if (state === "conflict") {
+        filtered = filtered.filter(hasConflict);
+      } else if (state) {
+        filtered = filtered.filter((device) => device.state === state);
+      }
       if (type) filtered = filtered.filter((device) => device.device_type === type);
       if (segment) filtered = filtered.filter((device) => device.segment === segment);
       if (vendor) filtered = filtered.filter((device) => device.vendor === vendor);
@@ -914,7 +928,7 @@ function createApi(session) {
         );
       }
       if (url.searchParams.get("conflict") === "true") {
-        filtered = filtered.filter((device) => device.identity_conflict);
+        filtered = filtered.filter(hasConflict);
       }
       return {
         status: 200,

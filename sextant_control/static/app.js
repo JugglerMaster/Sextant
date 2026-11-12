@@ -71,6 +71,7 @@ const state = {
   paletteTrigger: null,
   discovery: {
     settings: null,
+    tab: "discover",
     devices: [],
     summary: null,
     scans: [],
@@ -6598,6 +6599,31 @@ function discoveryStat(label, value, detail, className = "") {
   );
 }
 
+function renderDiscoveryTabs() {
+  const tabs = $("discovery-tabs");
+  const ready = discoveryReady();
+  if (tabs) tabs.hidden = !ready;
+  const admin = Boolean(state.permissions.admin);
+  const allowed = new Set(["discover", "topology"]);
+  if (admin) {
+    for (const kind of ["imports", "snmp", "unifi", "routeros", "opnsense", "proxmox", "esxi"]) {
+      allowed.add(kind);
+    }
+  }
+  let active = state.discovery.tab || "discover";
+  if (!allowed.has(active)) active = "discover";
+  state.discovery.tab = active;
+  document.querySelectorAll("#discovery-tabs .tab").forEach((tab) => {
+    const key = tab.dataset.discoveryTab;
+    tab.hidden = !allowed.has(key);
+    tab.classList.toggle("is-active", key === active);
+    tab.setAttribute("aria-pressed", key === active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-discovery-panel]").forEach((panel) => {
+    panel.hidden = !ready || panel.dataset.discoveryPanel !== active;
+  });
+}
+
 function renderDiscovery() {
   const discovery = state.discovery;
   const settings = discovery.settings;
@@ -6624,12 +6650,9 @@ function renderDiscovery() {
     const node = $(id);
     if (node) node.hidden = !ready;
   }
-  for (const id of ["discovery-import-panel", "discovery-integrations-panel"]) {
-    const node = $(id);
-    if (node) node.hidden = !ready || !state.permissions.admin;
-  }
   if (!ready) {
     setText("discovery-count", "");
+    renderDiscoveryTabs();
     return;
   }
   renderDiscoverySummary();
@@ -6639,6 +6662,7 @@ function renderDiscovery() {
   renderDiscoveryScanHistory();
   renderDiscoveryImportHistory();
   renderDiscoveryTable();
+  renderDiscoveryTabs();
   if (state.permissions.admin) loadDiscoveryIntegrations(true);
 }
 
@@ -6656,8 +6680,14 @@ function renderDiscoverySummary() {
   clear(container);
   container.append(
     discoveryStat("Discovered devices", summary.total, `${summary.no_agent || 0} without an enrolled agent`),
-    discoveryStat("New", summary.new || 0, "Not yet marked known", "stat-warn"),
+    discoveryStat("New", summary.new || 0, "Seen once, awaiting review", "stat-warn"),
     discoveryStat("Known", summary.states?.known || 0, `${summary.states?.ignored || 0} ignored`, "stat-good"),
+    discoveryStat(
+      "Changed",
+      summary.changed || 0,
+      "IP, MAC, or hostname moved",
+      summary.changed ? "stat-warn" : "",
+    ),
     discoveryStat(
       "Exposure",
       summary.exposure || 0,
@@ -6685,8 +6715,14 @@ function renderDiscoverySegments() {
   const panel = $("discovery-segments-panel");
   if (!container || !panel) return;
   const segments = state.discovery.summary?.segments || [];
-  panel.hidden = !segments.length;
+  panel.hidden = false;
   clear(container);
+  if (!segments.length) {
+    container.append(
+      h("div", { class: "empty-inline" }, "No segments yet. Run a scan to map the allowlisted networks."),
+    );
+    return;
+  }
   for (const segment of segments) {
     container.append(
       h(
@@ -6765,8 +6801,6 @@ function renderDiscoveryFilters() {
   if (adminPorts) adminPorts.checked = Boolean(filters.admin_ports);
   const exposure = $("discovery-filter-exposure");
   if (exposure) exposure.checked = Boolean(filters.exposure);
-  const conflict = $("discovery-filter-conflict");
-  if (conflict) conflict.checked = Boolean(filters.conflict);
 }
 
 function renderDiscoveryImportHistory() {
@@ -6931,16 +6965,25 @@ function integrationField(label, input) {
 }
 
 function renderDiscoveryIntegrations() {
-  const container = $("discovery-integration-list");
-  if (!container) return;
-  clear(container);
+  const containers = new Map();
+  document.querySelectorAll("[data-integration-kind]").forEach((el) => {
+    containers.set(el.dataset.integrationKind, el);
+    clear(el);
+  });
+  if (!containers.size) return;
   const integrations = state.discovery.integrations || [];
   if (!integrations.length) {
-    container.append(h("div", { class: "empty-inline" }, "Loading integrations…"));
+    for (const container of containers.values()) {
+      container.append(h("div", { class: "empty-inline" }, "Loading integrations…"));
+    }
     return;
   }
+  const rendered = new Set();
   for (const integration of integrations) {
     const kind = integration.kind;
+    const container = containers.get(kind);
+    if (!container) continue;
+    rendered.add(kind);
     const config = integration.config || {};
     const secretConfigured = Boolean(integration.secret_configured);
     const fields = [];
@@ -7038,6 +7081,13 @@ function renderDiscoveryIntegrations() {
       actions,
     );
     container.append(sectionNode);
+  }
+  for (const [kind, container] of containers) {
+    if (!rendered.has(kind)) {
+      container.append(
+        h("div", { class: "empty-inline" }, "This connector is not available in this build."),
+      );
+    }
   }
 }
 
@@ -7234,7 +7284,40 @@ function renderDiscoverySources() {
 }
 
 function discoveryStateKind(value) {
-  return value === "new" ? "warning" : value === "promoted" ? "online" : value === "ignored" ? "offline" : "neutral";
+  return (
+    {
+      new: "warning",
+      changed: "warning",
+      conflict: "critical",
+      promoted: "online",
+      ignored: "offline",
+    }[value] || "neutral"
+  );
+}
+
+function discoveryChangeLabel(kind) {
+  return (
+    {
+      ip: "IP changed",
+      mac: "MAC changed",
+      hostname: "Hostname changed",
+    }[kind] || "Identity changed"
+  );
+}
+
+function discoveryEffectiveState(device) {
+  if (device.conflict || device.identity_conflict) {
+    return { label: "conflict", kind: "critical", change: "" };
+  }
+  const kind = device.change_kind || device.change?.kind || "";
+  if (kind) {
+    return {
+      label: "changed",
+      kind: "warning",
+      change: discoveryChangeLabel(kind),
+    };
+  }
+  return { label: device.state, kind: discoveryStateKind(device.state), change: "" };
 }
 
 function discoveryDeviceName(device) {
@@ -7264,6 +7347,16 @@ function renderDiscoveryTable() {
     const agent = (state.dashboard?.agents || []).find((item) => item.id === device.agent_id);
     const ports = (device.open_ports || []).join(", ") || "—";
     const tags = (device.tags || []).map((tag) => h("span", { class: "tag" }, tag));
+    const effective = discoveryEffectiveState(device);
+    const change = device.change || {};
+    const changeDetail =
+      change.kind === "ip"
+        ? `${change.from} → ${change.to}`
+        : change.kind === "mac"
+          ? `${change.from || "none"} → ${change.to || "none"}`
+          : change.kind === "hostname"
+            ? `${change.from} → ${change.to}`
+            : "";
     const action = h(
       "button",
       {
@@ -7281,9 +7374,12 @@ function renderDiscoveryTable() {
         h(
           "td",
           {},
-          statusPill(device.state, discoveryStateKind(device.state)),
-          device.identity_conflict
-            ? h("div", {}, statusPill("conflict", "critical"))
+          statusPill(effective.label, effective.kind),
+          effective.change
+            ? h("div", { class: "form-hint" }, effective.change)
+            : null,
+          changeDetail
+            ? h("div", { class: "form-hint mono" }, changeDetail)
             : null,
         ),
         h("td", { class: "mono" }, device.ip || "—"),
@@ -7601,6 +7697,7 @@ function discoveryEventLabel(kind) {
       new_device: "New device",
       new_port: "New port",
       service_changed: "Service changed",
+      identity_changed: "Identity changed",
       identity_conflict: "Identity conflict",
       went_dark: "Went dark",
       promoted: "Promoted",
@@ -7616,8 +7713,9 @@ function renderDiscoveryDrawer() {
   if (!body || !detail) return;
   const device = detail.device;
   const name = discoveryDeviceName(device);
+  const effective = discoveryEffectiveState(device);
   setText("discovery-drawer-title", name);
-  setText("discovery-drawer-eyebrow", `${device.device_type || "unknown"} · ${device.state}`);
+  setText("discovery-drawer-eyebrow", `${device.device_type || "unknown"} · ${effective.label}`);
   setText(
     "discovery-drawer-meta",
     `${device.ip || "no address"} · ${device.mac || "no MAC"} · ${device.vendor || "unknown vendor"}`,
@@ -7679,6 +7777,25 @@ function renderDiscoveryDrawer() {
       ),
     ),
   );
+
+  const change = device.change || {};
+  if (device.change_kind || change.kind) {
+    const kind = device.change_kind || change.kind;
+    body.append(
+      section(
+        "Changed",
+        "Acknowledged by saving a state",
+        h(
+          "div",
+          { class: "info-grid" },
+          infoTile("Change", discoveryChangeLabel(kind)),
+          infoTile("Previous", change.from || "unknown"),
+          infoTile("Current", change.to || "unknown"),
+          infoTile("Detected", change.at ? localTime(change.at) : localTime(device.changed_at)),
+        ),
+      ),
+    );
+  }
 
   if ((detail.conflicts || []).length) {
     const conflictList = h("div", { class: "list-stack" });
@@ -7810,6 +7927,13 @@ function renderDiscoveryDrawer() {
           h("option", { value, selected: value === device.state }, value),
         ),
       ),
+    ),
+    h(
+      "p",
+      { class: "form-hint" },
+      device.change_kind || device.conflict
+        ? "Saving a state acknowledges the identity change or conflict and clears the marker."
+        : "New devices become known after they are seen in a later scan.",
     ),
     h("p", { class: "form-error", id: "discovery-edit-error", role: "alert" }),
     h("button", { class: "button button-primary", type: "submit", disabled: !state.permissions.operate }, "Save changes"),
@@ -8383,10 +8507,6 @@ function wireEvents() {
     state.discovery.filters.exposure = event.target.checked;
     loadDiscoveryDevices().catch((error) => toast(error.message, "error"));
   });
-  $("discovery-filter-conflict")?.addEventListener("change", (event) => {
-    state.discovery.filters.conflict = event.target.checked;
-    loadDiscoveryDevices().catch((error) => toast(error.message, "error"));
-  });
   $("discovery-export-csv")?.addEventListener("click", () => exportDiscovery("csv"));
   $("discovery-export-json")?.addEventListener("click", () => exportDiscovery("json"));
   $("discovery-import-form")?.addEventListener("submit", submitDiscoveryImport);
@@ -8407,7 +8527,15 @@ function wireEvents() {
       setText("discovery-import-status", "Could not read the selected file.");
     }
   });
-  $("discovery-integrations-refresh")?.addEventListener("click", () => loadDiscoveryIntegrations());
+  document.querySelectorAll(".discovery-integrations-refresh").forEach((button) => {
+    button.addEventListener("click", () => loadDiscoveryIntegrations());
+  });
+  document.querySelectorAll("#discovery-tabs .tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      state.discovery.tab = tab.dataset.discoveryTab || "discover";
+      renderDiscoveryTabs();
+    });
+  });
   $("discovery-filter-clear")?.addEventListener("click", () => {
     state.discovery.filters = {
       state: "",

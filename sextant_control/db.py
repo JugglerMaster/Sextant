@@ -526,7 +526,12 @@ CREATE TABLE IF NOT EXISTS discovered_devices (
     notes TEXT NOT NULL DEFAULT '',
     mac_randomized INTEGER NOT NULL DEFAULT 0,
     wake_status TEXT NOT NULL DEFAULT '',
-    wake_verified_at TEXT
+    wake_verified_at TEXT,
+    change_kind TEXT NOT NULL DEFAULT '',
+    change_detail TEXT NOT NULL DEFAULT '{}',
+    changed_at TEXT,
+    conflict_detail TEXT NOT NULL DEFAULT '{}',
+    conflict_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS discovery_scans (
@@ -554,11 +559,29 @@ CREATE TABLE IF NOT EXISTS discovery_events (
     device_id TEXT NOT NULL,
     kind TEXT NOT NULL
         CHECK (kind IN ('new_device', 'new_port', 'service_changed',
-                        'identity_conflict', 'went_dark', 'promoted',
-                        'wake_verified')),
+                        'identity_changed', 'identity_conflict',
+                        'went_dark', 'promoted', 'wake_verified')),
     detail TEXT NOT NULL DEFAULT '{}'
 );
 """
+
+# A device is genuinely conflicted only when current rows still disagree about
+# an IP or hostname. Identity drift (IP/MAC/hostname change) is tracked on the
+# row as change_kind and is not a conflict.
+_CONFLICT_MATCH_SQL = """(
+    COALESCE(conflict_at, '') != ''
+    OR (ip != '' AND ip IN (
+        SELECT ip FROM discovered_devices
+        WHERE ip != '' AND mac != ''
+        GROUP BY ip HAVING COUNT(DISTINCT mac) > 1
+    ))
+    OR (hostname != '' AND hostname IN (
+        SELECT hostname FROM discovered_devices
+        WHERE hostname != '' AND mac != ''
+        GROUP BY hostname HAVING COUNT(DISTINCT mac) > 1
+    ))
+)"""
+
 
 INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_agents_last_seen ON agents(last_seen);
@@ -885,11 +908,27 @@ class Database:
                 )
             if "wake_verified_at" not in device_columns:
                 conn.execute("ALTER TABLE discovered_devices ADD COLUMN wake_verified_at TEXT")
+            if "change_kind" not in device_columns:
+                conn.execute(
+                    "ALTER TABLE discovered_devices ADD COLUMN change_kind TEXT NOT NULL DEFAULT ''"
+                )
+            if "change_detail" not in device_columns:
+                conn.execute(
+                    "ALTER TABLE discovered_devices ADD COLUMN change_detail TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "changed_at" not in device_columns:
+                conn.execute("ALTER TABLE discovered_devices ADD COLUMN changed_at TEXT")
+            if "conflict_detail" not in device_columns:
+                conn.execute(
+                    "ALTER TABLE discovered_devices ADD COLUMN conflict_detail TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "conflict_at" not in device_columns:
+                conn.execute("ALTER TABLE discovered_devices ADD COLUMN conflict_at TEXT")
 
         event_table = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'discovery_events'"
         ).fetchone()
-        if event_table is not None and "wake_verified" not in str(event_table["sql"] or ""):
+        if event_table is not None and "identity_changed" not in str(event_table["sql"] or ""):
             # SQLite cannot alter a CHECK constraint, so rebuild the small event
             # table. Indexes are recreated by INDEXES after this migration.
             conn.execute("ALTER TABLE discovery_events RENAME TO discovery_events_old")
@@ -900,8 +939,8 @@ class Database:
                        device_id TEXT NOT NULL,
                        kind TEXT NOT NULL
                            CHECK (kind IN ('new_device', 'new_port', 'service_changed',
-                                           'identity_conflict', 'went_dark', 'promoted',
-                                           'wake_verified')),
+                                           'identity_changed', 'identity_conflict',
+                                           'went_dark', 'promoted', 'wake_verified')),
                        detail TEXT NOT NULL DEFAULT '{}'
                    )"""
             )
@@ -3781,8 +3820,13 @@ class Database:
         clauses: list[str] = []
         params: list[Any] = []
         if state:
-            clauses.append("state = ?")
-            params.append(state)
+            if state == "changed":
+                clauses.append("change_kind != ''")
+            elif state == "conflict":
+                clauses.append(_CONFLICT_MATCH_SQL)
+            else:
+                clauses.append("state = ?")
+                params.append(state)
         if segment:
             clauses.append("segment = ?")
             params.append(segment)
@@ -3815,27 +3859,7 @@ class Database:
             )
             params.extend(patterns)
         if conflict:
-            clauses.append(
-                """(
-                    (mac != '' AND mac IN (
-                        SELECT mac FROM discovered_devices
-                        WHERE mac != '' GROUP BY mac HAVING COUNT(DISTINCT ip) > 1
-                    ))
-                    OR (ip != '' AND ip IN (
-                        SELECT ip FROM discovered_devices
-                        WHERE ip != '' GROUP BY ip HAVING COUNT(DISTINCT mac) > 1
-                    ))
-                    OR (hostname != '' AND hostname IN (
-                        SELECT hostname FROM discovered_devices
-                        WHERE hostname != '' GROUP BY hostname
-                        HAVING COUNT(DISTINCT mac) > 1
-                    ))
-                    OR id IN (
-                        SELECT device_id FROM discovery_events
-                        WHERE kind = 'identity_conflict'
-                    )
-                )"""
-            )
+            clauses.append(_CONFLICT_MATCH_SQL)
         if query:
             pattern = f"%{query}%"
             clauses.append(
@@ -3878,33 +3902,34 @@ class Database:
     @staticmethod
     def _discovery_conflict_ids(conn: sqlite3.Connection) -> set[str]:
         ids: set[str] = set()
-        for row in conn.execute(
-            """SELECT id FROM discovered_devices WHERE mac != '' AND mac IN (
-                   SELECT mac FROM discovered_devices
-                   WHERE mac != '' GROUP BY mac HAVING COUNT(DISTINCT ip) > 1
-               )"""
-        ).fetchall():
-            ids.add(str(row["id"]))
-        for row in conn.execute(
-            """SELECT id FROM discovered_devices WHERE ip != '' AND ip IN (
-                   SELECT ip FROM discovered_devices
-                   WHERE ip != '' GROUP BY ip HAVING COUNT(DISTINCT mac) > 1
-               )"""
-        ).fetchall():
-            ids.add(str(row["id"]))
-        for row in conn.execute(
-            """SELECT id FROM discovered_devices WHERE hostname != '' AND hostname IN (
-                   SELECT hostname FROM discovered_devices
-                   WHERE hostname != '' GROUP BY hostname
-                   HAVING COUNT(DISTINCT mac) > 1
-               )"""
-        ).fetchall():
-            ids.add(str(row["id"]))
-        for row in conn.execute(
-            """SELECT DISTINCT device_id FROM discovery_events
-               WHERE kind = 'identity_conflict'"""
-        ).fetchall():
-            ids.add(str(row["device_id"]))
+        rows = conn.execute(
+            """SELECT id, mac, ip, hostname, conflict_at FROM discovered_devices"""
+        ).fetchall()
+        by_mac: dict[str, list[Any]] = {}
+        by_ip: dict[str, list[Any]] = {}
+        by_hostname: dict[str, list[Any]] = {}
+        for row in rows:
+            mac = str(row["mac"] or "").lower()
+            if str(row["conflict_at"] or ""):
+                ids.add(str(row["id"]))
+            if mac:
+                by_mac.setdefault(mac, []).append(row)
+                if row["ip"]:
+                    by_ip.setdefault(str(row["ip"]), []).append(row)
+            if mac and row["hostname"]:
+                by_hostname.setdefault(str(row["hostname"]).lower(), []).append(row)
+        for group in by_mac.values():
+            ips = {str(row["ip"]) for row in group if row["ip"]}
+            if len(ips) > 1:
+                ids.update(str(row["id"]) for row in group)
+        for group in by_ip.values():
+            macs = {str(row["mac"]).lower() for row in group if row["mac"]}
+            if len(macs) > 1:
+                ids.update(str(row["id"]) for row in group)
+        for group in by_hostname.values():
+            macs = {str(row["mac"]).lower() for row in group if row["mac"]}
+            if len(macs) > 1:
+                ids.update(str(row["id"]) for row in group)
         return ids
 
     def discovery_conflict_ids(self) -> set[str]:
@@ -3915,15 +3940,10 @@ class Database:
         with self.connection() as conn:
             rows = conn.execute(
                 """SELECT id, segment, ip, state, agent_id, open_ports,
-                          device_type, vendor, wake_status
+                          device_type, vendor, wake_status, change_kind,
+                          conflict_at
                    FROM discovered_devices"""
             ).fetchall()
-            states = {
-                str(row["state"]): int(row["n"])
-                for row in conn.execute(
-                    "SELECT state, COUNT(*) AS n FROM discovered_devices GROUP BY state"
-                ).fetchall()
-            }
             types = [
                 {"type": row["device_type"], "count": int(row["n"])}
                 for row in conn.execute(
@@ -3946,6 +3966,13 @@ class Database:
         exposure_count = 0
         managed_count = 0
         new_count = 0
+        changed_count = 0
+        state_counts: dict[str, int] = {
+            "new": 0,
+            "known": 0,
+            "ignored": 0,
+            "promoted": 0,
+        }
         for row in rows:
             ports = set(str(port) for port in loads(row["open_ports"], []))
             has_admin = bool(ports & admin_ports)
@@ -3953,8 +3980,12 @@ class Database:
             exposed = has_admin and not has_agent
             if has_agent:
                 managed_count += 1
-            if row["state"] == "new":
+            device_state = str(row["state"])
+            state_counts[device_state] = state_counts.get(device_state, 0) + 1
+            if device_state == "new":
                 new_count += 1
+            if str(row["change_kind"] or ""):
+                changed_count += 1
             if exposed:
                 exposure_count += 1
             segment = str(row["segment"] or "")
@@ -3972,7 +4003,7 @@ class Database:
                 },
             )
             entry["count"] += 1
-            if row["state"] == "new":
+            if device_state == "new":
                 entry["new"] += 1
             if has_agent:
                 entry["managed"] += 1
@@ -3997,9 +4028,14 @@ class Database:
         segments = sorted(segment_map.values(), key=lambda item: item["segment"])
         return {
             "total": total,
-            "new": states.get("new", 0),
+            "new": new_count,
             "new_count": new_count,
-            "states": {name: states.get(name, 0) for name in ("new", "known", "ignored", "promoted")},
+            "changed": changed_count,
+            "states": {
+                **state_counts,
+                "changed": changed_count,
+                "conflict": len(conflict_ids),
+            },
             "types": types,
             "segments": segments,
             "vendors": vendors,
@@ -4036,6 +4072,17 @@ class Database:
         if state is not None:
             fields.append("state = ?")
             params.append(state)
+            # Recording an operator decision acknowledges any identity drift
+            # and clears the current conflict marker.
+            fields.extend(
+                [
+                    "change_kind = ''",
+                    "change_detail = '{}'",
+                    "changed_at = NULL",
+                    "conflict_detail = '{}'",
+                    "conflict_at = NULL",
+                ]
+            )
         if agent_id is not None:
             fields.append("agent_id = ?")
             params.append(agent_id[:64] or None)

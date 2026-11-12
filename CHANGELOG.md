@@ -4,6 +4,31 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.5.7] - 2026-11-12
+
+### Changed
+
+- Split Discovery into tabs: **Discover** keeps the scan form, summary, and
+  device list; **Topology** holds segments; **Imports** holds external scan and
+  lease ingestion; and each connector has its own admin tab (**SNMP**, **UniFi**,
+  **RouterOS**, **OPNsense**, **Proxmox**, **ESXi**).
+- The Discovery state filter now includes **Changed** and **Conflict**. The
+  separate identity-conflict checkbox was removed.
+- A device seen in a later scan moves from **New** to **Known** automatically;
+  operator decisions are preserved.
+
+### Fixed
+
+- MAC-less observations now merge into the row that already owns the IP instead
+  of creating duplicate devices that kept showing as new.
+- An IP change on the same MAC is reported as **IP changed** with the previous
+  and current address, not as a conflict.
+- A MAC change against a stale row is absorbed into that row and reported as
+  **MAC changed**. Stale duplicate rows sharing an IP or hostname are merged,
+  with their event history preserved.
+- Historical `identity_conflict` events no longer keep a device flagged as
+  conflicted after the identity has been reconciled.
+
 ## [0.5.6] - 2026-11-12
 
 ### Changed
@@ -198,6 +223,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.5.7]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.7
 [0.5.6]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.6
 [0.5.5]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.5
 [0.5.4]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.4

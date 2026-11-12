@@ -4796,6 +4796,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "known",
             "ignored",
             "promoted",
+            "changed",
+            "conflict",
         }:
             raise HTTPException(status_code=400, detail="Invalid device state.")
         normalized_segment = segment.strip()
@@ -4821,6 +4823,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for row in rows:
             device = discovered_device_to_dict(row)
             device["identity_conflict"] = device["id"] in conflict_ids
+            device["conflict"] = bool(device["conflict"]) or device["identity_conflict"]
             devices.append(device)
         return {
             "devices": devices,
@@ -4861,6 +4864,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 wake_target = wake_target_to_dict(target_row)
         conflicts = detect_identity_conflicts(database, device_id)
         device["identity_conflict"] = bool(conflicts)
+        device["conflict"] = bool(device["conflict"]) or bool(conflicts)
         candidates: list[dict[str, Any]] = []
         if device["mac"] and not device["agent_id"]:
             with database.connection() as conn:
@@ -4987,6 +4991,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "known",
             "ignored",
             "promoted",
+            "changed",
+            "conflict",
         }:
             raise HTTPException(status_code=400, detail="Invalid device state.")
         normalized_segment = segment.strip()
@@ -5013,6 +5019,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for row in rows:
             device = discovered_device_to_dict(row)
             device["identity_conflict"] = device["id"] in conflict_ids
+            device["conflict"] = bool(device["conflict"]) or device["identity_conflict"]
             devices.append(device)
         truncated = total > len(devices)
         database.audit(

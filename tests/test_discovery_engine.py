@@ -411,6 +411,88 @@ def test_different_known_macs_are_never_merged(database):
     assert "aa:bb:cc:dd:ee:02" in loads(events[0]["detail"], {})["observed_mac"]
 
 
+def test_macless_observation_merges_into_mac_row(database):
+    first = merge_observation(
+        database, _observation(mac="b8:27:eb:11:22:33", ip="192.168.1.60")
+    )
+    anonymous = merge_observation(
+        database, _observation(mac="", ip="192.168.1.60", hostname="")
+    )
+    assert anonymous["id"] == first["id"]
+    assert anonymous["mac"] == "b8:27:eb:11:22:33"
+
+
+def test_macless_duplicate_rows_are_absorbed(database):
+    mac_row = merge_observation(
+        database, _observation(mac="b8:27:eb:11:22:33", ip="192.168.1.61")
+    )
+    with database.connection() as conn:
+        # Simulate the old bug: a MAC-less duplicate with a fresher timestamp.
+        conn.execute(
+            """INSERT INTO discovered_devices
+               (id, first_seen, last_seen, mac, ip, hostname, state)
+               VALUES ('dev_macless', '2026-01-01T00:00:00Z', '2026-11-01T00:00:00Z',
+                       '', '192.168.1.61', '', 'new')"""
+        )
+    result = merge_observation(
+        database, _observation(mac="", ip="192.168.1.61", hostname="")
+    )
+    assert result["id"] == mac_row["id"]
+    assert result["mac"] == "b8:27:eb:11:22:33"
+    rows, total = database.list_discovered_devices(mac="b8:27:eb:11:22:33")
+    assert total == 1
+    assert rows[0]["id"] == mac_row["id"]
+    assert database.get_discovered_device("dev_macless") is None
+
+
+def test_reobserved_new_device_becomes_known(database):
+    first = merge_observation(database, _observation())
+    assert first["state"] == "new"
+    again = merge_observation(database, _observation())
+    assert again["id"] == first["id"]
+    assert again["state"] == "known"
+
+
+def test_mac_change_after_stale_window_is_changed(database):
+    first = merge_observation(
+        database, _observation(mac="b8:27:eb:11:22:33", ip="192.168.1.62")
+    )
+    with database.connection() as conn:
+        conn.execute(
+            "UPDATE discovered_devices SET last_seen = ? WHERE id = ?",
+            ("2026-01-01T00:00:00Z", first["id"]),
+        )
+    changed = merge_observation(
+        database, _observation(mac="b8:27:eb:44:55:66", ip="192.168.1.62")
+    )
+    assert changed["id"] == first["id"]
+    assert changed["mac"] == "b8:27:eb:44:55:66"
+    assert changed["change_kind"] == "mac"
+    assert changed["change"]["from"] == "b8:27:eb:11:22:33"
+    assert changed["change"]["to"] == "b8:27:eb:44:55:66"
+    rows, total = database.list_discovered_devices(state="changed")
+    assert total == 1
+    assert rows[0]["id"] == first["id"]
+
+
+def test_operator_state_acknowledges_identity_change(database):
+    first = merge_observation(
+        database, _observation(mac="b8:27:eb:11:22:33", ip="192.168.1.63")
+    )
+    merge_observation(
+        database, _observation(mac="b8:27:eb:11:22:33", ip="192.168.1.64")
+    )
+    assert database.get_discovered_device(first["id"])["change_kind"] == "ip"
+    database.update_discovered_device(first["id"], state="known")
+    row = database.get_discovered_device(first["id"])
+    assert row["state"] == "known"
+    assert row["change_kind"] == ""
+    assert row["changed_at"] is None
+    changed_rows, changed_total = database.list_discovered_devices(state="changed")
+    assert changed_total == 0
+    assert changed_rows == []
+
+
 def test_event_deduplication_for_new_device_and_ports(database):
     first = merge_observation(database, _observation(open_ports=[22]))
     merge_observation(database, _observation(open_ports=[22]))
@@ -566,20 +648,29 @@ def test_identity_conflicts_group_ip_and_hostname(database):
     assert len(ip_conflict["device_ids"]) == 2
 
 
-def test_identity_conflict_event_for_mac_moving_ip_is_visible(database):
+def test_identity_change_for_mac_moving_ip_is_not_a_conflict(database):
     device = merge_observation(
         database, _observation(mac="aa:bb:cc:dd:ee:09", ip="192.168.1.80")
     )
-    merge_observation(
+    moved = merge_observation(
         database, _observation(mac="aa:bb:cc:dd:ee:09", ip="192.168.1.81")
     )
-    conflicts = detect_identity_conflicts(database, device["id"])
-    assert any(conflict["type"] == "event" for conflict in conflicts)
-    event_conflict = next(item for item in conflicts if item["type"] == "event")
-    assert event_conflict["detail"]["previous_ip"] == "192.168.1.80"
-    rows, total = database.list_discovered_devices(conflict=True)
-    assert total == 1
-    assert rows[0]["id"] == device["id"]
+    assert moved["id"] == device["id"]
+    assert moved["change_kind"] == "ip"
+    assert moved["change"]["from"] == "192.168.1.80"
+    assert moved["change"]["to"] == "192.168.1.81"
+    events = database.discovery_device_events(device["id"])
+    changed = [event for event in events if event["kind"] == "identity_changed"]
+    assert changed
+    assert loads(changed[0]["detail"], {})["kind"] == "ip"
+    assert not [event for event in events if event["kind"] == "identity_conflict"]
+    # A change is reported through the state filter, not as a conflict.
+    changed_rows, changed_total = database.list_discovered_devices(state="changed")
+    assert changed_total == 1
+    assert changed_rows[0]["id"] == device["id"]
+    conflict_rows, conflict_total = database.list_discovered_devices(conflict=True)
+    assert conflict_total == 0
+    assert conflict_rows == []
 
 
 def test_exposure_filter_and_summary(database):
