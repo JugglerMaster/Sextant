@@ -8636,6 +8636,16 @@ function renderDiscoveryPromote() {
         userInput.value = windows ? "Administrator" : "root";
       };
       osSelect.addEventListener("change", syncRemote);
+      const profileSelect = h(
+        "select",
+        { name: "remote_profile" },
+        ...profiles.map((profile) =>
+          h("option", { value: profile.slug }, `${profile.name} (${profile.slug})`),
+        ),
+      );
+      profileSelect.value = profiles.some((profile) => profile.slug === "workstation")
+        ? "workstation"
+        : profiles[0]?.slug || "workstation";
       fields.append(
         h(
           "p",
@@ -8669,13 +8679,7 @@ function renderDiscoveryPromote() {
             "label",
             { class: "field" },
             h("span", {}, "Profile"),
-            h(
-              "select",
-              { name: "remote_profile" },
-              ...profiles.map((profile) =>
-                h("option", { value: profile.slug }, `${profile.name} (${profile.slug})`),
-              ),
-            ),
+            profileSelect,
           ),
         ),
         h(

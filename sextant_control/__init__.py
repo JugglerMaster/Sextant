@@ -1,3 +1,3 @@
 """Sextant: authenticated self-hosted remote operations console."""
 
-__version__ = "0.6.6"
+__version__ = "0.6.7"

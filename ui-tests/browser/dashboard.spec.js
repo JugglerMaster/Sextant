@@ -223,6 +223,7 @@ for (const theme of THEMES) {
     await expect(remoteDialog.locator("#discovery-promote-target")).toHaveValue("remote_install");
     await expect(remoteDialog.locator("#discovery-remote-os")).toBeVisible();
     await expect(remoteDialog.locator('input[name="remote_host"]')).toHaveValue("192.168.1.40");
+    await expect(remoteDialog.locator('select[name="remote_profile"]')).toHaveValue("workstation");
     await remoteDialog.locator("#discovery-remote-os").selectOption("windows");
     await expect(remoteDialog.locator('input[name="remote_port"]')).toHaveValue("5986");
     await expect(remoteDialog.locator('input[name="remote_password"]')).toBeVisible();

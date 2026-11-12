@@ -4,6 +4,13 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.6.7] - 2026-11-12
+
+### Changed
+
+- The Discovery remote-install dialog defaults the agent profile to
+  **Workstation** instead of the first profile returned by the server.
+
 ## [0.6.6] - 2026-11-12
 
 ### Added
@@ -318,6 +325,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.6.7]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.7
 [0.6.6]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.6
 [0.6.5]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.5
 [0.6.4]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.6.4
