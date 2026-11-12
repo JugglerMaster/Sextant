@@ -169,6 +169,7 @@ def _run_pty(
     max_output: int,
     env: dict[str, str] | None = None,
     on_chunk: ChunkCallback | None = None,
+    send_immediately: bool = False,
 ) -> dict[str, Any]:
     if pty is None:
         return _result("failed", error="Interactive password prompts are not available on this platform.")
@@ -198,15 +199,12 @@ def _run_pty(
     total = 0
     sent_password = False
     timed_out = False
-    # realmd passes --stdin-password to adcli, which reads the password
-    # immediately without printing a prompt. Write it up front; the PTY line
-    # discipline buffers it until adcli reads. Keep the prompt fallback for
-    # membership backends that do prompt.
-    try:
-        os.write(master, (password + "\n").encode("utf-8"))
-        sent_password = True
-    except OSError:
-        pass
+    if send_immediately:
+        try:
+            os.write(master, (password + "\n").encode("utf-8"))
+            sent_password = True
+        except OSError:
+            pass
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -445,7 +443,68 @@ def _run_linux_join(
     use_realm = realm and method in {"auto", "realm"}
     if method == "auto" and values["server"] and adcli:
         use_realm = False
-    if use_realm:
+    kinit = shutil.which("kinit")
+    if use_realm and kinit:
+        # Obtain a Kerberos ticket first, then join without an interactive
+        # password prompt. realmd's own prompt is unreliable under a PTY.
+        realm_name = values["domain"].upper()
+        ccache = f"/tmp/sextant-krb5-{os.getpid()}-{time.time_ns()}"
+        env = {**os.environ, "KRB5CCNAME": f"FILE:{ccache}"}
+        auth = _run_pty(
+            [kinit, f"{values['username']}@{realm_name}"],
+            password,
+            timeout=min(timeout, 90),
+            max_output=max_output,
+            env=env,
+            on_chunk=on_chunk,
+            send_immediately=False,
+        )
+        if auth.get("status") == "succeeded":
+            args = [realm, "join", "--unattended"]
+            if values["ou"]:
+                args.append(f"--computer-ou={values['ou']}")
+            if values["computer_name"]:
+                args.append(f"--computer-name={values['computer_name']}")
+            args.append(values["domain"])
+            result = run_capture(
+                args,
+                timeout=timeout,
+                max_output=max_output,
+                env=env,
+                on_chunk=on_chunk,
+            )
+            result["stdout"] = _redact(str(result.get("stdout") or ""), password)
+            result["stderr"] = _redact(str(result.get("stderr") or ""), password)
+            listed = run_capture(
+                [realm, "list", values["domain"]],
+                timeout=30,
+                max_output=max_output,
+                env=env,
+            )
+            result["stdout"] = (
+                str(result.get("stdout") or "").rstrip()
+                + "\n"
+                + str(listed.get("stdout") or listed.get("stderr") or "").strip()
+            )
+            kdestroy = shutil.which("kdestroy")
+            if kdestroy:
+                run_capture([kdestroy], timeout=15, max_output=10_000, env=env)
+            try:
+                os.unlink(ccache)
+            except OSError:
+                pass
+            if result.get("status") == "succeeded" and reboot:
+                subprocess.Popen(
+                    ["shutdown", "-r", "+1"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                result["stdout"] += "\nReboot scheduled in one minute."
+            return result
+        # kinit failed. Prefer the adcli stdin path when available; otherwise
+        # fall through to realmd's interactive prompt.
+
+    if use_realm and not adcli:
         args = [realm, "join", f"--user={values['username']}"]
         if values["ou"]:
             args.append(f"--computer-ou={values['ou']}")
@@ -459,6 +518,7 @@ def _run_linux_join(
             max_output=max_output,
             env=os.environ.copy(),
             on_chunk=on_chunk,
+            send_immediately=False,
         )
         if result.get("status") != "succeeded":
             return result
@@ -473,7 +533,11 @@ def _run_linux_join(
             + str(listed.get("stdout") or listed.get("stderr") or "").strip()
         )
         if reboot:
-            subprocess.Popen(["shutdown", "-r", "+1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                ["shutdown", "-r", "+1"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             result["stdout"] += "\nReboot scheduled in one minute."
         return result
 

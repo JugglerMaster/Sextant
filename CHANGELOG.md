@@ -4,6 +4,14 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.2] - 2026-11-12
+
+### Fixed
+
+- Linux domain join now obtains a Kerberos ticket with `kinit` and runs
+  `realm join --unattended` from that ticket, avoiding realmd's unreliable PTY
+  password prompt. `adcli join --stdin-password` remains the fallback.
+
 ## [0.8.1] - 2026-11-12
 
 ### Fixed
@@ -418,6 +426,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.8.2]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.2
 [0.8.1]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.1
 [0.8.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.0
 [0.7.3]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.7.3

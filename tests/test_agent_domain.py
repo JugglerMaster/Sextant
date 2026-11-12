@@ -35,10 +35,27 @@ def test_pty_sends_password_without_a_prompt():
         "super-secret",
         timeout=5,
         max_output=10_000,
+        send_immediately=True,
     )
     assert result["status"] == "succeeded"
     assert "GOT=[redacted]" in result["stdout"]
     assert "super-secret" not in result["stdout"]
+
+
+def test_pty_answers_a_password_prompt():
+    result = domain._run_pty(
+        [
+            "bash",
+            "-c",
+            "printf 'Password: '; IFS= read -r value; printf 'GOT=%s\\n' \"$value\"",
+        ],
+        "super-secret",
+        timeout=5,
+        max_output=10_000,
+    )
+    assert result["status"] == "succeeded"
+    assert "Password:" in result["stdout"]
+    assert "GOT=[redacted]" in result["stdout"]
 
 
 def test_windows_join_keeps_password_out_of_script(monkeypatch):
