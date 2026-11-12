@@ -20,6 +20,8 @@ def _agent() -> AgentConfig:
 def test_package_command_builders():
     assert packages._command("apt", "install", "nginx", "") == [
         "apt-get",
+        "-o",
+        "APT::Sandbox::User=root",
         "install",
         "-y",
         "--no-install-recommends",

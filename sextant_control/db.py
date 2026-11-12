@@ -3914,10 +3914,18 @@ class Database:
         if query:
             pattern = f"%{query}%"
             clauses.append(
-                """(ip LIKE ? OR mac LIKE ? OR hostname LIKE ? OR vendor LIKE ?
-                    OR tags LIKE ? OR notes LIKE ?)"""
+                """(
+                    ip LIKE ? OR mac LIKE ? OR hostname LIKE ? OR vendor LIKE ?
+                    OR tags LIKE ? OR notes LIKE ? OR device_type LIKE ?
+                    OR os_guess LIKE ? OR state LIKE ? OR source LIKE ?
+                    OR segment LIKE ? OR open_ports LIKE ? OR wake_status LIKE ?
+                    OR evidence LIKE ? OR id LIKE ? OR change_kind LIKE ?
+                    OR agent_id IN (
+                        SELECT id FROM agents WHERE name LIKE ? OR hostname LIKE ?
+                    )
+                )"""
             )
-            params.extend([pattern] * 6)
+            params.extend([pattern] * 18)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         limit = max(1, min(100_000, int(limit)))
         offset = max(0, int(offset))

@@ -14,6 +14,7 @@ Open a machine's drawer, choose **Join domain**, and fill in:
 - Optional computer name
 - Optional target OU
 - Optional domain controller (Linux `adcli` path)
+- Flush local DNS caches before joining (on by default)
 - Optional reboot after success
 - Linux only: install missing `realmd`, SSSD, `adcli`, and Kerberos packages
 
@@ -32,8 +33,13 @@ Auto mode prefers `realm join` when realmd is installed. realmd receives the
 password through a pseudo-terminal prompt, so it never appears in argv or the
 log. If realmd is not available, `adcli join --stdin-password` is used; adcli
 creates the computer account but does not fully configure SSSD/PAM, so verify
-`sssd` and the login policy afterward. The status action reports `realm list`,
-`adcli testjoin`, and `sssd` state.
+`sssd` and the login policy afterward. Supplying an explicit domain controller
+switches auto mode to adcli so the override is honored. The status action
+reports `realm list`, `adcli testjoin`, and `sssd` state.
+
+Before joining, the agent optionally flushes local resolver caches
+(`ipconfig /flushdns` on Windows; `resolvectl`, `systemd-resolve`, or `nscd` on
+Linux). This does not update stale records on the AD DNS server itself.
 
 Prerequisite installation is off by default. It requires the agent profile to
 allow package management, then uses the host's apt/dnf/zypper/pacman package

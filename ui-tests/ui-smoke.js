@@ -1071,7 +1071,37 @@ window.fetch = async (path, options = {}) => {
     };
     response = { status: 200, body: remoteInstallJob };
   } else if (method === "GET" && key === "/api/remote-install") {
-    response = { status: 200, body: { jobs: remoteInstallJob ? [remoteInstallJob] : [] } };
+    if (window.__remoteJobsMany) {
+      const base = remoteInstallJob || {
+        id: "ri_win",
+        host: "192.168.1.10",
+        port: 22,
+        user: "root",
+        name: "box",
+        profile: "workstation",
+        os: "linux",
+        transport: "ssh",
+        status: "succeeded",
+        log: "",
+        error: "",
+        created_at: "2026-11-06T08:06:00Z",
+        started_at: null,
+        finished_at: null,
+      };
+      response = {
+        status: 200,
+        body: {
+          jobs: Array.from({ length: 10 }, (_, index) => ({
+            ...base,
+            id: index === 0 ? base.id : `ri_page_${index}`,
+            host: `192.168.1.${100 + index}`,
+            created_at: `2026-11-06T08:${String(59 - index).padStart(2, "0")}:00Z`,
+          })),
+        },
+      };
+    } else {
+      response = { status: 200, body: { jobs: remoteInstallJob ? [remoteInstallJob] : [] } };
+    }
   } else if (method === "GET" && key === "/api/remote-install/ri_win") {
     response = { status: 200, body: remoteInstallJob };
   } else if (method === "POST" && key === "/api/agents/agt_demo/domain/join") {
@@ -1154,6 +1184,10 @@ window.fetch = async (path, options = {}) => {
     if (type) filtered = filtered.filter((device) => device.device_type === type);
     if (segment) filtered = filtered.filter((device) => device.segment === segment);
     if (vendor) filtered = filtered.filter((device) => device.vendor === vendor);
+    const q = String(params.get("q") || "").toLowerCase();
+    if (q) {
+      filtered = filtered.filter((device) => JSON.stringify(device).toLowerCase().includes(q));
+    }
     if (params.get("no_agent") === "true") filtered = filtered.filter((device) => !device.agent_id);
     if (params.get("admin_ports") === "true") {
       filtered = filtered.filter((device) =>
@@ -1965,6 +1999,24 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (window.document.getElementById("remote-install-log")?.textContent.includes("WINPASSWORD")) {
     throw new Error("Windows password leaked into the job log");
   }
+  window.__remoteJobsMany = true;
+  window.document.querySelector('[data-page="remote-install"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(100);
+  const jobsPager = window.document.getElementById("remote-jobs-pager");
+  if (jobsPager.hidden) throw new Error("remote install pager did not appear");
+  if (!window.document.getElementById("remote-jobs-page").textContent.includes("Page 1 of 2")) {
+    throw new Error("remote install pager did not start on page 1");
+  }
+  window.document.getElementById("remote-jobs-next").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  if (!window.document.getElementById("remote-jobs-page").textContent.includes("Page 2 of 2")) {
+    throw new Error("remote install pager did not advance");
+  }
+  window.document.getElementById("remote-jobs-prev").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(20);
+  window.__remoteJobsMany = false;
+  window.document.querySelector('[data-page="remote-install"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(100);
   window.document.querySelector('[data-page="overview"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(20);
   const cards = window.document.querySelectorAll("#agent-grid .agent-card");
@@ -2588,6 +2640,23 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   window.document.getElementById("discovery-filter-clear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(60);
   if (!discoveryTable.textContent.includes("esxi.lan")) throw new Error("Discovery filter clear did not restore devices");
+  const discoverySearch = window.document.getElementById("discovery-search");
+  discoverySearch.value = "vmware";
+  discoverySearch.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(400);
+  if (!discoveryTable.textContent.includes("esxi.lan") || discoveryTable.textContent.includes("printer.lan")) {
+    throw new Error("Discovery search did not match the vendor column");
+  }
+  discoverySearch.value = "192.168.1.40";
+  discoverySearch.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(400);
+  if (!discoveryTable.textContent.includes("printer.lan") || discoveryTable.textContent.includes("esxi.lan")) {
+    throw new Error("Discovery search did not match the IP column");
+  }
+  discoverySearch.value = "";
+  discoverySearch.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(400);
+  if (!discoveryTable.textContent.includes("esxi.lan")) throw new Error("Discovery search clear did not restore devices");
   window.document.querySelector('[data-discovery-tab="topology"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(40);
   const segmentPanel = window.document.getElementById("discovery-segment-list");
@@ -3183,6 +3252,29 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   findButton(domainDialog, "Cancel").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(30);
   if (domainDialog.open) throw new Error("domain join dialog did not close");
+  const minimizeButton = window.document.getElementById("drawer-minimize");
+  if (!minimizeButton) throw new Error("agent drawer minimize button is missing");
+  minimizeButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(40);
+  if (!window.document.getElementById("agent-drawer").hidden) {
+    throw new Error("minimize did not hide the agent drawer");
+  }
+  const minimizedTray = window.document.getElementById("minimized-drawers");
+  if (minimizedTray.hidden || !minimizedTray.textContent.includes("Studio PC")) {
+    throw new Error("minimized device tray did not render");
+  }
+  window.document.querySelector('[data-page="wake"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  if (minimizedTray.hidden) throw new Error("minimized tray disappeared after navigation");
+  minimizedTray.querySelector(".minimized-main").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  if (window.document.getElementById("agent-drawer").hidden) {
+    throw new Error("clicking the minimized device did not restore the drawer");
+  }
+  if (!window.document.getElementById("drawer-title").textContent.includes("Studio PC")) {
+    throw new Error("restored the wrong device");
+  }
+  if (!minimizedTray.hidden) throw new Error("restored device stayed in the minimized tray");
   window.document.querySelector("[data-close-drawer]").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(10);
 

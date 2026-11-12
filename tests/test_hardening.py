@@ -206,6 +206,7 @@ def test_agent_policy_update_and_reenrollment_dedupe(client, admin):
         "allow_docker_exec": True,
         "allow_docker_compose": True,
         "allow_docker_prune": True,
+        "docker_enabled": False,
     }
 
     response = heartbeat(admin, agent)

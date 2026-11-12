@@ -121,11 +121,11 @@ def _command(manager: str, action: str, package: str, version: str) -> list[str]
         target = f"{package}-{version}"
     if manager == "apt":
         if action == "install":
-            return ["apt-get", "install", "-y", "--no-install-recommends", "-o", "DPkg::Lock::Timeout=60", target]
+            return ["apt-get", "-o", "APT::Sandbox::User=root", "install", "-y", "--no-install-recommends", "-o", "DPkg::Lock::Timeout=60", target]
         if action == "remove":
-            return ["apt-get", "remove", "-y", "-o", "DPkg::Lock::Timeout=60", package]
+            return ["apt-get", "-o", "APT::Sandbox::User=root", "remove", "-y", "-o", "DPkg::Lock::Timeout=60", package]
         if action == "upgrade":
-            return ["apt-get", "install", "-y", "--only-upgrade", "-o", "DPkg::Lock::Timeout=60", package]
+            return ["apt-get", "-o", "APT::Sandbox::User=root", "install", "-y", "--only-upgrade", "-o", "DPkg::Lock::Timeout=60", package]
     if manager == "dnf":
         if action == "install":
             return ["dnf", "install", "-y", target]

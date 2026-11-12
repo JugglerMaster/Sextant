@@ -411,6 +411,22 @@ def test_enabling_docker_after_enrollment_is_not_pinned_by_initial_policy(client
     assert response["request_docker_inventory"] == "full"
 
 
+def test_agent_docker_enabled_setting_overrides_profile_and_local_config(client, admin):
+    agent = enroll_agent(admin)
+    response = client.patch(
+        f"/api/agents/{agent['agent_id']}",
+        json={"docker_enabled": True, "allow_docker_exec": True},
+        headers=headers(admin),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["policy"]["docker_enabled"] is True
+    beat = heartbeat(admin, agent, sample_metrics(docker=docker_summary()))
+    assert beat["policy"]["docker_enabled"] is True
+    assert beat["policy"]["allow_docker"] is True
+    assert beat["policy"]["allow_docker_exec"] is True
+    assert beat["request_docker_inventory"] == "full"
+
+
 def test_container_lifecycle_action_route(app, client, admin):
     enable_docker_profile(client, admin)
     agent = enroll_agent(admin)

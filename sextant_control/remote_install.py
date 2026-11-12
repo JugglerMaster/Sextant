@@ -261,8 +261,22 @@ sudo -n install -d -m 0700 /etc/sextant-agent
 if [ ! -x /opt/sextant-agent/.venv/bin/python ] || [ ! -x /opt/sextant-agent/.venv/bin/pip ]; then
   sudo -n rm -rf /opt/sextant-agent/.venv
   if ! sudo -n python3 -m venv /opt/sextant-agent/.venv; then
-    echo "Could not create the agent virtualenv. Install python3-venv (Debian/Ubuntu) or the python3 venv package for this distribution, then retry." >&2
-    exit 1
+    echo "Virtualenv creation failed; installing the distribution's venv package..." >&2
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+      sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv \
+        || sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y python3.13-venv
+    elif command -v dnf >/dev/null 2>&1; then
+      sudo -n dnf install -y python3
+    elif command -v zypper >/dev/null 2>&1; then
+      sudo -n zypper --non-interactive install python3
+    elif command -v pacman >/dev/null 2>&1; then
+      sudo -n pacman -S --noconfirm python
+    fi
+    if ! sudo -n python3 -m venv /opt/sextant-agent/.venv; then
+      echo "Could not create the agent virtualenv. Install python3-venv (Debian/Ubuntu) or the python3 venv package for this distribution, then retry." >&2
+      exit 1
+    fi
   fi
 fi
 sudo -n /opt/sextant-agent/.venv/bin/pip install --no-deps --upgrade "$WHEEL"

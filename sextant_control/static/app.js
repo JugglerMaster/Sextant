@@ -8,6 +8,7 @@ const state = {
   detailId: null,
   detailAgent: null,
   detailTab: "overview",
+  minimizedAgents: new Map(),
   trendRange: "24",
   agentCommands: {},
   commandHistory: {},
@@ -23,6 +24,7 @@ const state = {
   profileTags: [],
   editingProfile: null,
   remoteJobs: [],
+  remoteJobsPage: 0,
   remoteJobId: null,
   remoteTimer: null,
   dockerHosts: [],
@@ -87,6 +89,7 @@ const state = {
     detail: null,
     selectedId: null,
     filters: {
+      q: "",
       state: "",
       type: "",
       segment: "",
@@ -100,6 +103,7 @@ const state = {
     conflicts: [],
     conflictIds: new Set(),
     integrations: [],
+    searchTimer: null,
     importPreview: null,
     promotion: null,
     promoteTrigger: null,
@@ -111,6 +115,7 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 const FLEET_PAGE_SIZE = 60;
+const REMOTE_JOBS_PAGE_SIZE = 8;
 const SERVICE_PAGE_SIZE = 50;
 const SERVICE_STATUS_FILTERS = ["all", "running", "stopped", "failed", "watched"];
 const HISTORY_PAGE_SIZES = [25, 50, 100];
@@ -613,6 +618,7 @@ function showLogin(message = "") {
   state.csrf = null;
   state.detailId = null;
   state.detailAgent = null;
+  state.minimizedAgents.clear();
   state.terminals = {};
   state.resetUser = null;
   state.sessionsUser = null;
@@ -1111,6 +1117,12 @@ async function loadDashboard(silent = false) {
 function applyDashboard(data) {
   if (!data || !data.stats || !Array.isArray(data.agents)) return;
   state.dashboard = data;
+  for (const minimizedId of [...state.minimizedAgents.keys()]) {
+    if (!data.agents.some((item) => item.id === minimizedId)) {
+      state.minimizedAgents.delete(minimizedId);
+    }
+  }
+  renderMinimizedDrawers();
   renderStats();
   if (!state.detailId) {
     renderAgentGrid();
@@ -1799,10 +1811,17 @@ function agentCard(agent) {
 }
 
 function openAgent(id) {
+  if (state.minimizedAgents.has(id)) {
+    restoreMinimizedAgent(id);
+    return;
+  }
   let agent = (state.dashboard?.agents || []).find((item) => item.id === id);
   if (!agent) {
     toast("Machine not found. Refresh and try again.", "warn");
     return;
+  }
+  if (state.detailAgent && state.detailAgent.id !== id) {
+    minimizeDrawer({ silent: true });
   }
   state.drawerTrigger = document.activeElement;
   state.detailId = id;
@@ -1849,6 +1868,115 @@ function closeDrawer() {
     state.drawerTrigger.focus();
   }
   state.drawerTrigger = null;
+  renderMinimizedDrawers();
+}
+
+function minimizeDrawer({ silent = false } = {}) {
+  const agent = state.detailAgent;
+  if (!agent) return;
+  const body = $("drawer-body");
+  state.minimizedAgents.set(agent.id, {
+    agent: { ...agent },
+    tab: state.detailTab || "overview",
+    scrollTop: body ? body.scrollTop : 0,
+  });
+  $("agent-drawer").hidden = true;
+  document.body.classList.remove("drawer-open");
+  document.removeEventListener("keydown", drawerTrapHandler);
+  state.detailId = null;
+  state.detailAgent = null;
+  state.drawerTrigger = null;
+  renderMinimizedDrawers();
+  if (!silent) toast(`Minimized ${agent.name}.`);
+}
+
+function restoreMinimizedAgent(agentId) {
+  const item = state.minimizedAgents.get(agentId);
+  if (!item) return;
+  if (state.detailAgent && state.detailAgent.id !== agentId) {
+    minimizeDrawer({ silent: true });
+  }
+  state.minimizedAgents.delete(agentId);
+  const agent =
+    (state.dashboard?.agents || []).find((candidate) => candidate.id === agentId) ||
+    item.agent;
+  state.detailId = agentId;
+  state.detailAgent = agent;
+  state.detailTab = item.tab || "overview";
+  $("agent-drawer").hidden = false;
+  document.body.classList.add("drawer-open");
+  renderDrawer();
+  loadAgentDetail(agentId);
+  document.addEventListener("keydown", drawerTrapHandler);
+  renderMinimizedDrawers();
+  setTimeout(() => {
+    const body = $("drawer-body");
+    if (body) body.scrollTop = item.scrollTop || 0;
+  }, 0);
+}
+
+function closeMinimizedAgent(agentId) {
+  const item = state.minimizedAgents.get(agentId);
+  if (!item) return;
+  state.minimizedAgents.delete(agentId);
+  renderMinimizedDrawers();
+  toast(`Closed ${item.agent?.name || "device"}.`);
+}
+
+function renderMinimizedDrawers() {
+  const tray = $("minimized-drawers");
+  if (!tray) return;
+  clear(tray);
+  if (!state.minimizedAgents.size) {
+    tray.hidden = true;
+    return;
+  }
+  tray.hidden = false;
+  for (const [agentId, item] of state.minimizedAgents) {
+    const agent =
+      (state.dashboard?.agents || []).find((candidate) => candidate.id === agentId) ||
+      item.agent ||
+      {};
+    const term = state.terminals[agentId];
+    const pending = Boolean(term?.pending);
+    const online = agent.online !== false;
+    const detail = [
+      `${item.tab || "overview"} tab`,
+      pending ? term?.status || "command pending" : online ? "online" : "offline",
+    ].join(" · ");
+    tray.append(
+      h(
+        "div",
+        { class: "minimized-drawer" },
+        h(
+          "button",
+          {
+            class: "minimized-main",
+            type: "button",
+            "aria-label": `Restore ${agent.name || agent.hostname || agentId}`,
+            onClick: () => restoreMinimizedAgent(agentId),
+          },
+          h("span", { class: `status-dot ${online ? "online" : "offline"}`, "aria-hidden": "true" }),
+          h(
+            "span",
+            {},
+            h("strong", {}, agent.name || agent.hostname || agentId),
+            h("small", {}, detail),
+          ),
+        ),
+        h(
+          "button",
+          {
+            class: "minimized-close",
+            type: "button",
+            "aria-label": `Close ${agent.name || agent.hostname || agentId}`,
+            onClick: () => closeMinimizedAgent(agentId),
+          },
+          "×",
+        ),
+      ),
+    );
+  }
 }
 
 function updateDrawerChrome() {
@@ -1993,6 +2121,14 @@ function renderOverview(body) {
         infoTile("Remote shell", agent.policy?.allow_shell === false ? "Blocked" : "Allowed"),
         infoTile("Power actions", agent.policy?.allow_power === false ? "Blocked" : "Allowed"),
         infoTile("Service control", agent.policy?.allow_service === false ? "Blocked" : "Allowed"),
+        infoTile(
+          "Docker collection",
+          agent.policy?.docker_enabled
+            ? "Enabled (server push)"
+            : agent.policy?.allow_docker === false
+              ? "Blocked"
+              : "Profile/local",
+        ),
         infoTile("Watched services", (agent.watch_services || []).join(", ") || "None"),
       ),
       h("p", { class: "form-hint" }, "Server policy applies on the next heartbeat, but a local agent config can still deny an action."),
@@ -3083,10 +3219,12 @@ function applyCommandUpdate(agentId, commandId, command) {
     if (state.detailAgent?.id === agentId && state.detailTab === "remote") renderTerminalDom(state.detailAgent);
     loadDashboard(true);
     loadAgentDetail(agentId);
+    renderMinimizedDrawers();
     return;
   }
   term.status = command.status === "dispatched" ? "Running on agent" : "Queued for heartbeat";
   if (state.detailAgent?.id === agentId && state.detailTab === "remote") renderTerminalDom(state.detailAgent);
+  renderMinimizedDrawers();
 }
 
 function streamCommand(agentId, commandId) {
@@ -3539,6 +3677,10 @@ function openAgentEditDialog(agent) {
   form.elements.allow_power.checked = agent.policy?.allow_power !== false;
   form.elements.allow_service.checked = agent.policy?.allow_service !== false;
   form.elements.allow_discovery.checked = agent.policy?.allow_discovery === true;
+  form.elements.docker_enabled.checked = agent.policy?.docker_enabled === true;
+  form.elements.allow_docker_exec.checked = agent.policy?.allow_docker_exec === true;
+  form.elements.allow_docker_compose.checked = agent.policy?.allow_docker_compose === true;
+  form.elements.allow_docker_prune.checked = agent.policy?.allow_docker_prune === true;
   setText("agent-edit-error", "");
   $("agent-edit-dialog").showModal();
 }
@@ -4224,11 +4366,25 @@ function renderRemoteJobs() {
   const container = $("remote-install-list");
   if (!container) return;
   clear(container);
-  if (!state.remoteJobs.length) {
+  const total = state.remoteJobs.length;
+  const pages = Math.max(1, Math.ceil(total / REMOTE_JOBS_PAGE_SIZE));
+  if (state.remoteJobsPage >= pages) state.remoteJobsPage = pages - 1;
+  if (state.remoteJobsPage < 0) state.remoteJobsPage = 0;
+  const start = state.remoteJobsPage * REMOTE_JOBS_PAGE_SIZE;
+  const jobs = state.remoteJobs.slice(start, start + REMOTE_JOBS_PAGE_SIZE);
+  setText("remote-jobs-count", total ? `${total} job${total === 1 ? "" : "s"}` : "");
+  const pager = $("remote-jobs-pager");
+  if (pager) pager.hidden = pages <= 1;
+  setText("remote-jobs-page", `Page ${state.remoteJobsPage + 1} of ${pages}`);
+  const prev = $("remote-jobs-prev");
+  const next = $("remote-jobs-next");
+  if (prev) prev.disabled = state.remoteJobsPage <= 0;
+  if (next) next.disabled = state.remoteJobsPage >= pages - 1;
+  if (!jobs.length) {
     container.append(h("div", { class: "empty-inline" }, "No remote install jobs yet."));
     return;
   }
-  for (const job of state.remoteJobs) {
+  for (const job of jobs) {
     container.append(
       h(
         "div",
@@ -4344,6 +4500,7 @@ async function startRemoteInstall(event) {
     const job = await api("/api/remote-install", { method: "POST", body });
     if (osName === "windows") form.elements.password.value = "";
     toast("Remote install started.");
+    state.remoteJobsPage = 0;
     state.remoteJobId = job.id;
     await loadRemoteInstall();
     await showRemoteJob(job.id);
@@ -6785,8 +6942,21 @@ async function restartForSettings() {
 }
 
 function domainJoinLog(text) {
+  const data = state.domainJoin;
+  if (!data) return;
+  data.log = data.log || { join: "", status: "" };
+  if (text) data.log.join = text;
+  renderDomainJoinLog();
+}
+
+function renderDomainJoinLog() {
+  const data = state.domainJoin;
   const log = $("domain-join-log");
-  if (log) log.textContent = text;
+  if (!log || !data) return;
+  const sections = [];
+  if (data.log?.join) sections.push(`Join command:\n${data.log.join}`);
+  if (data.log?.status) sections.push(`Status command:\n${data.log.status}`);
+  log.textContent = sections.join("\n\n") || "No command queued yet.";
 }
 
 async function openDomainJoinDialog(agent) {
@@ -6801,16 +6971,24 @@ async function openDomainJoinDialog(agent) {
       // The form still works without the domain prefill.
     }
   }
-  state.domainJoin = { agent, commandId: null };
+  state.domainJoin = {
+    agent,
+    commandId: "",
+    log: { join: "", status: "" },
+    timers: { join: null, status: null },
+    pending: { join: false, status: false },
+  };
   renderDomainJoinDialog();
   const dialog = $("domain-join-dialog");
   if (dialog) dialog.showModal();
 }
 
 function closeDomainJoinDialog() {
-  if (state.domainJoinTimer) {
-    clearTimeout(state.domainJoinTimer);
-    state.domainJoinTimer = null;
+  const data = state.domainJoin;
+  if (data?.timers) {
+    for (const timer of Object.values(data.timers)) {
+      if (timer) clearTimeout(timer);
+    }
   }
   const dialog = $("domain-join-dialog");
   if (dialog?.open) dialog.close();
@@ -6909,6 +7087,12 @@ function renderDomainJoinDialog() {
     h(
       "label",
       { class: "checkbox-row" },
+      h("input", { type: "checkbox", name: "flush_dns", checked: true }),
+      h("span", {}, "Flush local DNS caches before joining"),
+    ),
+    h(
+      "label",
+      { class: "checkbox-row" },
       h("input", { type: "checkbox", name: "reboot" }),
       h("span", {}, windows ? "Reboot after a successful join" : "Reboot after a successful join (usually not required)"),
     ),
@@ -6928,11 +7112,31 @@ function renderDomainJoinDialog() {
   });
   actions.append(
     button("Cancel", "button-ghost", closeDomainJoinDialog),
-    button("Check status", "button-secondary", () => checkAgentDomainStatus(agent)),
-    h("button", { class: "button button-primary", type: "submit", form: "domain-join-form" }, "Join domain"),
+    h(
+      "button",
+      { class: "button button-secondary", type: "button", id: "domain-join-status", onClick: () => checkAgentDomainStatus(agent) },
+      "Check status",
+    ),
+    h("button", { class: "button button-primary", type: "submit", form: "domain-join-form", id: "domain-join-submit" }, "Join domain"),
   );
+  updateDomainJoinButtons();
   const first = form.querySelector("input, select");
   if (first) setTimeout(() => first.focus(), 30);
+}
+
+function updateDomainJoinButtons() {
+  const data = state.domainJoin;
+  if (!data) return;
+  const busy = Boolean(data.pending?.join || data.pending?.status);
+  const submit = $("domain-join-submit");
+  const status = $("domain-join-status");
+  if (submit) submit.disabled = busy;
+  if (status) status.disabled = busy;
+  if (status && data.pending?.join) {
+    status.title = "Wait for the join command to finish before checking status.";
+  } else if (status) {
+    status.title = "";
+  }
 }
 
 async function submitDomainJoin(form) {
@@ -6955,7 +7159,12 @@ async function submitDomainJoin(form) {
     method: String(values.get("method") || "auto"),
     install_prerequisites: form.elements.install_prerequisites?.checked === true,
     reboot: form.elements.reboot?.checked === true,
+    flush_dns: form.elements.flush_dns?.checked !== false,
   };
+  data.pending.join = true;
+  data.log.join = "Join command queued for the agent's next heartbeat.";
+  renderDomainJoinLog();
+  updateDomainJoinButtons();
   try {
     const result = await api(`/api/agents/${data.agent.id}/domain/join`, {
       method: "POST",
@@ -6963,55 +7172,85 @@ async function submitDomainJoin(form) {
     });
     form.elements.password.value = "";
     data.commandId = result.command?.id || "";
-    domainJoinLog("Join command queued for the agent's next heartbeat.");
     toast("Domain join queued.");
-    watchAgentDomainCommand(data.commandId);
+    watchAgentDomainCommand(data.commandId, "join");
   } catch (error) {
+    data.pending.join = false;
+    data.log.join = error.message;
     setText("domain-join-error", error.message);
+    renderDomainJoinLog();
+    updateDomainJoinButtons();
   }
 }
 
 async function checkAgentDomainStatus(agent) {
+  const data = state.domainJoin;
+  if (!data) return;
+  if (data.pending.join) {
+    toast("Wait for the join command to finish before checking status.", "warn");
+    return;
+  }
   setText("domain-join-error", "");
+  data.pending.status = true;
+  data.log.status = "Status command queued for the agent's next heartbeat.";
+  renderDomainJoinLog();
+  updateDomainJoinButtons();
   try {
     const result = await api(`/api/agents/${agent.id}/domain/status`, {
       method: "POST",
       body: {},
     });
-    domainJoinLog("Status command queued for the agent's next heartbeat.");
-    watchAgentDomainCommand(result.command?.id || "");
+    watchAgentDomainCommand(result.command?.id || "", "status");
   } catch (error) {
+    data.pending.status = false;
+    data.log.status = error.message;
     setText("domain-join-error", error.message);
+    renderDomainJoinLog();
+    updateDomainJoinButtons();
   }
 }
 
-function watchAgentDomainCommand(commandId) {
-  if (!commandId) return;
-  if (state.domainJoinTimer) clearTimeout(state.domainJoinTimer);
+function watchAgentDomainCommand(commandId, channel = "join") {
+  const data = state.domainJoin;
+  if (!commandId || !data) return;
+  if (data.timers[channel]) clearTimeout(data.timers[channel]);
   const tick = async () => {
+    if (state.domainJoin !== data) return;
     try {
-      const data = await api(`/api/commands/${encodeURIComponent(commandId)}`);
-      const command = data.command || {};
+      const response = await api(`/api/commands/${encodeURIComponent(commandId)}`);
+      const command = response.command || {};
+      const terminal = ["succeeded", "failed", "cancelled"].includes(command.status);
       const parts = [
         `Status: ${command.status || "unknown"}`,
+        command.status === "queued"
+          ? "Waiting for the agent's next heartbeat (up to ~30 seconds)."
+          : "",
         command.stdout ? String(command.stdout).trim() : "",
         command.stderr ? String(command.stderr).trim() : "",
         command.error ? `Error: ${command.error}` : "",
       ].filter(Boolean);
-      domainJoinLog(parts.join("\n\n") || "Waiting for the agent…");
-      if (["succeeded", "failed", "cancelled"].includes(command.status)) {
+      data.log[channel] = parts.join("\n\n") || "Waiting for the agent…";
+      renderDomainJoinLog();
+      if (terminal) {
+        data.pending[channel] = false;
+        updateDomainJoinButtons();
         toast(
           command.status === "succeeded"
-            ? "Domain join command completed."
-            : "Domain join command failed.",
+            ? channel === "join"
+              ? "Domain join command completed."
+              : "Domain status check completed."
+            : channel === "join"
+              ? "Domain join command failed."
+              : "Domain status check failed.",
           command.status === "succeeded" ? "ok" : "error",
         );
         return;
       }
     } catch (error) {
-      domainJoinLog(error.message);
+      data.log[channel] = error.message;
+      renderDomainJoinLog();
     }
-    state.domainJoinTimer = setTimeout(tick, 1500);
+    data.timers[channel] = setTimeout(tick, 1500);
   };
   tick();
 }
@@ -7483,6 +7722,8 @@ function renderDiscoveryFilters() {
   );
   const stateSelect = $("discovery-filter-state");
   if (stateSelect) stateSelect.value = filters.state || "";
+  const search = $("discovery-search");
+  if (search && search.value !== (filters.q || "")) search.value = filters.q || "";
   const noAgent = $("discovery-filter-no-agent");
   if (noAgent) noAgent.checked = Boolean(filters.no_agent);
   const adminPorts = $("discovery-filter-admin-ports");
@@ -8196,6 +8437,7 @@ async function loadDiscovery() {
 function discoveryFilterQuery() {
   const filters = state.discovery.filters;
   const params = new URLSearchParams();
+  if (filters.q) params.set("q", filters.q);
   if (filters.state) params.set("state", filters.state);
   if (filters.type) params.set("type", filters.type);
   if (filters.segment) params.set("segment", filters.segment);
@@ -9013,7 +9255,8 @@ async function submitDiscoveryPromotion(form) {
     try {
       const job = await api("/api/remote-install", { method: "POST", body: payload });
       closeDiscoveryPromote();
-      state.remoteJobId = job.id;
+      state.remoteJobsPage = 0;
+    state.remoteJobId = job.id;
       toast("Remote install started.");
       navigate("remote-install");
     } catch (error) {
@@ -9272,6 +9515,7 @@ function wireEvents() {
   document.querySelectorAll("[data-close-drawer]").forEach((el) => {
     el.addEventListener("click", closeDrawer);
   });
+  $("drawer-minimize")?.addEventListener("click", () => minimizeDrawer());
 
   $("mobile-menu").addEventListener("click", () => {
     const open = !$("sidebar").classList.contains("is-open");
@@ -9391,8 +9635,17 @@ function wireEvents() {
       renderDiscoveryTabs();
     });
   });
+  $("discovery-search")?.addEventListener("input", (event) => {
+    state.discovery.filters.q = String(event.target.value || "").trim();
+    if (state.discovery.searchTimer) clearTimeout(state.discovery.searchTimer);
+    state.discovery.searchTimer = setTimeout(() => {
+      state.discovery.searchTimer = null;
+      loadDiscoveryDevices().catch((error) => toast(error.message, "error"));
+    }, 300);
+  });
   $("discovery-filter-clear")?.addEventListener("click", () => {
     state.discovery.filters = {
+      q: "",
       state: "",
       type: "",
       segment: "",
@@ -9577,6 +9830,14 @@ function wireEvents() {
   $("remote-install-form").addEventListener("submit", startRemoteInstall);
   $("remote-install-test").addEventListener("click", testRemoteInstall);
   $("remote-install-os").addEventListener("change", updateRemoteInstallMode);
+  $("remote-jobs-prev")?.addEventListener("click", () => {
+    state.remoteJobsPage = Math.max(0, state.remoteJobsPage - 1);
+    renderRemoteJobs();
+  });
+  $("remote-jobs-next")?.addEventListener("click", () => {
+    state.remoteJobsPage += 1;
+    renderRemoteJobs();
+  });
 
   $("update-banner-check")?.addEventListener("click", () => checkForUpdates(true));
   $("update-banner-apply")?.addEventListener("click", applyServerUpdate);
@@ -9680,6 +9941,10 @@ function wireEvents() {
           allow_power: form.elements.allow_power.checked,
           allow_service: form.elements.allow_service.checked,
           allow_discovery: form.elements.allow_discovery.checked,
+          docker_enabled: form.elements.docker_enabled.checked,
+          allow_docker_exec: form.elements.allow_docker_exec.checked,
+          allow_docker_compose: form.elements.allow_docker_compose.checked,
+          allow_docker_prune: form.elements.allow_docker_prune.checked,
         },
       });
       $("agent-edit-dialog").close();

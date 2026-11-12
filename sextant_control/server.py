@@ -3742,6 +3742,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 payload.allow_docker_exec,
                 payload.allow_docker_compose,
                 payload.allow_docker_prune,
+                payload.docker_enabled,
                 payload.allow_discovery,
             )
         ):
@@ -3789,6 +3790,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "allow_docker_exec",
                 "allow_docker_compose",
                 "allow_docker_prune",
+                "docker_enabled",
                 "allow_discovery",
             ):
                 value = getattr(payload, flag)
@@ -3813,6 +3815,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "allow_docker_exec": bool(policy.get("allow_docker_exec", False)),
                             "allow_docker_compose": bool(policy.get("allow_docker_compose", False)),
                             "allow_docker_prune": bool(policy.get("allow_docker_prune", False)),
+                            "docker_enabled": bool(policy.get("docker_enabled", False)),
                             "allow_discovery": bool(policy.get("allow_discovery", False)),
                         }
                     ),
@@ -3836,6 +3839,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "allow_docker_exec": bool(policy.get("allow_docker_exec", False)),
                     "allow_docker_compose": bool(policy.get("allow_docker_compose", False)),
                     "allow_docker_prune": bool(policy.get("allow_docker_prune", False)),
+                    "docker_enabled": bool(policy.get("docker_enabled", False)),
                     "allow_discovery": bool(policy.get("allow_discovery", False)),
                 },
                 ip=client_ip(request, config.trust_proxy),
@@ -3914,6 +3918,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "server": payload.server,
             "method": payload.method,
             "install_prerequisites": payload.install_prerequisites,
+            "flush_dns": payload.flush_dns,
             "reboot": payload.reboot,
         }
         command = queue_command(
@@ -3931,6 +3936,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "ou": payload.ou,
                 "computer_name": payload.computer_name,
                 "install_prerequisites": payload.install_prerequisites,
+                "flush_dns": payload.flush_dns,
                 "reboot": payload.reboot,
             },
         )
@@ -7003,18 +7009,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         watch_services = loads(agent["watch_services"], [])
         if not isinstance(watch_services, list):
             watch_services = []
+        docker_override = bool(policy.get("docker_enabled", False))
         policy = {
             "allow_shell": bool(policy.get("allow_shell", True)) and profile_actions["allow_shell"],
             "allow_power": bool(policy.get("allow_power", True)) and profile_actions["allow_power"],
             "allow_service": bool(policy.get("allow_service", True)) and profile_actions["allow_service"],
             "allow_packages": bool(policy.get("allow_packages", True)) and profile_actions["allow_packages"],
-            "allow_docker": bool(policy.get("allow_docker", True)) and profile_actions["allow_docker"],
-            "allow_docker_exec": bool(policy.get("allow_docker_exec", True))
+            "allow_docker": True
+            if docker_override
+            else bool(policy.get("allow_docker", True)) and profile_actions["allow_docker"],
+            "allow_docker_exec": bool(policy.get("allow_docker_exec", False))
+            if docker_override
+            else bool(policy.get("allow_docker_exec", True))
             and profile_actions["allow_docker_exec"],
-            "allow_docker_compose": bool(policy.get("allow_docker_compose", True))
+            "allow_docker_compose": bool(policy.get("allow_docker_compose", False))
+            if docker_override
+            else bool(policy.get("allow_docker_compose", True))
             and profile_actions["allow_docker_compose"],
-            "allow_docker_prune": bool(policy.get("allow_docker_prune", True))
+            "allow_docker_prune": bool(policy.get("allow_docker_prune", False))
+            if docker_override
+            else bool(policy.get("allow_docker_prune", True))
             and profile_actions["allow_docker_prune"],
+            "docker_enabled": docker_override,
             "allow_discovery": bool(policy.get("allow_discovery", False))
             and bool(profile_modules.get("discovery", False)),
             "watch_services": watch_services,
@@ -8680,12 +8696,16 @@ def _docker_effective_allowed(agent_row: Any, profile_row: Any, config: Settings
         return False
     if str(agent_row["os"] if "os" in agent_row.keys() else agent_row.get("os", "")).lower() != "linux":
         return False
-    if not _docker_module_enabled(profile_row):
-        return False
-    actions = _policy_from_settings(_profile_settings(profile_row))
     policy = loads(agent_row["policy"] if "policy" in agent_row.keys() else agent_row.get("policy"), {})
     if not isinstance(policy, dict):
         policy = {}
+    if bool(policy.get("docker_enabled", False)):
+        # Explicit per-agent server setting: override the profile module and
+        # the local config ceiling for Docker collection.
+        return True
+    if not _docker_module_enabled(profile_row):
+        return False
+    actions = _policy_from_settings(_profile_settings(profile_row))
     return bool(policy.get("allow_docker", True)) and actions["allow_docker"]
 
 

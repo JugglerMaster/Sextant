@@ -329,6 +329,7 @@
                 <span class="form-hint" id="discovery-count" aria-live="polite"></span>
               </div>
               <div class="section-toolbar" id="discovery-filters">
+                <label class="field discovery-search-field"><span>Search</span><input id="discovery-search" type="search" maxlength="255" placeholder="IP, hostname, vendor, Linux, MAC…" autocomplete="off"></label>
                 <label class="field"><span>State</span><select id="discovery-filter-state"><option value="">All states</option><option value="new">New</option><option value="known">Known</option><option value="ignored">Ignored</option><option value="promoted">Promoted</option><option value="changed">Changed</option><option value="conflict">Conflict</option></select></label>
                 <label class="field"><span>Type</span><select id="discovery-filter-type"><option value="">All types</option></select></label>
                 <label class="field"><span>Segment</span><select id="discovery-filter-segment"><option value="">All segments</option></select></label>
@@ -718,10 +719,18 @@
             </form>
           </article>
           <article class="panel panel-span">
-            <div class="panel-head"><div><p class="eyebrow">Jobs</p><h2>Remote install history</h2></div></div>
-            <div id="remote-install-list" class="list-stack"></div>
-            <div class="panel-head panel-head-spaced"><div><p class="eyebrow">Output</p><h2>Job log</h2></div></div>
+            <div class="panel-head"><div><p class="eyebrow">Output</p><h2>Job log</h2></div></div>
             <pre class="terminal" id="remote-install-log" aria-live="polite">Select a job to view its log.</pre>
+            <div class="panel-head panel-head-spaced">
+              <div><p class="eyebrow">Jobs</p><h2>Remote install history</h2></div>
+              <span class="form-hint" id="remote-jobs-count" aria-live="polite"></span>
+            </div>
+            <div id="remote-install-list" class="list-stack"></div>
+            <div class="remote-jobs-pager" id="remote-jobs-pager" hidden>
+              <button class="button button-secondary button-small" id="remote-jobs-prev" type="button">Previous</button>
+              <span class="form-hint" id="remote-jobs-page"></span>
+              <button class="button button-secondary button-small" id="remote-jobs-next" type="button">Next</button>
+            </div>
           </article>
         </div>
       </section>
@@ -912,6 +921,8 @@
     </main>
   </div>
 
+  <div class="minimized-drawers" id="minimized-drawers" hidden aria-label="Minimized device windows"></div>
+
   <div class="drawer" id="discovery-drawer" hidden>
     <div class="drawer-backdrop" data-close-discovery-drawer></div>
     <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="discovery-drawer-title">
@@ -937,7 +948,10 @@
           <h2 id="drawer-title">Machine</h2>
           <p class="drawer-meta" id="drawer-meta"></p>
         </div>
-        <button class="icon-button" type="button" data-close-drawer aria-label="Close machine details">×</button>
+        <div class="drawer-head-actions">
+          <button class="icon-button" id="drawer-minimize" type="button" aria-label="Minimize machine details" title="Minimize">–</button>
+          <button class="icon-button" type="button" data-close-drawer aria-label="Close machine details">×</button>
+        </div>
       </header>
       <div class="drawer-actions" id="drawer-actions"></div>
       <nav class="tabs" id="drawer-tabs" aria-label="Machine detail tabs">
@@ -971,7 +985,13 @@
         <label class="checkbox-row"><input type="checkbox" name="allow_service"> Service control</label>
         <label class="checkbox-row"><input type="checkbox" name="allow_discovery"> Agent-relayed discovery</label>
       </div>
-      <p class="form-hint">Server policy can restrict actions, but it cannot override a local agent config that already denies them. Changes apply on the next heartbeat.</p>
+      <div class="checkbox-grid">
+        <label class="checkbox-row"><input type="checkbox" name="docker_enabled"> Docker collection (server push)</label>
+        <label class="checkbox-row"><input type="checkbox" name="allow_docker_exec"> Docker exec / console</label>
+        <label class="checkbox-row"><input type="checkbox" name="allow_docker_compose"> Compose deploy</label>
+        <label class="checkbox-row"><input type="checkbox" name="allow_docker_prune"> Docker cleanup</label>
+      </div>
+      <p class="form-hint">Docker collection is a server-side agent setting: when enabled it can override the local agent default and profile module. Other actions still require their local configuration and profile. Changes apply on the next heartbeat.</p>
       <p class="form-error" id="agent-edit-error" role="alert"></p>
       <div class="dialog-actions">
         <button class="button button-ghost" type="button" data-close-agent-edit>Cancel</button>

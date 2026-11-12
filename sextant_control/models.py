@@ -76,6 +76,7 @@ class AgentUpdateIn(BaseModel):
     allow_docker_exec: bool | None = None
     allow_docker_compose: bool | None = None
     allow_docker_prune: bool | None = None
+    docker_enabled: bool | None = None
     allow_discovery: bool | None = None
 
 
@@ -190,6 +191,7 @@ class DomainJoinIn(BaseModel):
     server: str = Field(default="", max_length=255)
     method: Literal["auto", "realm", "adcli"] = "auto"
     install_prerequisites: bool = False
+    flush_dns: bool = True
     reboot: bool = False
 
 

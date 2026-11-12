@@ -124,6 +124,39 @@ for (const theme of THEMES) {
     await expect(dialog).toBeHidden();
   });
 
+  test(`Agent drawer minimizes and restores across navigation in the ${theme} theme`, async ({ page }) => {
+    await login(page, { theme });
+    await openDrawer(page, "Studio PC");
+    await page.locator("#drawer-minimize").click();
+    await expect(page.locator("#agent-drawer")).toBeHidden();
+    const tray = page.locator("#minimized-drawers");
+    await expect(tray).toBeVisible();
+    await expect(tray).toContainText("Studio PC");
+
+    await page.locator('[data-page="discovery"]').click();
+    await expect(page.locator("#page-discovery")).toBeVisible();
+    await expect(tray).toBeVisible();
+    await page.locator('[data-page="overview"]').click();
+    await expect(page.locator("#page-overview")).toBeVisible();
+    await expect(page.locator("#agent-grid .agent-card")).toHaveCount(3);
+    await openDrawer(page, "Build Server");
+    await page.locator("#drawer-minimize").click();
+    await expect(tray.locator(".minimized-drawer")).toHaveCount(2);
+
+    await tray.getByRole("button", { name: "Restore Studio PC" }).click();
+    await expect(page.locator("#drawer-title")).toHaveText("Studio PC");
+    await expect(tray.locator(".minimized-drawer")).toHaveCount(1);
+    await screenshot(page, `minimized-drawer-${theme}-desktop`, { fullPage: true });
+    await scan(page, `minimized drawer ${theme} desktop`);
+
+    await tray.getByRole("button", { name: "Restore Build Server" }).click();
+    await expect(page.locator("#drawer-title")).toHaveText("Build Server");
+    await expect(tray.locator(".minimized-drawer")).toHaveCount(1);
+    await tray.getByRole("button", { name: "Close Studio PC" }).click();
+    await expect(tray).toBeHidden();
+    await page.locator("#agent-drawer").getByRole("button", { name: "Close machine details" }).click();
+  });
+
   test(`Discovery inventory, drawer, and scan panel render in the ${theme} theme`, async ({ page }) => {
     await login(page, { theme });
     await page.locator('[data-page="discovery"]').click();
@@ -136,6 +169,14 @@ for (const theme of THEMES) {
     await expect(page.locator("#discovery-table-body")).toContainText("printer.lan");
     await expect(page.locator("#discovery-table-body")).not.toContainText("esxi.lan");
     await page.locator("#discovery-filter-clear").click();
+    await expect(page.locator("#discovery-table-body")).toContainText("esxi.lan");
+    await page.locator("#discovery-search").fill("vmware");
+    await expect(page.locator("#discovery-table-body")).toContainText("esxi.lan");
+    await expect(page.locator("#discovery-table-body")).not.toContainText("printer.lan");
+    await page.locator("#discovery-search").fill("192.168.1.40");
+    await expect(page.locator("#discovery-table-body")).toContainText("printer.lan");
+    await expect(page.locator("#discovery-table-body")).not.toContainText("esxi.lan");
+    await page.locator("#discovery-search").fill("");
     await expect(page.locator("#discovery-table-body")).toContainText("esxi.lan");
     await expect(page.locator("#discovery-summary")).toContainText("Exposure");
     await expect(page.locator("#discovery-summary")).toContainText("Conflicts");

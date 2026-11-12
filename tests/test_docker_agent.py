@@ -566,6 +566,23 @@ def test_volume_and_network_usage_is_derived_from_containers(tmp_path: Path):
     assert payload["containers"][0]["compose_project"] == "web"
 
 
+def test_server_docker_enabled_overrides_local_and_profile(tmp_path: Path):
+    value = collector(make_config(tmp_path, allow_docker=False))
+    value.set_profile({"modules": {"docker": False}})
+    value.set_policy({"docker_enabled": True, "allow_docker": True})
+    assert value.enabled() is True
+    assert value.exec_enabled() is False
+
+    value.set_policy(
+        {
+            "docker_enabled": True,
+            "allow_docker": True,
+            "allow_docker_exec": True,
+        }
+    )
+    assert value.exec_enabled() is True
+
+
 def test_profile_and_policy_can_disable_local_docker(tmp_path: Path):
     value = collector(make_config(tmp_path))
     value.set_profile({"modules": {"docker": False}})

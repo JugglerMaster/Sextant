@@ -517,6 +517,7 @@ class AgentRunner:
             "allow_docker_exec": bool(policy.get("allow_docker_exec", False)),
             "allow_docker_compose": bool(policy.get("allow_docker_compose", False)),
             "allow_docker_prune": bool(policy.get("allow_docker_prune", False)),
+            "docker_enabled": bool(policy.get("docker_enabled", False)),
             "allow_discovery": bool(policy.get("allow_discovery", False)),
         }
         self.docker.set_policy(self.remote_policy)

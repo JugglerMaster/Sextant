@@ -438,6 +438,12 @@ class DockerCollector:
             self.policy = policy
             self._status_at = 0.0
 
+    def _server_collection(self) -> bool:
+        # Explicit server-side agent setting. It is allowed to override the
+        # local config default and the profile module so an admin can turn on
+        # Docker collection from the console.
+        return bool(self.policy.get("docker_enabled", False))
+
     def _module_enabled(self) -> bool:
         modules = self.profile.get("modules") if isinstance(self.profile.get("modules"), dict) else {}
         # A missing module key means an older profile; the local ceiling still applies.
@@ -447,6 +453,8 @@ class DockerCollector:
         return bool(self.policy.get("allow_docker", True))
 
     def enabled(self) -> bool:
+        if self._server_collection():
+            return True
         return bool(self.config.allow_docker) and self._module_enabled() and self._policy_enabled()
 
     def _interval(self) -> int:
@@ -836,22 +844,22 @@ class DockerCollector:
     def exec_enabled(self) -> bool:
         return (
             self.enabled()
-            and bool(self.config.allow_docker_exec)
-            and self._policy_flag("allow_docker_exec")
+            and (bool(self.config.allow_docker_exec) or self._server_collection())
+            and bool(self.policy.get("allow_docker_exec", False))
         )
 
     def prune_enabled(self) -> bool:
         return (
             self.enabled()
-            and bool(self.config.allow_docker_prune)
-            and self._policy_flag("allow_docker_prune")
+            and (bool(self.config.allow_docker_prune) or self._server_collection())
+            and bool(self.policy.get("allow_docker_prune", False))
         )
 
     def compose_enabled(self) -> bool:
         return (
             self.enabled()
-            and bool(self.config.allow_docker_compose)
-            and self._policy_flag("allow_docker_compose")
+            and (bool(self.config.allow_docker_compose) or self._server_collection())
+            and bool(self.policy.get("allow_docker_compose", False))
         )
 
     @staticmethod

@@ -1033,6 +1033,10 @@ function createApi(session) {
       if (type) filtered = filtered.filter((device) => device.device_type === type);
       if (segment) filtered = filtered.filter((device) => device.segment === segment);
       if (vendor) filtered = filtered.filter((device) => device.vendor === vendor);
+      const q = String(url.searchParams.get("q") || "").toLowerCase();
+      if (q) {
+        filtered = filtered.filter((device) => JSON.stringify(device).toLowerCase().includes(q));
+      }
       if (url.searchParams.get("no_agent") === "true") {
         filtered = filtered.filter((device) => !device.agent_id);
       }
@@ -1424,6 +1428,13 @@ function createApi(session) {
     }
     if (key === "/api/agents/agt_demo") {
       return { status: 200, body: { agent: demoAgent, commands: historyCommands.slice(0, 2) } };
+    }
+    const agentDetailMatch = key.match(/^\/api\/agents\/(agt_[^/]+)$/);
+    if (agentDetailMatch) {
+      const found = agents.find((candidate) => candidate.id === agentDetailMatch[1]);
+      if (found) {
+        return { status: 200, body: { agent: found, commands: historyCommands.slice(0, 2) } };
+      }
     }
     if (key === "/api/docker/hosts") {
       return { status: 200, body: { server_time: "2026-11-06T08:05:00Z", stale_seconds: 900, hosts: [dockerHost] } };

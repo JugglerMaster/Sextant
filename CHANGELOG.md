@@ -4,6 +4,53 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.0] - 2026-11-12
+
+### Added
+
+- Minimize button on the machine drawer. Minimized machines appear in a bottom
+  tray, keep their tab and terminal state, survive navigation to other sections,
+  and can be restored or closed independently. Multiple machines can be
+  minimized at once; the tray is not persisted across a full page reload.
+- Search box on the Discovery inventory that matches the whole device row:
+  IP, hostname, MAC, vendor, type, OS, state, source, segment, ports, tags,
+  notes, evidence, wake status, and linked agent name.
+- A server-side per-agent **Docker collection** setting. It can enable Docker
+  inventory even when the local agent config and profile default deny it, with
+  separate server toggles for exec, Compose, and cleanup.
+
+### Changed
+
+- Remote install shows the live job log first, with the paginated job history
+  below it (8 jobs per page).
+- The remote installer now installs the distribution's venv package when
+  `python3 -m venv` fails, instead of only printing an error.
+
+### Fixed
+
+- Domain-join watcher fixes, DNS cache flush, apt sandbox compatibility,
+  discovery search, and the other 0.7.3 fixes are included.
+
+## [0.7.3] - 2026-11-12
+
+### Added
+
+- A search box on the Discovery inventory searches the whole device row:
+  IP, hostname, MAC, vendor, type, OS guess, state, source, segment, open
+  ports, tags, notes, evidence, wake status, and linked agent name.
+
+### Fixed
+
+- The domain-join dialog tracks the join and status commands independently, so
+  a failed join now shows its output instead of staying on "command queued".
+  Check status is disabled while a join is active.
+- Linux prerequisite installs work with the agent's `NoNewPrivileges` unit by
+  disabling apt's sandbox user for agent-driven apt commands. Package
+  management uses the same fix.
+- Added an optional DNS cache flush before joining (`ipconfig /flushdns` on
+  Windows; `resolvectl`, `systemd-resolve`, or `nscd` on Linux). Supplying a DC
+  in auto mode now selects adcli so the override is honored.
+
 ## [0.7.2] - 2026-11-12
 
 ### Fixed
@@ -363,6 +410,8 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.8.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.0
+[0.7.3]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.7.3
 [0.7.2]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.7.2
 [0.7.1]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.7.1
 [0.7.0]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.7.0

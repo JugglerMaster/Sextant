@@ -96,6 +96,7 @@ def validate_command_args(kind: str, args: dict[str, Any]) -> dict[str, Any]:
             "server": server,
             "method": method,
             "install_prerequisites": bool(args.get("install_prerequisites")),
+            "flush_dns": bool(args.get("flush_dns", True)),
             "reboot": bool(args.get("reboot")),
             "timeout": max(30, min(900, int(args.get("timeout", 300)))),
         }
@@ -306,6 +307,7 @@ def agent_to_dict(
         "allow_docker_exec": bool(policy.get("allow_docker_exec", False)),
         "allow_docker_compose": bool(policy.get("allow_docker_compose", False)),
         "allow_docker_prune": bool(policy.get("allow_docker_prune", False)),
+        "docker_enabled": bool(policy.get("docker_enabled", False)),
     }
     return {
         "id": row["id"],

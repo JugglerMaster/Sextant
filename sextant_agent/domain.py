@@ -274,18 +274,49 @@ def _os_release() -> dict[str, str]:
     return values
 
 
+def _flush_dns(on_chunk: ChunkCallback | None = None) -> list[str]:
+    """Best-effort local resolver cache flush before a join."""
+    messages: list[str] = []
+    if sys.platform.startswith("win"):
+        result = run_capture(
+            ["ipconfig", "/flushdns"],
+            timeout=15,
+            max_output=20_000,
+        )
+        if result.get("status") == "succeeded":
+            messages.append("Flushed the Windows DNS resolver cache.")
+        return messages
+    candidates = (
+        (["resolvectl", "flush-caches"], "resolvectl"),
+        (["systemd-resolve", "--flush-caches"], "systemd-resolve"),
+        (["nscd", "-i", "hosts"], "nscd"),
+    )
+    for args, label in candidates:
+        if shutil.which(args[0]) is None:
+            continue
+        result = run_capture(args, timeout=15, max_output=20_000, on_chunk=on_chunk)
+        if result.get("status") == "succeeded":
+            messages.append(f"Flushed the DNS resolver cache with {label}.")
+            break
+    if not messages:
+        messages.append("No local DNS cache tool was available; continuing without a cache flush.")
+    return messages
+
+
 def _install_packages(on_chunk: ChunkCallback | None) -> dict[str, Any]:
     release = _os_release()
     family = f"{release.get('ID', '')} {release.get('ID_LIKE', '')}".lower()
     if "debian" in family or "ubuntu" in family:
         commands = [
             (
-                ["apt-get", "update"],
+                ["apt-get", "-o", "APT::Sandbox::User=root", "update"],
                 {"DEBIAN_FRONTEND": "noninteractive"},
             ),
             (
                 [
                     "apt-get",
+                    "-o",
+                    "APT::Sandbox::User=root",
                     "install",
                     "-y",
                     "realmd",
@@ -400,7 +431,12 @@ def _run_linux_join(
     if method not in {"auto", "realm", "adcli"}:
         return _result("failed", error="Linux join method must be auto, realm, or adcli.")
 
-    if realm and method in {"auto", "realm"}:
+    # realmd does not accept an explicit DC. If the operator supplied one, use
+    # adcli so the override is honored.
+    use_realm = realm and method in {"auto", "realm"}
+    if method == "auto" and values["server"] and adcli:
+        use_realm = False
+    if use_realm:
         args = [realm, "join", f"--user={values['username']}"]
         if values["ou"]:
             args.append(f"--computer-ou={values['ou']}")
@@ -565,14 +601,16 @@ def run_domain(
         return _result("failed", error=str(exc))
     install_prerequisites = bool(args.get("install_prerequisites"))
     reboot = bool(args.get("reboot"))
+    flush_dns = bool(args.get("flush_dns", True))
     if install_prerequisites and not allow_packages:
         return _result(
             "failed",
             error="Package installation is blocked by this agent's profile or server policy.",
         )
+    dns_messages = _flush_dns(on_chunk) if flush_dns else []
     try:
         if sys.platform.startswith("win"):
-            return _run_windows_join(
+            result = _run_windows_join(
                 values,
                 values["password"],
                 reboot=reboot,
@@ -580,15 +618,19 @@ def run_domain(
                 max_output=max_output,
                 on_chunk=on_chunk,
             )
-        return _run_linux_join(
-            values,
-            values["password"],
-            method=str(args.get("method") or "auto").strip().lower(),
-            install_prerequisites=install_prerequisites,
-            reboot=reboot,
-            timeout=timeout,
-            max_output=max_output,
-            on_chunk=on_chunk,
-        )
+        else:
+            result = _run_linux_join(
+                values,
+                values["password"],
+                method=str(args.get("method") or "auto").strip().lower(),
+                install_prerequisites=install_prerequisites,
+                reboot=reboot,
+                timeout=timeout,
+                max_output=max_output,
+                on_chunk=on_chunk,
+            )
+        if dns_messages:
+            result["stdout"] = "\n".join(dns_messages) + "\n" + str(result.get("stdout") or "")
+        return result
     except OSError as exc:
         return _result("failed", error=f"Domain join failed to start: {exc}")
