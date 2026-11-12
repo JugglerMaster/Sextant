@@ -763,19 +763,19 @@ def test_exposure_conflicts_and_segment_summary(tmp_path):
     app = create_app(_settings(tmp_path))
     database = app.state.db
     exposed = _discovered(
-        database, mac="aa:bb:cc:dd:ee:10", ip="192.168.1.100", ports=[22, 8006]
+        database, mac="00:11:22:33:44:10", ip="192.168.1.100", ports=[22, 8006]
     )
-    _discovered(database, mac="aa:bb:cc:dd:ee:11", ip="192.168.1.100", ports=[80])
+    _discovered(database, mac="00:11:22:33:44:11", ip="192.168.1.100", ports=[80])
     _discovered(
         database,
-        mac="aa:bb:cc:dd:ee:12",
+        mac="00:11:22:33:44:12",
         ip="192.168.1.101",
         hostname="shared.lan",
         ports=[80],
     )
     _discovered(
         database,
-        mac="aa:bb:cc:dd:ee:13",
+        mac="00:11:22:33:44:13",
         ip="192.168.1.102",
         hostname="shared.lan",
         ports=[80],
@@ -813,8 +813,8 @@ def test_exposure_conflicts_and_segment_summary(tmp_path):
 def test_discovery_export_rbac_caps_and_audit(tmp_path):
     app = create_app(_settings(tmp_path, export_limit=1))
     database = app.state.db
-    _discovered(database, mac="aa:bb:cc:dd:ee:20", ip="192.168.1.110", ports=[22])
-    _discovered(database, mac="aa:bb:cc:dd:ee:21", ip="192.168.1.111", ports=[443])
+    _discovered(database, mac="00:11:22:33:44:20", ip="192.168.1.110", ports=[22])
+    _discovered(database, mac="00:11:22:33:44:21", ip="192.168.1.111", ports=[443])
     with TestClient(app) as client:
         assert client.get("/api/discovery/export?format=csv").status_code == 401
         admin = login(client)
@@ -859,7 +859,7 @@ def test_promote_wake_target_is_idempotent(tmp_path):
     app = create_app(_settings(tmp_path))
     database = app.state.db
     device = _discovered(
-        database, mac="aa:bb:cc:dd:ee:30", ip="192.168.1.120", hostname="wake-me.lan"
+        database, mac="00:11:22:33:44:30", ip="192.168.1.120", hostname="wake-me.lan"
     )
     with TestClient(app) as client:
         admin = login(client)
@@ -871,7 +871,7 @@ def test_promote_wake_target_is_idempotent(tmp_path):
         assert first.status_code == 200, first.text
         result = first.json()
         assert result["duplicate"] is False
-        assert result["wake_target"]["mac"].lower() == "aa:bb:cc:dd:ee:30"
+        assert result["wake_target"]["mac"].lower() == "00:11:22:33:44:30"
         assert result["device"]["state"] == "promoted"
         assert result["device"]["wake_target_id"] == result["wake_target"]["id"]
 
@@ -886,7 +886,7 @@ def test_promote_wake_target_is_idempotent(tmp_path):
         with database.connection() as conn:
             count = conn.execute(
                 "SELECT COUNT(*) AS n FROM wake_targets WHERE mac = ? COLLATE NOCASE",
-                ("aa:bb:cc:dd:ee:30",),
+                ("00:11:22:33:44:30",),
             ).fetchone()["n"]
         assert count == 1
         events = client.get(f"/api/discovery/devices/{device['id']}").json()["events"]
@@ -899,10 +899,10 @@ def test_promote_install_tokens_are_one_time_and_redacted(tmp_path):
     app = create_app(_settings(tmp_path))
     database = app.state.db
     linux = _discovered(
-        database, mac="aa:bb:cc:dd:ee:40", ip="192.168.1.140", hostname="printer.lan"
+        database, mac="00:11:22:33:44:40", ip="192.168.1.140", hostname="printer.lan"
     )
     windows = _discovered(
-        database, mac="aa:bb:cc:dd:ee:41", ip="192.168.1.141", hostname="studio-pc"
+        database, mac="00:11:22:33:44:41", ip="192.168.1.141", hostname="studio-pc"
     )
     with TestClient(app) as client:
         admin = login(client)
@@ -971,7 +971,7 @@ def test_link_existing_agent_by_mac_and_conflict(tmp_path):
         assert any(event["kind"] == "promoted" for event in events)
 
         mismatch = _discovered(
-            database, mac="aa:bb:cc:dd:ee:51", ip="192.168.1.151", hostname="other"
+            database, mac="00:11:22:33:44:51", ip="192.168.1.151", hostname="other"
         )
         denied = client.post(
             f"/api/discovery/devices/{mismatch['id']}/link-agent",
@@ -985,7 +985,7 @@ def test_wake_verification_status_and_events(tmp_path, monkeypatch):
     app = create_app(_settings(tmp_path))
     database = app.state.db
     device = _discovered(
-        database, mac="aa:bb:cc:dd:ee:60", ip="192.168.1.160", hostname="wake-check.lan"
+        database, mac="00:11:22:33:44:60", ip="192.168.1.160", hostname="wake-check.lan"
     )
     monkeypatch.setattr(
         "sextant_control.server.send_magic_packet",
@@ -1057,7 +1057,7 @@ def test_promotion_and_verify_rbac(tmp_path):
     app = create_app(_settings(tmp_path))
     database = app.state.db
     device = _discovered(
-        database, mac="aa:bb:cc:dd:ee:70", ip="192.168.1.170", hostname="rbac.lan"
+        database, mac="00:11:22:33:44:70", ip="192.168.1.170", hostname="rbac.lan"
     )
     with TestClient(app) as client:
         admin = login(client)

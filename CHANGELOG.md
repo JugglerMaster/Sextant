@@ -4,6 +4,14 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.5.8] - 2026-11-12
+
+### Fixed
+
+- A reused hostname with a rotated private/randomized MAC is now absorbed as a
+  **MAC changed** identity change instead of remaining a hostname conflict.
+  This clears stale phone duplicates that kept showing as conflicts.
+
 ## [0.5.7] - 2026-11-12
 
 ### Changed
@@ -223,6 +231,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.5.8]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.8
 [0.5.7]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.7
 [0.5.6]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.6
 [0.5.5]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.5.5

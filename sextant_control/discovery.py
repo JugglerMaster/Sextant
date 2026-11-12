@@ -976,6 +976,17 @@ def _absorb_duplicate_devices(
         elif same_name and not candidate_mac:
             absorb = True
         elif (
+            same_name
+            and candidate_mac
+            and mac
+            and candidate_mac.lower() != mac.lower()
+            and (
+                is_locally_administered(candidate_mac)
+                or is_locally_administered(mac)
+            )
+        ):
+            absorb = True
+        elif (
             (same_ip or same_name)
             and candidate_mac
             and mac
@@ -1156,15 +1167,21 @@ def merge_observation(
                 (hostname,),
             ).fetchone()
 
-        def can_be_mac_change(candidate: Any) -> bool:
+        def can_be_mac_change(candidate: Any, same_name: bool) -> bool:
             """Decide whether a different MAC is drift or a live conflict.
 
-            A stale previous sighting looks like the same device with a new
-            NIC or a rotated private address. Two recent rows with different
-            MACs are a genuine conflict.
+            A reused hostname with a private/randomized address is the same
+            device rotating its MAC. A stale previous sighting looks like the
+            same device with a new NIC. Two recent vendor MACs on one identity
+            are a genuine conflict.
             """
             previous_mac = str(candidate["mac"] or "")
             if not previous_mac or not mac:
+                return True
+            if same_name and (
+                is_locally_administered(previous_mac)
+                or is_locally_administered(mac)
+            ):
                 return True
             previous_seen = parse_iso(candidate["last_seen"])
             return (
@@ -1184,8 +1201,11 @@ def merge_observation(
             candidate = find_ip_candidate() or find_hostname_candidate()
             if candidate is not None:
                 previous_mac = str(candidate["mac"] or "")
+                same_name = bool(hostname) and (
+                    str(candidate["hostname"] or "").lower() == hostname.lower()
+                )
                 if mac and previous_mac and previous_mac.lower() != mac:
-                    if can_be_mac_change(candidate):
+                    if can_be_mac_change(candidate, same_name):
                         row = candidate
                         change_kind = "mac"
                     else:

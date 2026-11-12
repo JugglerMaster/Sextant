@@ -226,7 +226,7 @@ def test_parse_ip_neigh_and_arp_tables():
     ]
 
     arp = """
-gateway (192.168.1.1) at aa:bb:cc:dd:ee:ff [ether] on eth0
+gateway (192.168.1.1) at 00:11:22:33:44:ff [ether] on eth0
 ? (192.168.1.20) at 00:11:22:33:44:55 on en0 ifscope [ethernet]
   192.168.1.30           b8-27-eb-aa-bb-cc     dynamic
 """
@@ -246,11 +246,11 @@ def test_read_neighbor_table_falls_back_to_arp(monkeypatch):
         calls.append(command)
         if command[0] == "ip":
             return Result("")
-        return Result("gateway (192.168.1.1) at aa:bb:cc:dd:ee:ff [ether] on eth0\n")
+        return Result("gateway (192.168.1.1) at 00:11:22:33:44:ff [ether] on eth0\n")
 
     entries = read_neighbor_table(command_runner=runner)
     assert calls[0][0] == "ip" and calls[1][0] == "arp"
-    assert entries[0]["mac"] == "aa:bb:cc:dd:ee:ff"
+    assert entries[0]["mac"] == "00:11:22:33:44:ff"
 
 
 def test_oui_lookup_and_randomized_mac_detection():
@@ -399,8 +399,8 @@ def test_merge_by_mac_ip_and_hostname(database):
 
 
 def test_different_known_macs_are_never_merged(database):
-    first = merge_observation(database, _observation(mac="aa:bb:cc:dd:ee:01", ip="192.168.1.40"))
-    second = merge_observation(database, _observation(mac="aa:bb:cc:dd:ee:02", ip="192.168.1.40"))
+    first = merge_observation(database, _observation(mac="00:11:22:33:44:01", ip="192.168.1.40"))
+    second = merge_observation(database, _observation(mac="00:11:22:33:44:02", ip="192.168.1.40"))
     assert first["id"] != second["id"]
     events = [
         event
@@ -408,7 +408,7 @@ def test_different_known_macs_are_never_merged(database):
         if event["kind"] == "identity_conflict"
     ]
     assert events
-    assert "aa:bb:cc:dd:ee:02" in loads(events[0]["detail"], {})["observed_mac"]
+    assert "00:11:22:33:44:02" in loads(events[0]["detail"], {})["observed_mac"]
 
 
 def test_macless_observation_merges_into_mac_row(database):
@@ -473,6 +473,23 @@ def test_mac_change_after_stale_window_is_changed(database):
     rows, total = database.list_discovered_devices(state="changed")
     assert total == 1
     assert rows[0]["id"] == first["id"]
+
+
+def test_private_mac_rotation_with_same_hostname_is_changed(database):
+    first = merge_observation(
+        database,
+        _observation(mac="02:11:22:33:44:55", ip="192.168.1.92", hostname="phone.lan"),
+    )
+    rotated = merge_observation(
+        database,
+        _observation(mac="06:aa:bb:cc:dd:ee", ip="192.168.1.93", hostname="phone.lan"),
+    )
+    assert rotated["id"] == first["id"]
+    assert rotated["change_kind"] == "mac"
+    assert rotated["change"]["from"] == "02:11:22:33:44:55"
+    assert rotated["change"]["to"] == "06:aa:bb:cc:dd:ee"
+    conflicts = detect_identity_conflicts(database)
+    assert conflicts == []
 
 
 def test_operator_state_acknowledges_identity_change(database):
@@ -629,15 +646,15 @@ def test_run_scan_collects_neighbors_dns_ssdp_and_tcp(database, monkeypatch):
 def test_identity_conflicts_group_ip_and_hostname(database):
     merge_observation(
         database,
-        _observation(mac="aa:bb:cc:dd:ee:01", ip="192.168.1.70", hostname="shared.lan"),
+        _observation(mac="00:11:22:33:44:01", ip="192.168.1.70", hostname="shared.lan"),
     )
     merge_observation(
         database,
-        _observation(mac="aa:bb:cc:dd:ee:02", ip="192.168.1.70", hostname="other.lan"),
+        _observation(mac="00:11:22:33:44:02", ip="192.168.1.70", hostname="other.lan"),
     )
     merge_observation(
         database,
-        _observation(mac="aa:bb:cc:dd:ee:03", ip="192.168.1.71", hostname="shared.lan"),
+        _observation(mac="00:11:22:33:44:03", ip="192.168.1.71", hostname="shared.lan"),
     )
     conflicts = detect_identity_conflicts(database)
     types = {conflict["type"] for conflict in conflicts}
@@ -650,10 +667,10 @@ def test_identity_conflicts_group_ip_and_hostname(database):
 
 def test_identity_change_for_mac_moving_ip_is_not_a_conflict(database):
     device = merge_observation(
-        database, _observation(mac="aa:bb:cc:dd:ee:09", ip="192.168.1.80")
+        database, _observation(mac="00:11:22:33:44:09", ip="192.168.1.80")
     )
     moved = merge_observation(
-        database, _observation(mac="aa:bb:cc:dd:ee:09", ip="192.168.1.81")
+        database, _observation(mac="00:11:22:33:44:09", ip="192.168.1.81")
     )
     assert moved["id"] == device["id"]
     assert moved["change_kind"] == "ip"
@@ -677,7 +694,7 @@ def test_exposure_filter_and_summary(database):
     merge_observation(
         database,
         _observation(
-            mac="aa:bb:cc:dd:ee:10",
+            mac="00:11:22:33:44:10",
             ip="192.168.1.90",
             open_ports=[22, 8006],
             services={"22": {"protocol": "ssh"}},
@@ -686,7 +703,7 @@ def test_exposure_filter_and_summary(database):
     merge_observation(
         database,
         _observation(
-            mac="aa:bb:cc:dd:ee:11",
+            mac="00:11:22:33:44:11",
             ip="192.168.1.91",
             open_ports=[80],
             services={"80": {"protocol": "http"}},
@@ -699,13 +716,13 @@ def test_exposure_filter_and_summary(database):
         conn.execute(
             """INSERT INTO agents (id, name, hostname, os, mac, token_hash, enrolled_at)
                VALUES ('agt_exposed', 'Exposed', 'exposed', 'linux',
-                       'aa:bb:cc:dd:ee:10', 'hash', ?)""",
+                       '00:11:22:33:44:10', 'hash', ?)""",
             (utcnow_iso(),),
         )
     merge_observation(
         database,
         _observation(
-            mac="aa:bb:cc:dd:ee:10",
+            mac="00:11:22:33:44:10",
             ip="192.168.1.90",
             open_ports=[22, 8006],
             services={"22": {"protocol": "ssh"}},
