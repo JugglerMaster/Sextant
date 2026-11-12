@@ -271,7 +271,10 @@ sudo -n ln -sfn .venv /opt/sextant-agent/current
 sudo -n chmod 0600 /etc/sextant-agent/config.json
 sudo -n install -m 0644 "$UNIT" /etc/systemd/system/sextant-agent.service
 sudo -n systemctl daemon-reload
-sudo -n systemctl enable --now sextant-agent
+sudo -n systemctl enable sextant-agent
+# Re-enrollment can rotate the token. Always restart so an already-running
+# agent loads the new config instead of exiting with HTTP 401.
+sudo -n systemctl restart sextant-agent
 sudo -n systemctl is-active sextant-agent
 rm -f "$WHEEL" "$UNIT"
 """

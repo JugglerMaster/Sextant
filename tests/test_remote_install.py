@@ -74,7 +74,8 @@ def test_install_script_contains_expected_steps_and_redacts_token(monkeypatch, t
         log=logs.append,
     )
     install_script = calls[-1][1]
-    assert "systemctl enable --now sextant-agent" in install_script
+    assert "systemctl enable sextant-agent" in install_script
+    assert "systemctl restart sextant-agent" in install_script
     assert "--token" in install_script
     assert "--profile server" in install_script
     assert "sudo -n" in install_script
