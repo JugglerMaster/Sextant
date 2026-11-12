@@ -29,6 +29,18 @@ def test_domain_validation_and_status_action():
     assert invalid["status"] == "failed"
 
 
+def test_pty_sends_password_without_a_prompt():
+    result = domain._run_pty(
+        ["bash", "-c", "IFS= read -r value; printf 'GOT=%s\\n' \"$value\""],
+        "super-secret",
+        timeout=5,
+        max_output=10_000,
+    )
+    assert result["status"] == "succeeded"
+    assert "GOT=[redacted]" in result["stdout"]
+    assert "super-secret" not in result["stdout"]
+
+
 def test_windows_join_keeps_password_out_of_script(monkeypatch):
     captured = {}
 

@@ -198,6 +198,15 @@ def _run_pty(
     total = 0
     sent_password = False
     timed_out = False
+    # realmd passes --stdin-password to adcli, which reads the password
+    # immediately without printing a prompt. Write it up front; the PTY line
+    # discipline buffers it until adcli reads. Keep the prompt fallback for
+    # membership backends that do prompt.
+    try:
+        os.write(master, (password + "\n").encode("utf-8"))
+        sent_password = True
+    except OSError:
+        pass
     try:
         while True:
             remaining = deadline - time.monotonic()
