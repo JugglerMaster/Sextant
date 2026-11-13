@@ -4,6 +4,14 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.7] - 2026-11-13
+
+### Changed
+
+- The single-machine **Shut down** action in the device drawer now shuts the
+  machine down immediately (`shutdown ... now`) instead of scheduling it one
+  minute out. Reboot and bulk power actions keep their existing 30-second delay.
+
 ## [0.8.6] - 2026-11-13
 
 ### Fixed

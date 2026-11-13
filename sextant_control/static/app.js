@@ -3588,7 +3588,11 @@ async function retryCommand(agentId, commandId) {
 function commandDescription(command) {
   const args = command.args || {};
   if (command.kind === "shell") return `${args.shell || "shell"}: ${args.command || ""}`;
-  if (command.kind === "power") return `power: ${args.action || "?"}${args.action === "cancel" ? "" : ` in ${args.delay ?? 30}s`}`;
+  if (command.kind === "power") {
+    if (args.action === "cancel") return "power: cancel";
+    const delay = args.delay ?? 30;
+    return `power: ${args.action || "?"} ${delay <= 0 ? "now" : `in ${delay}s`}`;
+  }
   if (command.kind === "service") return `service: ${args.action || "?"} ${args.name || ""}`;
   if (command.kind === "refresh") return "refresh telemetry";
   return command.kind;
@@ -3642,6 +3646,12 @@ async function queuePower(agent, action) {
   }
   if (!agent.online) return toast("Agent is offline. Wake it first.", "warn");
   const verb = action === "shutdown" ? "Shut down" : "Reboot";
+  if (action === "shutdown") {
+    const confirmed = await confirmAction(`${verb} ${agent.name}?`, `The agent will shut down now. Unsaved work on the machine may be lost.`, verb);
+    if (!confirmed) return;
+    await sendCommand(agent.id, "power", { action, delay: 0 }, `${verb} scheduled now.`);
+    return;
+  }
   const confirmed = await confirmAction(`${verb} ${agent.name}?`, `The agent will schedule ${action} in 30 seconds. Unsaved work on the machine may be lost.`, verb);
   if (!confirmed) return;
   await sendCommand(agent.id, "power", { action, delay: 30 }, `${verb} scheduled in 30 seconds.`);
