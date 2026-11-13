@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -292,6 +292,27 @@ def _sse_event(event: str, payload: Any) -> str:
 
 def _sse_comment(text: str = "keep-alive") -> str:
     return f": {text}\n\n"
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """Serve dashboard assets with revalidation so upgrades take effect.
+
+    Without an explicit ``Cache-Control``, browsers may heuristically reuse a
+    previous release's ``app.js`` after a server upgrade, leaving parts of a new
+    UI unpopulated. ``no-cache`` keeps the ETag/Last-Modified fast path but
+    forces a conditional request.
+    """
+
+    def file_response(
+        self,
+        full_path: Any,
+        stat_result: Any,
+        scope: Any,
+        status_code: int = 200,
+    ) -> Response:
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 class _DashboardState:
@@ -1308,18 +1329,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"sent": packets, "mac": mac, "broadcast": broadcast, "port": payload.port}
 
     @app.get("/", include_in_schema=False)
-    def index() -> FileResponse:
+    def index() -> HTMLResponse:
         index_file = settings.static_dir / "index.html"
         if not index_file.exists():
             raise HTTPException(status_code=500, detail="Dashboard assets are missing.")
-        return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
+        html = index_file.read_text(encoding="utf-8")
+        html = html.replace('href="/static/app.css"', f'href="/static/app.css?v={__version__}"')
+        html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={__version__}"')
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon() -> Response:
         return Response(status_code=204)
 
     if settings.static_dir.exists():
-        app.mount("/static", StaticFiles(directory=settings.static_dir), name="static")
+        app.mount(
+            "/static",
+            _NoCacheStaticFiles(directory=settings.static_dir),
+            name="static",
+        )
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:

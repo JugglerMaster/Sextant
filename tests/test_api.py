@@ -24,8 +24,15 @@ def test_public_health_and_security_headers(client):
     assert index.status_code == 200
     assert "Sextant" in index.text
     assert "/static/app.js" in index.text
-    assert client.get("/static/app.css").status_code == 200
-    assert client.get("/static/app.js").status_code == 200
+    assert "/static/app.js?v=" in index.text
+    assert "/static/app.css?v=" in index.text
+    assert index.headers["cache-control"] == "no-cache"
+    css = client.get("/static/app.css")
+    assert css.status_code == 200
+    assert css.headers["cache-control"] == "no-cache"
+    script = client.get("/static/app.js")
+    assert script.status_code == 200
+    assert script.headers["cache-control"] == "no-cache"
 
 
 def test_dashboard_requires_authentication(client):

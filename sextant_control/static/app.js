@@ -1089,7 +1089,10 @@ function navigate(page, load = true) {
     }
   }
   if (page === "compose-files") loadComposeFiles();
-  if (page === "enroll") loadEnrollmentTokens();
+  if (page === "enroll") {
+    ensureEnrollmentInstallCommands();
+    loadEnrollmentTokens();
+  }
   if (page === "audit") loadAudit();
   if (page === "users") loadUsers();
   if (page === "profiles") loadProfiles();
@@ -3811,6 +3814,12 @@ function renderEnrollmentInstallCommands(token = "", commands = null) {
     h("code", {}, token),
     " is inserted into both commands below. It is shown only once, so copy it now.",
   );
+}
+
+function ensureEnrollmentInstallCommands() {
+  const linux = $("enrollment-linux-command");
+  if (!linux || linux.textContent.trim()) return;
+  renderEnrollmentInstallCommands();
 }
 
 async function copyEnrollmentValue(elementId, label) {

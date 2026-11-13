@@ -4,6 +4,17 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.6] - 2026-11-13
+
+### Fixed
+
+- Dashboard asset URLs now include the release version, and `/static/*`
+  responses send `Cache-Control: no-cache`. Previously a browser could keep
+  running the pre-upgrade `app.js` after the server updated, so the new
+  Enrollment page showed empty Linux and Windows install-command boxes. The
+  Enrollment page also fills those commands when it is opened, not only on
+  sign-in.
+
 ## [0.8.5] - 2026-11-13
 
 ### Added
@@ -454,6 +465,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.8.6]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.6
 [0.8.5]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.5
 [0.8.4]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.4
 [0.8.3]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.3
