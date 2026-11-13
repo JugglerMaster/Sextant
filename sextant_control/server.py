@@ -75,6 +75,7 @@ from .notifications import NotificationError, NotificationService
 from .system_settings import (
     apply_overrides as apply_system_overrides,
     build_ldap_settings,
+    domain_login_policy,
     normalize_patch as normalize_system_patch,
     serialize as serialize_system_settings,
     ssh_key_info,
@@ -99,6 +100,7 @@ from .models import (
     DockerConsoleInputIn,
     DockerConsoleOpenIn,
     DomainJoinIn,
+    DomainPolicyPushIn,
     DockerConsoleOutputIn,
     DockerConsoleResizeIn,
     DockerDeployIn,
@@ -1546,7 +1548,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             action="system.settings_updated",
             target="system",
             detail={
-                "sections": sorted(key for key in payload if key in {"server", "domain", "ssh"}),
+                "sections": sorted(
+                    key for key in payload if key in {"server", "domain", "ssh", "domain_login"}
+                ),
                 "domain_enabled": bool(merged.get("domain", {}).get("enabled")),
                 "ssh_source": merged.get("ssh", {}).get("source", ""),
                 "restart_required": sorted(
@@ -3963,6 +3967,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 audit_action="domain.status_queued",
             )
         }
+
+    @app.post("/api/system/domain-login/push")
+    def push_domain_login_policy(
+        payload: DomainPolicyPushIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        policy = domain_login_policy(_system_values(database))
+        commands: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for agent_id in payload.agent_ids:
+            agent_id = str(agent_id).strip()
+            if not agent_id or agent_id in seen:
+                continue
+            seen.add(agent_id)
+            with database.connection() as conn:
+                agent = conn.execute(
+                    "SELECT id, name, os FROM agents WHERE id = ?", (agent_id,)
+                ).fetchone()
+            if agent is None:
+                errors.append({"agent_id": agent_id, "detail": "Agent not found."})
+                continue
+            if str(agent["os"]).lower() != "linux":
+                errors.append(
+                    {
+                        "agent_id": agent_id,
+                        "detail": "The domain login policy applies to Linux agents only.",
+                    }
+                )
+                continue
+            try:
+                command = queue_command(
+                    agent_id,
+                    "domain",
+                    {
+                        "action": "apply_policy",
+                        "policy": policy,
+                        "timeout": 300,
+                    },
+                    user,
+                    request,
+                    database,
+                    config,
+                    audit_action="domain.login_policy_queued",
+                    extra_detail={
+                        "agent": agent["name"],
+                        "policy": policy,
+                    },
+                )
+            except HTTPException as exc:
+                errors.append({"agent_id": agent_id, "detail": str(exc.detail)})
+                continue
+            commands.append({"agent_id": agent_id, "agent": agent["name"], "command": command})
+        return {"policy": policy, "commands": commands, "errors": errors}
 
     @app.post("/api/commands/{command_id}/cancel")
     def cancel_command(

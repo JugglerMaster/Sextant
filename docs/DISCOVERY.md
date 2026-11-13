@@ -620,5 +620,5 @@ The top-level **Discovery** page is available to every signed-in user. It render
 - TLS subject/SAN extraction uses the CPython stdlib X.509 test decoder; platforms that omit it still report an open TLS port but no certificate names.
 - CSV/JSON export is synchronous and capped by `SEXTANT_DISCOVERY_EXPORT_LIMIT`; very large exports can take a moment and are audited.
 - Promotion to a wake target or install command marks the device `promoted`; it does not automatically complete enrollment or prove that a generated install command was used.
-- The generated Windows command is manual and requires a pre-installed agent package. The planned credential-based remote installer is documented in [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md) and is not implemented.
+- The generated Windows command is manual and requires a pre-installed agent package. The credential-based Windows remote installer over WinRM is documented in [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md) and implemented as a per-host admin action; Discovery promotion still generates the manual command.
 - Wake verification uses the neighbour table and, when active probes are enabled, TCP connect checks. It never uses ICMP or raw sockets.

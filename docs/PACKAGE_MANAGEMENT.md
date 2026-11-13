@@ -295,7 +295,7 @@ Options, all free:
 
 | Option | Notes |
 |---|---|
-| **Samba AD** | Free, Linux-hostable, speaks LDAP/Kerberos; can provide `memberOf` groups. Good if you want an AD-like directory without Windows Server licensing. |
+| **Samba AD** | Free, Linux-hostable, speaks LDAP/Kerberos; can provide `memberOf` groups. Good if you want an AD-like directory without Windows Server licensing. See [SAMBA_AD.md](SAMBA_AD.md). |
 | **OpenLDAP** | Free, lightweight; group membership via `memberOf`/`groupOfNames`. |
 | **FreeIPA** | Free, Linux identity + policy; richer than needed for package groups. |
 | **Static console groups** | Simplest; no directory dependency. |

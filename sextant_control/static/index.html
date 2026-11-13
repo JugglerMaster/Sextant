@@ -758,6 +758,7 @@
           <button class="tab is-active" data-settings-tab="profile" type="button">Profile</button>
           <button class="tab nav-admin" data-settings-tab="server" type="button">Server</button>
           <button class="tab nav-admin" data-settings-tab="domain" type="button">Domain &amp; directory</button>
+          <button class="tab nav-admin" data-settings-tab="domain-login" type="button">Domain login</button>
           <button class="tab nav-admin" data-settings-tab="ssh" type="button">SSH</button>
         </nav>
 
@@ -859,6 +860,38 @@
               <div class="callout" id="domain-test-result" hidden></div>
             </form>
           </article>
+        </div>
+
+        <div class="settings-tab-panel" data-settings-panel="domain-login" hidden>
+          <div class="panel-grid">
+            <article class="panel">
+              <div class="panel-head">
+                <div><p class="eyebrow">Fleet policy</p><h2>Domain login policy</h2></div>
+                <span class="form-hint" id="domain-login-status" aria-live="polite"></span>
+              </div>
+              <form id="domain-login-form" class="form-stack">
+                <label class="checkbox-row"><input type="checkbox" name="ssh_login"><span>Allow domain users to sign in over SSH</span></label>
+                <label class="checkbox-row"><input type="checkbox" name="password_authentication"><span>Allow password authentication (required for directory passwords)</span></label>
+                <label class="checkbox-row"><input type="checkbox" name="create_home"><span>Create home directories on first login (pam_mkhomedir)</span></label>
+                <label class="checkbox-row"><input type="checkbox" name="sudo_domain_admins"><span>Grant Domain Admins sudo on the host</span></label>
+                <label class="checkbox-row"><input type="checkbox" name="short_names"><span>Allow short usernames (skip the <code>user@domain</code> suffix)</span></label>
+                <label class="field"><span>Protected local users (comma separated)</span><input name="protected_users" maxlength="512" placeholder="dadisc01"></label>
+                <p class="form-hint">Before applying, Sextant records whether these local accounts have sudo and SSH access. If either would be lost, the host rolls the change back and reports the failure. Sextant never edits local accounts, passwords, authorized keys, or <code>/etc/sudoers</code>.</p>
+                <p class="form-hint">Sextant writes a managed sshd block (or a drop-in when the host includes <code>sshd_config.d</code>), a sudoers file, and the PAM home-directory hook. Existing <code>AllowUsers</code>/<code>AllowGroups</code> restrictions are commented out with a backup when SSH domain login is enabled, because they block directory logins; that only widens access and leaves local users allowed.</p>
+                <p class="form-hint">Changes are saved on the server. Push applies them to each selected host, which verifies its domain join first.</p>
+                <p class="form-error" id="domain-login-error" role="alert"></p>
+                <div class="section-toolbar">
+                  <button class="button button-primary" type="submit">Save policy</button>
+                  <button class="button button-secondary" id="domain-login-push" type="button">Push to selected agents</button>
+                </div>
+              </form>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><p class="eyebrow">Targets</p><h2>Linux agents</h2></div></div>
+              <div class="form-stack" id="domain-login-agents"></div>
+              <p class="form-hint">Only Linux agents receive this policy. Windows hosts use their own domain join and Group Policy. Offline agents receive the command on their next heartbeat.</p>
+            </article>
+          </div>
         </div>
 
         <div class="settings-tab-panel" data-settings-panel="ssh" hidden>

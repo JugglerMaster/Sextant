@@ -62,10 +62,50 @@ def validate_command_args(kind: str, args: dict[str, Any]) -> dict[str, Any]:
 
     if kind == "domain":
         action = str(args.get("action") or "join").strip().lower()
-        if action not in {"join", "status"}:
-            raise ValueError("domain action must be join or status")
+        if action not in {"join", "status", "apply_policy"}:
+            raise ValueError("domain action must be join, status, or apply_policy")
         if action == "status":
             return {"action": "status"}
+        if action == "apply_policy":
+            domain = str(args.get("domain") or "").strip().lower()
+            if domain and not re.match(
+                r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253})[A-Za-z0-9]$", domain
+            ):
+                raise ValueError("invalid domain name")
+            policy = args.get("policy")
+            if not isinstance(policy, dict):
+                raise ValueError("domain login policy must be an object")
+            normalized_policy: dict[str, Any] = {}
+            for key, default in (
+                ("ssh_login", True),
+                ("password_authentication", True),
+                ("create_home", True),
+                ("sudo_domain_admins", True),
+                ("short_names", False),
+            ):
+                value = policy.get(key, default)
+                if not isinstance(value, bool):
+                    raise ValueError(f"domain login policy {key} must be a boolean")
+                normalized_policy[key] = value
+            users = policy.get("protected_users", [])
+            if isinstance(users, str):
+                users = re.split(r"[\s,]+", users)
+            if not isinstance(users, (list, tuple)) or len(users) > 32:
+                raise ValueError("protected_users must contain at most 32 usernames")
+            protected_users: list[str] = []
+            for item in users:
+                name = str(item or "").strip()
+                if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$", name):
+                    raise ValueError(f"invalid protected local username: {name!r}")
+                if name not in protected_users:
+                    protected_users.append(name)
+            normalized_policy["protected_users"] = protected_users
+            return {
+                "action": "apply_policy",
+                "domain": domain,
+                "policy": normalized_policy,
+                "timeout": max(30, min(900, int(args.get("timeout", 300)))),
+            }
         if str(args.get("password") or ""):
             raise ValueError("Domain passwords are supplied only to the dedicated join endpoint")
         domain = str(args.get("domain") or "").strip()

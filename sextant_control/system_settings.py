@@ -62,6 +62,16 @@ SSH_KEYS = (
     "config_path",
     "install_enabled",
 )
+DOMAIN_LOGIN_DEFAULTS = {
+    "ssh_login": True,
+    "password_authentication": True,
+    "create_home": True,
+    "sudo_domain_admins": True,
+    "short_names": False,
+    "protected_users": ["dadisc01"],
+}
+DOMAIN_LOGIN_KEYS = tuple(DOMAIN_LOGIN_DEFAULTS)
+PROTECTED_USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
 RESTART_ONLY_KEYS = frozenset({"allowed_hosts", "cookie_secure"})
 _ATTR_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,127}$")
 _DOMAIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253})[A-Za-z0-9]$")
@@ -282,6 +292,7 @@ def normalize_patch(
         "server": dict(current.get("server") or {}),
         "domain": dict(current.get("domain") or {}),
         "ssh": dict(current.get("ssh") or {}),
+        "domain_login": dict(current.get("domain_login") or {}),
     }
     secrets: dict[str, Any] = {}
 
@@ -424,7 +435,51 @@ def normalize_patch(
                 raise ValueError("That does not look like a PEM private key.")
             secrets["ssh_private_key"] = key
 
+    if "domain_login" in patch:
+        raw = patch["domain_login"] or {}
+        if not isinstance(raw, dict):
+            raise ValueError("Domain login policy must be an object.")
+        for key in DOMAIN_LOGIN_KEYS:
+            if key not in raw:
+                continue
+            if key == "protected_users":
+                users = _string_list(raw[key])
+                if len(users) > 32:
+                    raise ValueError("Protect at most 32 local users.")
+                for name in users:
+                    if not PROTECTED_USER_RE.match(name):
+                        raise ValueError(
+                            f"{name!r} is not a valid local username."
+                        )
+                merged["domain_login"]["protected_users"] = users
+            else:
+                merged["domain_login"][key] = _as_bool(raw[key])
+
     return merged, secrets
+
+
+def domain_login_policy(stored: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the effective domain login policy with defaults applied."""
+    raw = (stored or {}).get("domain_login")
+    if not isinstance(raw, dict):
+        raw = {}
+    users = raw.get("protected_users", DOMAIN_LOGIN_DEFAULTS["protected_users"])
+    if isinstance(users, str):
+        users = re.split(r"[\s,]+", users)
+    if not isinstance(users, (list, tuple)):
+        users = list(DOMAIN_LOGIN_DEFAULTS["protected_users"])
+    protected: list[str] = []
+    for item in users:
+        name = str(item or "").strip()
+        if PROTECTED_USER_RE.match(name) and name not in protected:
+            protected.append(name)
+    policy: dict[str, Any] = {
+        key: _as_bool(raw.get(key, default))
+        for key, default in DOMAIN_LOGIN_DEFAULTS.items()
+        if key != "protected_users"
+    }
+    policy["protected_users"] = protected[:32]
+    return policy
 
 
 def serialize(
@@ -493,6 +548,7 @@ def serialize(
             "key_fingerprint": key_info["fingerprint"],
             "public_key": key_info["public_key"],
         },
+        "domain_login": domain_login_policy(stored),
         "meta": {
             "ldap3_available": importlib.util.find_spec("ldap3") is not None,
             "updated_at": updated_at,

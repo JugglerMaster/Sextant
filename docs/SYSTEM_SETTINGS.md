@@ -64,6 +64,25 @@ break-glass path.
 Enabling directory login takes effect on the next request. The login page adds
 the **Active Directory / Samba** mode selector after a reload.
 
+## Domain login (admin)
+
+Saves the fleet-wide login policy for joined Linux hosts and pushes it from the
+same tab. The policy is stored on the server; each selected agent verifies that
+it is joined before changing anything.
+
+| Setting | Effect |
+|---|---|
+| Allow domain users to sign in over SSH | Writes a managed sshd block (a drop-in when the host includes `sshd_config.d`) with `UsePAM yes`, then comments out `AllowUsers`/`AllowGroups` with backups. |
+| Allow password authentication | Sets `PasswordAuthentication` and `KbdInteractiveAuthentication` to the same value. |
+| Create home directories | Adds `pam_mkhomedir.so` to the session stack. |
+| Grant Domain Admins sudo | Writes `/etc/sudoers.d/90-sextant-domain` and validates the sudoers tree with `visudo -c`. |
+| Allow short usernames | Sets SSSD `use_fully_qualified_names` and restarts SSSD. |
+| Protected local users | Local accounts whose SSH and sudo access must not regress. If a change would remove either, the managed SSH/sudoers change is rolled back. |
+
+The policy only widens access. Sextant never edits local accounts, passwords,
+authorized keys, or `/etc/sudoers`. Only Linux agents are eligible; Windows
+hosts use native domain policy. See [DOMAIN_JOIN.md](DOMAIN_JOIN.md).
+
 ## SSH (admin)
 
 The SSH section controls the key used by **Remote install** and discovery
@@ -91,9 +110,10 @@ onboarding over SSH.
 
 | Method | Route | Role | Notes |
 |---|---|---|---|
-| GET | `/api/system/settings` | admin | Effective server, domain, and SSH settings; secrets redacted. |
-| PATCH | `/api/system/settings` | admin | Partial `server`, `domain`, and `ssh` objects. |
+| GET | `/api/system/settings` | admin | Effective server, domain, domain login, and SSH settings; secrets redacted. |
+| PATCH | `/api/system/settings` | admin | Partial `server`, `domain`, `domain_login`, and `ssh` objects. |
 | POST | `/api/system/ldap/test` | admin | Optional unsaved `domain` object and `username`. |
 | POST | `/api/system/ssh/test` | admin | Optional unsaved `ssh` object. |
+| POST | `/api/system/domain-login/push` | admin | Queue the saved domain login policy for up to 200 Linux agents. |
 | POST | `/api/system/restart` | admin | Writes the systemd restart trigger. |
 | PATCH | `/api/me` | signed in | Local display name and email. |

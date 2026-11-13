@@ -6510,7 +6510,9 @@ function settingsTabs() {
 
 function renderSettingsTabs() {
   const admin = Boolean(state.permissions.admin);
-  const allowed = new Set(admin ? ["profile", "server", "domain", "ssh"] : ["profile"]);
+  const allowed = new Set(
+    admin ? ["profile", "server", "domain", "domain-login", "ssh"] : ["profile"],
+  );
   let active = state.settingsTab || "profile";
   if (!allowed.has(active)) active = "profile";
   state.settingsTab = active;
@@ -6599,6 +6601,7 @@ function renderSettings() {
   }
   renderServerSettings(data);
   renderDomainSettings(data);
+  renderDomainLoginSettings(data);
   renderSshSettings(data);
 }
 
@@ -6654,6 +6657,138 @@ function renderDomainSettings(data) {
       ? "The optional ldap3 dependency is installed. Directory login is live after saving; local break-glass accounts stay available."
       : "The optional ldap3 dependency is not installed. Install `sextant[ldap]` before enabling directory login.",
   );
+}
+
+function renderDomainLoginSettings(data) {
+  const form = $("domain-login-form");
+  if (!form || !data?.domain_login) return;
+  const policy = data.domain_login;
+  form.elements.ssh_login.checked = Boolean(policy.ssh_login);
+  form.elements.password_authentication.checked = Boolean(policy.password_authentication);
+  form.elements.create_home.checked = Boolean(policy.create_home);
+  form.elements.sudo_domain_admins.checked = Boolean(policy.sudo_domain_admins);
+  form.elements.short_names.checked = Boolean(policy.short_names);
+  form.elements.protected_users.value = (policy.protected_users || []).join(", ");
+  setText("domain-login-status", settingsUpdatedLabel(data));
+  renderDomainLoginAgents();
+}
+
+function renderDomainLoginAgents() {
+  const container = $("domain-login-agents");
+  if (!container) return;
+  const seen = new Set(JSON.parse(container.dataset.seen || "[]"));
+  const selected = new Set(
+    [...container.querySelectorAll("input[data-domain-agent]:checked")].map(
+      (input) => input.dataset.domainAgent,
+    ),
+  );
+  clear(container);
+  const agents = (state.dashboard?.agents || []).filter(
+    (agent) => String(agent.os || "").toLowerCase() === "linux",
+  );
+  if (!agents.length) {
+    container.append(h("p", { class: "form-hint" }, "No Linux agents are enrolled yet."));
+  }
+  for (const agent of agents) {
+    const id = `domain-agent-${agent.id}`;
+    const checked = seen.has(agent.id) ? selected.has(agent.id) : Boolean(agent.online);
+    container.append(
+      h(
+        "label",
+        { class: "checkbox-row", for: id },
+        h("input", {
+          type: "checkbox",
+          id,
+          "data-domain-agent": agent.id,
+          checked,
+        }),
+        h(
+          "span",
+          {},
+          `${agent.name || agent.hostname} · ${agent.online ? "online" : "offline"}`,
+        ),
+      ),
+    );
+  }
+  container.dataset.seen = JSON.stringify(agents.map((agent) => agent.id));
+}
+
+function domainLoginPolicyFromForm(form) {
+  const values = new FormData(form);
+  const protectedUsers = String(values.get("protected_users") || "")
+    .split(/[\s,]+/)
+    .map((name) => name.trim())
+    .filter(Boolean);
+  return {
+    ssh_login: values.has("ssh_login"),
+    password_authentication: values.has("password_authentication"),
+    create_home: values.has("create_home"),
+    sudo_domain_admins: values.has("sudo_domain_admins"),
+    short_names: values.has("short_names"),
+    protected_users: protectedUsers,
+  };
+}
+
+async function saveDomainLoginPolicy(event) {
+  event?.preventDefault?.();
+  const form = event?.target?.closest?.("form") || $("domain-login-form");
+  if (!form) return;
+  const policy = domainLoginPolicyFromForm(form);
+  setText("domain-login-error", "");
+  try {
+    state.systemSettings = await api("/api/system/settings", {
+      method: "PATCH",
+      body: { domain_login: policy },
+    });
+    renderSettings();
+    toast("Domain login policy saved.");
+  } catch (error) {
+    settingsFormError("domain-login-error", error.message);
+  }
+}
+
+async function pushDomainLoginPolicy() {
+  const container = $("domain-login-agents");
+  const agentIds = [...(container?.querySelectorAll("input[data-domain-agent]:checked") || [])].map(
+    (input) => input.dataset.domainAgent,
+  );
+  if (!agentIds.length) {
+    settingsFormError("domain-login-error", "Select at least one Linux agent to receive the policy.");
+    return;
+  }
+  const form = $("domain-login-form");
+  setText("domain-login-error", "");
+  try {
+    state.systemSettings = await api("/api/system/settings", {
+      method: "PATCH",
+      body: { domain_login: domainLoginPolicyFromForm(form) },
+    });
+    renderSettings();
+    setText("domain-login-status", "Pushing policy…");
+    const result = await api("/api/system/domain-login/push", {
+      method: "POST",
+      body: { agent_ids: agentIds },
+    });
+    const queued = result.commands?.length || 0;
+    const errors = result.errors || [];
+    setText(
+      "domain-login-status",
+      `Queued on ${queued} agent${queued === 1 ? "" : "s"}${
+        errors.length ? ` · ${errors.length} skipped` : ""
+      }.`,
+    );
+    if (errors.length) {
+      settingsFormError(
+        "domain-login-error",
+        errors.map((item) => item.detail).join(" "),
+      );
+      toast(`Queued on ${queued}; some agents were skipped.`, "warn");
+    } else {
+      toast(`Domain login policy queued on ${queued} agent${queued === 1 ? "" : "s"}.`);
+    }
+  } catch (error) {
+    settingsFormError("domain-login-error", error.message);
+  }
 }
 
 function renderSshSettings(data) {
@@ -9880,6 +10015,8 @@ function wireEvents() {
   $("user-profile-form")?.addEventListener("submit", saveUserProfile);
   $("server-settings-form")?.addEventListener("submit", saveServerSettings);
   $("domain-settings-form")?.addEventListener("submit", saveDomainSettings);
+  $("domain-login-form")?.addEventListener("submit", saveDomainLoginPolicy);
+  $("domain-login-push")?.addEventListener("click", pushDomainLoginPolicy);
   $("ssh-settings-form")?.addEventListener("submit", saveSshSettings);
   $("domain-settings-test")?.addEventListener("click", testDomainSettings);
   $("ssh-settings-test")?.addEventListener("click", testSshSettings);

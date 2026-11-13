@@ -673,8 +673,8 @@ def run_domain(
     on_chunk: ChunkCallback | None = None,
 ) -> dict[str, Any]:
     action = str(args.get("action") or "join").strip().lower()
-    if action not in {"join", "status"}:
-        return _result("failed", error="Domain action must be join or status.")
+    if action not in {"join", "status", "apply_policy"}:
+        return _result("failed", error="Domain action must be join, status, or apply_policy.")
     if action == "status":
         try:
             if sys.platform.startswith("win"):
@@ -682,6 +682,37 @@ def run_domain(
             return _run_linux_status(timeout=min(timeout, 60), max_output=max_output)
         except OSError as exc:
             return _result("failed", error=f"Could not check domain status: {exc}")
+    if action == "apply_policy":
+        if sys.platform.startswith("win"):
+            return _result(
+                "failed",
+                error="The domain login policy applies to Linux hosts only.",
+            )
+        raw_policy = args.get("policy")
+        if not isinstance(raw_policy, dict):
+            return _result("failed", error="A login policy object is required.")
+        policy: dict[str, Any] = {
+            key: (
+                raw_policy.get(key)
+                if isinstance(raw_policy.get(key), bool)
+                else default
+            )
+            for key, default in (
+                ("ssh_login", True),
+                ("password_authentication", True),
+                ("create_home", True),
+                ("sudo_domain_admins", True),
+                ("short_names", False),
+            )
+        }
+        if "protected_users" in raw_policy:
+            policy["protected_users"] = raw_policy.get("protected_users")
+        from .domain_policy import apply_login_policy
+
+        try:
+            return apply_login_policy(policy, str(args.get("domain") or ""))
+        except OSError as exc:
+            return _result("failed", error=f"Could not apply the login policy: {exc}")
 
     try:
         values, _domain = _validate(args, need_password=True)

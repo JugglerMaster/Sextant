@@ -520,6 +520,14 @@ const systemSettings = {
     key_fingerprint: "",
     public_key: "",
   },
+  domain_login: {
+    ssh_login: true,
+    password_authentication: true,
+    create_home: true,
+    sudo_domain_admins: true,
+    short_names: false,
+    protected_users: ["dadisc01"],
+  },
   meta: {
     ldap3_available: true,
     updated_at: "2026-11-06T08:00:00Z",
@@ -838,11 +846,34 @@ function createApi(session) {
           delete systemSettings.ssh.private_key;
           delete systemSettings.ssh.clear_key;
         }
+        if (body?.domain_login) {
+          Object.assign(systemSettings.domain_login, body.domain_login);
+        }
         systemSettings.meta.restart_required = body?.server
           ? ["allowed_hosts", "cookie_secure"].filter((key) => key in body.server)
           : [];
       }
       return { status: 200, body: JSON.parse(JSON.stringify(systemSettings)) };
+    }
+    if (key === "/api/system/domain-login/push" && method === "POST") {
+      return {
+        status: 200,
+        body: {
+          policy: { ...systemSettings.domain_login },
+          commands: (body?.agent_ids || []).map((id) => ({
+            agent_id: id,
+            agent: agents.find((item) => item.id === id)?.name || id,
+            command: {
+              id: "cmd_domain_policy",
+              agent_id: id,
+              kind: "domain",
+              args: { action: "apply_policy", policy: { ...systemSettings.domain_login } },
+              status: "queued",
+            },
+          })),
+          errors: [],
+        },
+      };
     }
     if (key === "/api/system/ldap/test" && method === "POST") {
       return {

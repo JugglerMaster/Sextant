@@ -2,7 +2,7 @@
 
 This document tracks work beyond the initial build and the first hardening pass. It is intentionally separate from the implementation docs so future changes can be prioritized without rewriting the deployment/security guidance.
 
-Related plans: [Discovery](DISCOVERY.md) (D1–D6 implemented; live vendor connectors unverified, ESXi fixture-only), [Docker management](DOCKER_MANAGEMENT.md) (D1–D5 implemented, Linux-only), [Notifications](NOTIFICATIONS.md) (proposed, not implemented), [Package management](PACKAGE_MANAGEMENT.md), [Package store](PACKAGE_STORE.md), [Agent self-update](SELF_UPDATE.md), [Server update](SERVER_UPDATE.md), [Agent profiles](PROFILES.md), [UI status](UI.md), and [Code review](CODE_REVIEW.md) (remediation status).
+Related plans: [Discovery](DISCOVERY.md) (D1–D6 implemented; live vendor connectors unverified, ESXi fixture-only), [Docker management](DOCKER_MANAGEMENT.md) (D1–D5 implemented, Linux-only), [Notifications](NOTIFICATIONS.md) (proposed, not implemented), [Package management](PACKAGE_MANAGEMENT.md), [Package store](PACKAGE_STORE.md), [Agent self-update](SELF_UPDATE.md), [Server update](SERVER_UPDATE.md), [Agent profiles](PROFILES.md), [Domain management](DOMAIN_MANAGEMENT.md) (proposed), [Samba AD setup](SAMBA_AD.md), [UI status](UI.md), and [Code review](CODE_REVIEW.md) (remediation status).
 
 ## Current state
 
@@ -31,14 +31,14 @@ Related plans: [Discovery](DISCOVERY.md) (D1–D6 implemented; live vendor conne
 - [x] Read-only package inventory and per-device apt/dnf/winget/choco desired-state sync (API + device Packages tab; rule editor pending).
 - [x] Server-managed agent profiles (`workstation`/`server`/custom) with installer selection, heartbeat sync, module flags, cadence, dashboard editor, admin reassignment, tag assignment, true package inventory delta, and weekly full reconciliation.
 - [x] Linux remote install over key-based SSH and Windows remote install over WinRM/HTTPS (optional pywinrm), with prerequisite checks, one-time enrollment, bounded job logs/audit, redacted credentials, SHA-256 wheel verification, and one-at-a-time jobs.
-- [x] Discovery D1–D6: default-off, audited acknowledgement, CIDR allowlist/exclude validation, neighbour/PTR/OUI/SSDP, opt-in TCP/banner/TLS fingerprinting, classification, MAC/IP/hostname merge, deduplicated change events, a cancellable background scan worker, read/write API, the Discovery page, opt-in agent-relayed VLAN scans, exposure/conflict/segment analysis, bounded CSV/JSON export, wake verification, wake-target/install/existing-agent promotion, Nmap/arp-scan/DHCP-lease/JSON imports, stdlib SNMP v2c polling, and read-only UniFi/RouterOS/OPNsense/Proxmox/ESXi adapters. Live vendor connectors remain marked unverified; ESXi is fixture-only. The Windows remote installer is implemented over WinRM/HTTPS; OpenSSH for Windows remains a future alternative.
+- [x] Discovery D1–D6: default-off, audited acknowledgement, CIDR allowlist/exclude validation, neighbour/PTR/OUI/SSDP, opt-in TCP/banner/TLS fingerprinting, classification, MAC/IP/hostname merge, deduplicated change events, a cancellable background scan worker, read/write API, the Discovery page, opt-in agent-relayed VLAN scans, exposure/conflict/segment analysis, bounded CSV/JSON export, wake verification, wake-target/install/existing-agent promotion, Nmap/arp-scan/DHCP-lease/JSON imports, stdlib SNMP v2c polling, and read-only UniFi/RouterOS/OPNsense/Proxmox/ESXi adapters. Live vendor connectors remain marked unverified; ESXi is fixture-only. The Windows remote installer is implemented over WinRM/HTTPS; OpenSSH for Windows and the AD-domain hardening path (Kerberos, JEA, vault-backed credentials, and token-logging mitigation) remain future work. See [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md).
 - [x] Package desired-state rule editor, inventory filter, heartbeat/inventory freshness labels, interactive tables, fleet filters and per-user server-side saved views, alert center with acknowledge/snooze and recurrence-aware incidents, cadence-aware stale badges, gap-aware 24h/7d detail charts with a persistent event timeline and What changed summary, batch fleet actions, Classic light/dark theme, command palette, Playwright/axe browser tests, change-driven SSE, and incremental command stdout streaming ([UI plan](UI.md)).
 - [ ] Remaining UI refinements: profile badges and a high-contrast/zoom accessibility pass.
 
 ### Explicitly deferred
 
 - [ ] **MFA / TOTP / WebAuthn** — deferred by request. Authentication remains password + session + CSRF.
-- [ ] **SSO/OIDC/SAML** — future identity-provider work; MFA would likely ship with it.
+- [ ] **SSO/OIDC/SAML** — future identity-provider work; MFA would likely ship with it. The Kerberos fast path (SPNEGO / Integrated Windows Authentication) has a working plan in [SPNEGO.md](SPNEGO.md).
 - [ ] Graphical remote desktop / screen control.
 - [ ] Persistent interactive PTY sessions.
 
@@ -298,6 +298,22 @@ Acceptance criteria:
 
 Effort: medium–large across five phases (read-only visibility, actions/cleanup
 and one-shot exec, Compose deployment, interactive console, recreate/live polish).
+
+### 18. Domain management (proposed)
+
+See [Domain management](DOMAIN_MANAGEMENT.md) and the
+[Samba AD setup guide](SAMBA_AD.md).
+
+Read-only AD/Samba AD inventory, directory-group/OU targeting, compliance
+reporting, typed Windows machine policy, software delivery by directory group,
+and optional GPO authoring through a Windows bridge. Sextant is not a domain
+controller; GPO and WSUS remain the native policy and patch layers. Samba AD is
+the free-software reference directory; Windows Server AD remains the licensed
+alternative.
+
+Phased: D1 directory inventory and group targeting, D2 compliance reporting, D3
+Windows machine policy, D4 software delivery, D5 GPO read/report and optional
+authoring, D6 Windows Update reporting.
 
 ## Suggested milestones
 

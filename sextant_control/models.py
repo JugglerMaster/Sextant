@@ -195,6 +195,10 @@ class DomainJoinIn(BaseModel):
     reboot: bool = False
 
 
+class DomainPolicyPushIn(BaseModel):
+    agent_ids: list[str] = Field(min_length=1, max_length=200)
+
+
 class RemoteInstallIn(BaseModel):
     host: str = Field(min_length=1, max_length=255)
     port: int = Field(default=22, ge=1, le=65535)

@@ -46,7 +46,7 @@ for (const theme of THEMES) {
     await scan(page, `updates ${theme} desktop`);
   });
 
-  test(`Settings profile, server, domain, and SSH tabs render in the ${theme} theme`, async ({ page }) => {
+  test(`Settings profile, server, domain, domain login, and SSH tabs render in the ${theme} theme`, async ({ page }) => {
     await login(page, { theme });
     await page.locator('.nav-item[data-page="settings"]').click();
     await expect(page.locator("#page-settings")).toBeVisible();
@@ -81,6 +81,21 @@ for (const theme of THEMES) {
     await expect(page.locator("#domain-test-result")).toContainText("Directory test succeeded");
     await domainForm.getByRole("button", { name: "Save domain settings" }).click();
     await expect(page.locator("#toast-region")).toContainText("Domain settings saved");
+
+    await page.locator('[data-settings-tab="domain-login"]').click();
+    const domainLoginForm = page.locator("#domain-login-form");
+    await expect(domainLoginForm).toBeVisible();
+    await domainLoginForm.locator('input[name="protected_users"]').fill("dadisc01");
+    await domainLoginForm.locator('input[name="password_authentication"]').check();
+    await expect(domainLoginForm.locator('input[name="password_authentication"]')).toBeChecked();
+    await expect(page.locator("#domain-login-agents")).toContainText("Build Server");
+    await expect(page.locator("#domain-login-agents")).toContainText("Lab Laptop");
+    await domainLoginForm.locator('input[name="password_authentication"]').uncheck();
+    await domainLoginForm.locator('input[name="short_names"]').check();
+    await domainLoginForm.getByRole("button", { name: "Save policy" }).click();
+    await expect(page.locator("#toast-region")).toContainText("Domain login policy saved");
+    await page.locator("#domain-login-push").click();
+    await expect(page.locator("#domain-login-status")).toContainText("Queued on 1 agent");
 
     await page.locator('[data-settings-tab="ssh"]').click();
     const sshForm = page.locator("#ssh-settings-form");

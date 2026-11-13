@@ -4,6 +4,8 @@ Sextant can authenticate users against Active Directory, Samba AD, or another LD
 
 Local accounts remain available. This is deliberate: if the directory is unavailable, a break-glass local admin can still sign in.
 
+For a complete Samba AD DC setup (DNS, Kerberos, LDAPS, Windows domain join, and GPO), see [SAMBA_AD.md](SAMBA_AD.md). For silent Kerberos sign-in (SPNEGO / Integrated Windows Authentication), see the [SPNEGO plan](SPNEGO.md). For the planned Sextant domain-management layer (directory inventory, group targeting, policy, and compliance), see [DOMAIN_MANAGEMENT.md](DOMAIN_MANAGEMENT.md).
+
 Install the optional LDAP dependency before enabling directory login:
 
 ```bash
@@ -157,7 +159,7 @@ sudo journalctl -u sextant -n 100 --no-pager
 
 ## Limits
 
-- Direct `memberOf` only; nested groups are not expanded.
+- Direct `memberOf` only in the authentication path; nested groups are not expanded. The planned directory inventory may expand nested groups for policy and package targeting.
 - Exactly one search result is required.
 - No LDAP referral chasing beyond ldap3 defaults.
 - No StartTLS support; use LDAPS (`use_ssl`) for encrypted directory traffic.

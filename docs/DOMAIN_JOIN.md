@@ -66,11 +66,44 @@ manager. Unsupported distributions return a clear error.
 - The domain user must be allowed to join computers, not necessarily a Domain
   Admin.
 
+## Domain login policy
+
+After a host is joined, administrators can save a fleet-wide login policy under
+**Settings → Domain login** and push it to selected Linux agents. Each agent
+verifies that it is joined before changing anything, then:
+
+- writes a managed SSH block: a drop-in under `sshd_config.d` when the host
+  already includes that directory, otherwise a marked block in
+  `/etc/ssh/sshd_config` before any `Match` section. It sets `UsePAM yes` and
+  the chosen password/keyboard-interactive behavior;
+- comments out existing `AllowUsers`/`AllowGroups` restrictions (with backups),
+  because those block `user@domain` logins;
+- adds `pam_mkhomedir.so` to the session stack so directory users get a home
+  directory on first login;
+- writes `/etc/sudoers.d/90-sextant-domain` granting the domain admin group
+  sudo, and validates the full sudoers tree with `visudo -c`;
+- optionally sets SSSD `use_fully_qualified_names = False` for short names and
+  restarts SSSD.
+
+The policy only widens access. It never edits local accounts, passwords,
+authorized keys, or `/etc/sudoers`.
+
+### Local-access safeguard
+
+The policy includes a **Protected local users** list (default `dadisc01`). The
+agent records whether each existing protected account has sudo and whether it
+is permitted by the effective SSH configuration before applying anything. After
+validation it checks again. If a protected user would lose sudo or SSH access,
+the managed SSH/sudoers change is rolled back and the command fails with the
+reason. `sshd -t` is run before and after editing, and an invalid pre-existing
+configuration causes the policy to stop without touching the host.
+
 ## API
 
 | Method | Route | Role | Notes |
 |---|---|---|---|
 | POST | `/api/agents/{id}/domain/join` | admin | Queues the join with a write-only password. |
 | POST | `/api/agents/{id}/domain/status` | admin | Queues a read-only status check. |
+| POST | `/api/system/domain-login/push` | admin | Queues the saved login policy for selected Linux agents. |
 
 The resulting command is visible through the normal command API and log view.

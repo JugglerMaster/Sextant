@@ -183,6 +183,279 @@ Known limitations of this implementation:
   re-entering it.
 - OpenSSH for Windows is not implemented.
 
+## Domain deployment plan (AD-joined Windows fleet)
+
+**Status:** plan, not implemented. The current WinRM installer is usable per-host
+with an admin credential. This section describes how to make Windows machine
+targeting repeatable across an Active Directory domain.
+
+### When to use this plan
+
+Use the **manual elevated PowerShell command** or the per-host WinRM installer
+when you have only a handful of Windows machines, especially 2–3 machines or
+one-off rebuilds. At that scale, manual installation is easier and has a smaller
+security surface.
+
+Use the domain plan when one or more of these is true:
+
+- more than roughly 10 Windows targets, or recurring rebuilds;
+- multiple OUs, VLANs, or sites;
+- a central PKI and GPO/Intune management already exist;
+- the same installer identity and audit policy must be applied consistently;
+- operators should not know or type a domain administrator password per job.
+
+Do not deploy the domain plan just to avoid walking to three PCs. A
+short-lived manual command from Discovery is usually the better tradeoff there.
+
+### Target architecture
+
+```text
+                    AD CS / Intune PKI
+                           │ autoenrollment
+                           ▼
+  Sextant server ──HTTPS 5986──► Windows target (WinRM HTTPS listener)
+       │                              │
+       │                              ├─ certificate: Client/Server Auth
+       │                              ├─ firewall: Sextant server only
+       │                              └─ Python 3.11+ + agent wheel
+       │
+       └─ dedicated least-privilege identity / Kerberos or NTLM over HTTPS
+```
+
+Recommended model:
+
+- Sextant runs on Linux and is **not** a domain member. It trusts the issuing CA
+  and reaches target FQDNs over WinRM HTTPS.
+- Targets get a WinRM HTTPS certificate automatically from AD CS (or Intune
+  SCEP/PKCS) with a DNS SAN matching the computer FQDN.
+- A GPO (or Intune configuration profile) enables WinRM HTTPS, restricts the
+  firewall to the Sextant server, and deploys Python.
+- A dedicated AD group and least-privilege account/gMSA is used for installs.
+  Do not use Domain Admin.
+- Prefer Kerberos over NTLM. The current implementation uses NTLM through
+  pywinrm; Kerberos support is a code enhancement described below.
+- No SMB, PsExec, WMI process creation, or impacket path is used.
+
+### Phase 0 — inventory and scope
+
+- List target OUs, hostnames/FQDNs, IP ranges, VLANs, and who owns them.
+- Confirm the Sextant server can reach TCP 5986 on every target segment.
+- Confirm DNS A/AAAA records and reverse DNS are correct. Prefer FQDNs over IP
+  addresses for certificate SANs and WinRM targets.
+- Confirm time synchronization (NTP/AD) on the server and targets. Kerberos
+  requires clocks within five minutes; NTLM does not, but correct time matters
+  for token expiry and audit.
+- Decide whether Python will be pre-installed by GPO/Intune/SCCM or baked into
+  the base image. The current installer does not download Python.
+- Decide the install identity: dedicated AD user, gMSA with Kerberos keytab, or a
+  short-lived credential from an external vault.
+
+### Phase 1 — PKI and certificates
+
+- Create or reuse an internal CA and a certificate template for WinRM:
+  - Server Authentication EKU (`1.3.6.1.5.5.7.3.1`);
+  - subject/SAN containing the target’s DNS name;
+  - autoenrollment for the target computer accounts;
+  - key usage appropriate for TLS server authentication.
+- Publish the root/intermediate CA to the Sextant server trust store, or set
+  `SEXTANT_WINDOWS_INSTALL_CA_FILE` if the installed pywinrm build supports
+  `ca_trust_path`.
+- Do not use a self-signed certificate for a domain rollout unless the
+  certificate is explicitly distributed and trusted. Never disable certificate
+  validation.
+- Decide whether IP SANs are needed for statically addressed hosts. FQDN SANs are
+  preferable.
+
+### Phase 2 — WinRM HTTPS and firewall via GPO/Intune
+
+Apply a computer-targeted policy to the Windows install OU/group:
+
+1. Set the WinRM service startup type to Automatic.
+2. Enable WinRM and create an HTTPS listener on TCP 5986 using the
+   autoenrolled certificate.
+3. Disable the HTTP listener if it is not required.
+4. Leave `AllowUnencrypted` disabled and Basic authentication disabled unless a
+   documented, reviewed exception exists.
+5. Restrict inbound TCP 5986 to the Sextant server IP(s) or a dedicated
+   management subnet. Do not open 5986 to the whole LAN.
+6. Keep the Windows Firewall enabled on all profiles; allow 5986 only on the
+   domain/management profile as appropriate.
+
+Typical target-side listener command, for a pilot or a reviewed startup task:
+
+```powershell
+$fqdn = "$env:COMPUTERNAME.$env:USERDNSDOMAIN"
+$cert = Get-ChildItem Cert:\LocalMachine\My |
+  Where-Object {
+    $_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.1' -and
+    $_.Subject -match [regex]::Escape($env:COMPUTERNAME)
+  } |
+  Select-Object -First 1
+if (-not $cert) { throw 'No WinRM server certificate found.' }
+
+winrm create winrm/config/Listener?Address=*+Transport=HTTPS `
+  "@{Hostname=`"$fqdn`"; CertificateThumbprint=`"$($cert.Thumbprint)`"}"
+
+New-NetFirewallRule `
+  -DisplayName 'Sextant WinRM HTTPS' `
+  -Direction Inbound `
+  -Protocol TCP `
+  -LocalPort 5986 `
+  -RemoteAddress '<SEXTANT_SERVER_IP>' `
+  -Action Allow
+```
+
+For a production GPO, prefer the equivalent Windows Firewall and certificate
+autoenrollment settings over embedding one server IP in every machine’s startup
+script. Use a group-scoped firewall rule so the allowlist is manageable.
+
+### Phase 3 — identity, RBAC, and least privilege
+
+- Create an AD security group such as `Sextant-Windows-Installers`.
+- Create a dedicated install identity, for example
+  `svc-sextant-winrm@corp.example.com`. Do not use Domain Admin or a personal
+  account.
+- Grant that identity only the rights needed to connect to WinRM and install the
+  agent on the target OU/group.
+- Add the group to local Administrators on the install OU, or, preferably, use a
+  JEA endpoint that allows only the reviewed installer command and its fixed
+  parameters.
+- Restrict WinRM `AllowedGroups` to the Sextant install group.
+- Rotate the credential on a schedule and store it in a vault or password
+  manager, not in the repository, environment file, or SQLite.
+- If using a gMSA:
+  - Kerberos is required;
+  - the Sextant server needs a keytab and a working Kerberos configuration;
+  - the current NTLM-only client path must be extended before this is usable.
+
+Current Sextant limitation: the Windows job UI prompts for a password per job.
+For a domain, that is operationally awkward and encourages shared credentials.
+The recommended next step is a credential-vault/Kerberos integration rather than
+putting a domain password in a config file.
+
+### Phase 4 — Python and agent runtime on targets
+
+- Pre-install Python 3.11+ through Intune, SCCM, GPO startup scripts, or the base
+  image. Confirm `py -3 --version` or `python --version` succeeds for the
+  SYSTEM/admin context used by WinRM.
+- Publish the signed `sextant-agent` wheel in the Sextant package store.
+- Keep the agent installation under `C:\ProgramData\SextantAgent` with the config
+  ACL restricted to SYSTEM and Administrators, as the installer already does.
+- Confirm outbound HTTPS from the target to the Sextant console, including any
+  proxy and certificate-trust requirements.
+- Keep the scheduled task running as SYSTEM. The agent itself remains
+  outbound-only after installation.
+
+### Phase 5 — Sextant server configuration
+
+- Install the optional WinRM client:
+  ```bash
+  /opt/sextant/.venv/bin/pip install 'sextant[windows-remote]'
+  ```
+- Set:
+  - `SEXTANT_WINDOWS_INSTALL_ENABLED=1`;
+  - `SEXTANT_WINDOWS_INSTALL_TIMEOUT_SECONDS` to a sensible bounded value;
+  - `SEXTANT_WINDOWS_INSTALL_CA_FILE` if supported, otherwise install the CA in
+    the server trust store.
+- Ensure the server can resolve target FQDNs and route to 5986 across VLANs.
+- Store the install identity’s credential in a vault, not in `sextant.env`.
+- Decide whether the Sextant server’s own outbound access should be restricted to
+  the management VLAN and package store/CDN endpoints.
+- Monitor the Sextant audit log for `remote_install.created`, `.tested`,
+  `.failed`, and `.completed`; monitor target WinRM operational logs for failed
+  authentication.
+
+### Phase 6 — rollout rings
+
+1. **Lab:** one Windows VM, non-production OU. Verify certificate issuance,
+   listener, firewall, Python, install, first heartbeat, rollback.
+2. **Pilot:** 3–5 machines in one OU. Verify the dedicated identity, logging,
+   token expiry, and failure behavior.
+3. **Wave 1:** one department or site.
+4. **Broad rollout:** remaining OUs, with a documented pause/rollback point.
+
+Do not start with Domain Admin credentials on every target. Fix permission and
+PKI issues in the lab first.
+
+### Phase 7 — validation checklist
+
+- [ ] `Test-NetConnection <fqdn> -Port 5986` succeeds from the Sextant server.
+- [ ] The certificate chain validates and the DNS SAN matches the target FQDN.
+- [ ] WinRM HTTPS listener is present; HTTP listener is absent or intentionally
+      restricted.
+- [ ] Firewall allows 5986 only from the Sextant server/subnet.
+- [ ] `py -3 --version` or `python --version` returns 3.11+ in the WinRM context.
+- [ ] The install identity is not a Domain Admin.
+- [ ] The agent wheel is published and its SHA-256 matches.
+- [ ] A failed password, missing Python, and blocked firewall each produce a
+      clear failure, not a false success.
+- [ ] The agent appears online and sends a heartbeat.
+- [ ] The job succeeds only after that heartbeat.
+- [ ] The audit log contains no password or token.
+- [ ] The target’s PowerShell script-block/transcription logging has been
+      reviewed for token exposure.
+- [ ] Rollback disables the scheduled task and revokes the enrollment token.
+
+### Phase 8 — rollback
+
+- Disable/stop the `SextantAgent` scheduled task.
+- Revoke the one-time enrollment token from the Enrollment page.
+- Remove the agent config and install directory only after confirming the job
+  created them.
+- Remove the WinRM HTTPS listener/firewall rule only if the machine is being
+  decommissioned from Sextant management.
+- Audit the rollback and record the reason.
+
+### Security decisions for a domain rollout
+
+- **Kerberos vs NTLM:** Kerberos is the preferred domain authentication model.
+  The current implementation uses NTLM over HTTPS. NTLM over HTTPS is encrypted
+  and certificate-validated, but it carries more relay/credential-handling risk.
+  Add Kerberos support before a large domain rollout if your security policy
+  requires it.
+- **JEA:** A constrained JEA endpoint is preferable to full local Administrator
+  for the install identity. It should allow only the reviewed installer with
+  fixed parameters and no arbitrary command execution.
+- **PowerShell logging:** the current installer passes the one-time enrollment
+  token in the remote PowerShell script. If Script Block Logging or transcription
+  is enabled, the token may be captured on the target. Before broad rollout:
+  optionally deliver the token through a short-lived restricted channel, keep
+  token TTL very short, revoke it immediately after use, and document the
+  residual logging risk. Do not treat this as solved merely because the server
+  redacts its own logs.
+- **Privilege:** use a dedicated group added to local Administrators only on the
+  target OU, or JEA. Never Domain Admin.
+- **Network:** 5986 only from Sextant. No broad SMB/PsExec path.
+- **Secrets:** vault or Kerberos keytab; never a repository file, environment
+  example, or SQLite row.
+
+### Required code enhancements before a domain rollout
+
+These are not implemented yet:
+
+1. Selectable WinRM authentication transport (`ntlm` today; Kerberos next).
+2. Optional JEA configuration name / endpoint allowlisting.
+3. A credential-vault or Kerberos keytab integration so operators do not type a
+   domain password per job.
+4. A token-delivery design that avoids script-block/transcription exposure, or a
+   documented, reviewed compensating control.
+5. Optional bulk/OU-scoped job orchestration with per-host results and bounded
+   concurrency.
+6. Domain-aware target selection from Discovery (FQDN, OU, and segment).
+
+### Decision matrix
+
+| Situation | Recommended path |
+|---|---|
+| 1–3 Windows machines, one-off | Manual elevated PowerShell command from Discovery |
+| 3–10 machines, occasional rebuilds | Per-host WinRM installer with a dedicated credential |
+| 10+ machines, recurring rebuilds | Domain plan with PKI, GPO/Intune, dedicated identity |
+| Strong Kerberos-only policy | Implement Kerberos transport first; do not use NTLM broadly |
+| No WinRM allowed | Manual install or pre-baked image; do not enable SMB/PsExec |
+| Existing Intune/SCCM | Deploy Python and the agent package through those tools; use Sextant for management and audit |
+
+---
+
 ## Credential handling
 
 - Credentials are accepted only in a dedicated install-job request, never in a
@@ -311,19 +584,16 @@ installer is a narrow, reviewed workflow, not a remote shell.
 
 ## Suggested rollout
 
-1. **Plan and threat model** (this document).
-2. **Manual Windows command** in Discovery (implemented today): generate the
-   elevated PowerShell command and document prerequisites. No credentials cross
-   the server.
-3. **WinRM/OpenSSH transport adapter** behind one explicit setting, with a fake
-   transport and isolated tests.
-4. **Job UI and audit** on the Remote install page, reusing the existing Linux
-   job patterns.
-5. **Operational validation** on a Windows test VM: certificate failure,
-   wrong password, missing Python, firewall block, successful install, first
-   heartbeat, rollback, and token expiry.
+1. **Per-host WinRM** (implemented): one Windows job at a time, with fake
+   transport/CI coverage and live validation on a test VM.
+2. **Manual elevated PowerShell** in Discovery (implemented): useful when WinRM is
+   not enabled or only a few machines need installation.
+3. **Domain pilot** (plan): PKI, GPO/Intune, dedicated group, one pilot OU.
+4. **Domain hardening** (future code): Kerberos transport, JEA endpoint,
+   credential-vault integration, and token-logging mitigation.
+5. **Broad rollout**: staged OU/site waves with rollback checkpoints.
 
-## Acceptance criteria for the future implementation
+## Acceptance criteria for the implemented per-host path
 
 - No credential is persisted or written to any log/audit/response field.
 - HTTP or unvalidated TLS is refused for WinRM unless an explicit lab setting is
@@ -331,9 +601,23 @@ installer is a narrow, reviewed workflow, not a remote shell.
 - The target must be in an allowlisted private network.
 - The uploaded wheel is SHA-256/size verified.
 - A successful job requires an authenticated agent heartbeat.
-- The install token is single-use, expires, is revocable, and is never logged.
+- The install token is single-use, expires, is revocable, and is never logged by
+  Sextant.
 - A failed job leaves a clear, bounded error and does not claim success.
 - SMB, PsExec, WMI process creation, and impacket are not used.
+
+## Acceptance criteria for a future domain rollout
+
+- Kerberos is available where policy requires it; NTLM over HTTPS is not the only
+  option.
+- The install identity is dedicated, non-Domain-Admin, and scoped to the target
+  OU/group.
+- WinRM HTTPS is issued by a trusted PKI and restricted to the Sextant
+  server/subnet.
+- Script-block/transcription logging cannot expose the enrollment token, or a
+  documented compensating control is approved.
+- Bulk jobs are bounded, audited per host, and never widen the target allowlist.
+- Rollback/revocation is tested and audited.
 
 ---
 

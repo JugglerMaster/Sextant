@@ -639,6 +639,14 @@ const systemSettings = {
     key_fingerprint: "",
     public_key: "",
   },
+  domain_login: {
+    ssh_login: true,
+    password_authentication: true,
+    create_home: true,
+    sudo_domain_admins: true,
+    short_names: false,
+    protected_users: ["dadisc01"],
+  },
   meta: {
     ldap3_available: true,
     updated_at: "2026-11-06T08:00:00Z",
@@ -984,10 +992,32 @@ window.fetch = async (path, options = {}) => {
       delete systemSettings.ssh.private_key;
       delete systemSettings.ssh.clear_key;
     }
+    if (body?.domain_login) {
+      Object.assign(systemSettings.domain_login, body.domain_login);
+    }
     systemSettings.meta.restart_required = body?.server
       ? ["allowed_hosts", "cookie_secure"].filter((key) => key in body.server)
       : [];
     response = { status: 200, body: JSON.parse(JSON.stringify(systemSettings)) };
+  } else if (method === "POST" && key === "/api/system/domain-login/push") {
+    response = {
+      status: 200,
+      body: {
+        policy: { ...systemSettings.domain_login },
+        commands: (body?.agent_ids || []).map((id) => ({
+          agent_id: id,
+          agent: "Lab Server",
+          command: {
+            id: "cmd_domain_policy",
+            agent_id: id,
+            kind: "domain",
+            args: { action: "apply_policy", policy: { ...systemSettings.domain_login } },
+            status: "queued",
+          },
+        })),
+        errors: [],
+      },
+    };
   } else if (method === "POST" && key === "/api/system/ldap/test") {
     response = {
       status: 200,
@@ -3080,7 +3110,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   window.document.querySelector('[data-page="settings"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(120);
   if (window.document.getElementById("page-settings").hidden) throw new Error("Settings page did not open");
-  for (const tab of ["profile", "server", "domain", "ssh"]) {
+  for (const tab of ["profile", "server", "domain", "domain-login", "ssh"]) {
     const button = window.document.querySelector(`[data-settings-tab="${tab}"]`);
     if (!button || button.hidden) throw new Error(`Settings tab ${tab} is missing for an admin`);
   }
@@ -3148,6 +3178,46 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (domainForm.elements.bind_password.placeholder !== "configured — leave blank to keep") {
     throw new Error("Saved bind password state was not shown");
   }
+
+  const linuxAgent = { ...agent, id: "agt_linux", name: "Lab Server", os: "linux", online: true };
+  liveSource.emit("dashboard", {
+    ...dashboardBody,
+    stats: { ...dashboardBody.stats, total: 2, online: 2 },
+    agents: [agent, linuxAgent],
+  });
+  await sleep(60);
+  window.document.querySelector('[data-settings-tab="domain-login"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  const domainLoginForm = window.document.getElementById("domain-login-form");
+  if (!domainLoginForm.elements.ssh_login.checked) {
+    throw new Error("Domain login policy defaults did not render");
+  }
+  if (!window.document.getElementById("domain-login-agents").textContent.includes("Lab Server")) {
+    throw new Error("Linux domain login targets did not render");
+  }
+  domainLoginForm.elements.password_authentication.checked = false;
+  domainLoginForm.elements.short_names.checked = true;
+  domainLoginForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(120);
+  const domainLoginPatch = window.__requests.find(
+    (request) => request.method === "PATCH" && request.path === "/api/system/settings" && request.body.domain_login,
+  );
+  if (!domainLoginPatch || domainLoginPatch.body.domain_login.short_names !== true) {
+    throw new Error("Domain login policy update was not sent");
+  }
+  window.document.getElementById("domain-login-push").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(140);
+  const domainLoginPush = window.__requests.find(
+    (request) => request.method === "POST" && request.path === "/api/system/domain-login/push",
+  );
+  if (!domainLoginPush || !domainLoginPush.body.agent_ids.includes("agt_linux")) {
+    throw new Error("Domain login policy push was not sent");
+  }
+  if (!window.document.getElementById("domain-login-status").textContent.includes("Queued on 1 agent")) {
+    throw new Error("Domain login policy push result did not render");
+  }
+  liveSource.emit("dashboard", dashboardBody);
+  await sleep(60);
 
   window.document.querySelector('[data-settings-tab="ssh"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(60);

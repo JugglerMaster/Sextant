@@ -808,8 +808,9 @@ The token is returned **only in this response** and is stored only as a SHA-256
 hash. It is not returned by the enrollment-token list, audit log, events, or
 subsequent device reads. The install command is prefilled with the discovered
 name and address. Windows returns a manual elevated PowerShell command with a
-link to [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md); remote Windows
-install is not implemented.
+link to [WINDOWS_REMOTE_INSTALL.md](WINDOWS_REMOTE_INSTALL.md); the separate
+credential-based Windows remote install over WinRM is available from the
+**Remote install** page.
 
 ### Wake verification
 

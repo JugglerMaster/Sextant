@@ -116,3 +116,81 @@ def test_domain_join_requires_admin_and_valid_domain(tmp_path):
         assert status.status_code == 200, status.text
         assert status.json()["command"]["kind"] == "domain"
         assert status.json()["command"]["args"]["action"] == "status"
+
+
+def test_domain_login_policy_saves_and_pushes_to_linux_agents(tmp_path):
+    app = create_app(_settings(tmp_path))
+    database = app.state.db
+    with TestClient(app) as client:
+        admin = login(client)
+        agent = enroll_agent(admin, hostname="linux-box")
+        initial = client.get("/api/system/settings", headers=headers(admin))
+        assert initial.status_code == 200, initial.text
+        assert initial.json()["domain_login"] == {
+            "ssh_login": True,
+            "password_authentication": True,
+            "create_home": True,
+            "sudo_domain_admins": True,
+            "short_names": False,
+            "protected_users": ["dadisc01"],
+        }
+
+        saved = client.patch(
+            "/api/system/settings",
+            json={
+                "domain_login": {
+                    "ssh_login": True,
+                    "password_authentication": False,
+                    "create_home": True,
+                    "sudo_domain_admins": False,
+                    "short_names": True,
+                    "protected_users": ["dadisc01", "pi"],
+                }
+            },
+            headers=headers(admin),
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["domain_login"]["password_authentication"] is False
+        assert saved.json()["domain_login"]["short_names"] is True
+        assert saved.json()["domain_login"]["protected_users"] == ["dadisc01", "pi"]
+
+        pushed = client.post(
+            "/api/system/domain-login/push",
+            json={"agent_ids": [agent["agent_id"], "agt_missing"]},
+            headers=headers(admin),
+        )
+        assert pushed.status_code == 200, pushed.text
+        body = pushed.json()
+        assert len(body["commands"]) == 1
+        assert body["errors"] == [
+            {"agent_id": "agt_missing", "detail": "Agent not found."}
+        ]
+        command = body["commands"][0]["command"]
+        assert command["kind"] == "domain"
+        assert command["args"]["action"] == "apply_policy"
+        assert command["args"]["policy"] == {
+            "ssh_login": True,
+            "password_authentication": False,
+            "create_home": True,
+            "sudo_domain_admins": False,
+            "short_names": True,
+            "protected_users": ["dadisc01", "pi"],
+        }
+        with database.connection() as conn:
+            stored = conn.execute(
+                "SELECT args FROM commands WHERE id = ?", (command["id"],)
+            ).fetchone()
+        assert "apply_policy" in stored["args"]
+
+        database.create_user(
+            "dompolicyop",
+            role="operator",
+            password_hash=hash_password("operator-password-123"),
+        )
+        operator = login(client, username="dompolicyop", password="operator-password-123")
+        denied = client.post(
+            "/api/system/domain-login/push",
+            json={"agent_ids": [agent["agent_id"]]},
+            headers=headers(operator),
+        )
+        assert denied.status_code == 403
