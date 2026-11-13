@@ -487,6 +487,21 @@ def _discovery_install_command(
     )
 
 
+def _enrollment_install_commands(base_url: str, token: str) -> dict[str, str]:
+    """Build OS-specific installer commands with the one-time token embedded."""
+    return {
+        "linux": (
+            "sudo ./deploy/install-linux-agent.sh "
+            f"{shlex.quote(base_url)} {shlex.quote(token)} \"$(hostname)\""
+        ),
+        "windows": (
+            ".\\deploy\\install-windows-agent.ps1 "
+            f"-Server {_powershell_quote(base_url)} -Token {_powershell_quote(token)} "
+            "-Name $env:COMPUTERNAME"
+        ),
+    }
+
+
 def _session_cookie(response: Response, settings: Settings, payload: dict[str, Any]) -> None:
     response.set_cookie(
         key=settings.cookie_name,
@@ -4421,6 +4436,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "label": payload.label,
             "expires_at": expires.isoformat(timespec="seconds").replace("+00:00", "Z"),
             "install_command": f"sextant-agent enroll --server {base} --token {token}",
+            "install_commands": _enrollment_install_commands(base, token),
         }
 
     @app.get("/api/enrollment-tokens")

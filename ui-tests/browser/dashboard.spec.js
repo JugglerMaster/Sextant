@@ -115,6 +115,31 @@ for (const theme of THEMES) {
     await scan(page, `settings ${theme} desktop`);
   });
 
+  test(`Enrollment shows Linux and Windows install commands in the ${theme} theme`, async ({ page }) => {
+    await login(page, { theme });
+    await page.locator('.nav-item[data-page="enroll"]').click();
+    await expect(page.locator("#page-enroll")).toBeVisible();
+    await expect(page.locator("#enrollment-install-hint")).toContainText("insert enrollment code here");
+    await expect(page.locator("#enrollment-linux-command")).toContainText("install-linux-agent.sh");
+    await expect(page.locator("#enrollment-linux-command")).toContainText("insert enrollment code here");
+    await expect(page.locator("#enrollment-windows-command")).toContainText("install-windows-agent.ps1");
+    await expect(page.locator("#enrollment-windows-command")).toContainText("insert enrollment code here");
+
+    await page.locator('#enrollment-form input[name="label"]').fill("Playwright token");
+    await page.locator("#enrollment-form").getByRole("button", { name: "Generate token" }).click();
+    const code = (await page.locator("#enrollment-token").textContent()).trim();
+    expect(code).toMatch(/^sextant_enroll_/);
+    await expect(page.locator("#enrollment-install-hint")).toContainText(code);
+    await expect(page.locator("#enrollment-linux-command")).toContainText(code);
+    await expect(page.locator("#enrollment-windows-command")).toContainText(code);
+    await expect(page.locator("#enrollment-linux-command")).not.toContainText("insert enrollment code here");
+    await expect(page.locator("#enrollment-windows-command")).not.toContainText("insert enrollment code here");
+    await expect(page.locator("#enrollment-list")).toContainText("Playwright token");
+
+    await screenshot(page, `enrollment-${theme}-desktop`, { fullPage: true });
+    await scan(page, `enrollment ${theme} desktop`);
+  });
+
   test(`Agent domain join dialog renders in the ${theme} theme`, async ({ page }) => {
     await login(page, { theme });
     await openDrawer(page, "Studio PC");

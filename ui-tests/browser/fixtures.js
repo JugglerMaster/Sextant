@@ -476,6 +476,7 @@ function loginPayload() {
   };
 }
 
+const enrollmentTokens = [];
 const systemSettings = {
   server: {
     public_url: "",
@@ -820,6 +821,37 @@ function createApi(session) {
       return session.authenticated
         ? { status: 200, body: loginPayload() }
         : { status: 401, body: { detail: "Authentication required." } };
+    }
+    if (key === "/api/enrollment-tokens") {
+      if (method === "POST") {
+        const token = "sextant_enroll_playwright_code";
+        const entry = {
+          id: `enr_${enrollmentTokens.length + 1}`,
+          label: String(body?.label || ""),
+          created_by: "admin",
+          created_at: "2026-11-13T08:00:00Z",
+          expires_at: "2026-11-13T08:30:00Z",
+          used_at: null,
+          used_by_agent: null,
+          state: "active",
+        };
+        enrollmentTokens.unshift(entry);
+        return {
+          status: 200,
+          body: {
+            id: entry.id,
+            token,
+            label: entry.label,
+            expires_at: entry.expires_at,
+            install_command: `sextant-agent enroll --server http://localhost:8080 --token ${token}`,
+            install_commands: {
+              linux: `sudo ./deploy/install-linux-agent.sh 'http://localhost:8080' '${token}' "$(hostname)"`,
+              windows: `.\\deploy\\install-windows-agent.ps1 -Server 'http://localhost:8080' -Token '${token}' -Name $env:COMPUTERNAME`,
+            },
+          },
+        };
+      }
+      return { status: 200, body: { tokens: enrollmentTokens.map((item) => ({ ...item })) } };
     }
     if (key === "/api/system/settings") {
       if (method === "PATCH") {

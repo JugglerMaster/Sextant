@@ -683,6 +683,7 @@ function enterApp(me) {
   $("app-view").hidden = false;
   updateChrome();
   applyPermissions();
+  renderEnrollmentInstallCommands();
   navigate("overview", false);
   loadDashboard();
   loadProfiles(true);
@@ -3766,6 +3767,56 @@ async function deleteWakeTarget(target) {
   } catch (error) {
     toast(error.message, "error");
   }
+}
+
+function enrollmentServerUrl() {
+  const raw = String(state.settings?.public_url || window.location.origin || "").trim();
+  return raw.replace(/\/+$/, "");
+}
+
+function shellSingleQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+function powershellSingleQuote(value) {
+  return "'" + String(value).replace(/'/g, "''") + "'";
+}
+
+function enrollmentInstallCommands(token = "") {
+  const server = enrollmentServerUrl();
+  const code = token || "insert enrollment code here";
+  return {
+    linux: `sudo ./deploy/install-linux-agent.sh ${shellSingleQuote(server)} ${shellSingleQuote(code)} "$(hostname)"`,
+    windows: `.\\deploy\\install-windows-agent.ps1 -Server ${powershellSingleQuote(server)} -Token ${powershellSingleQuote(code)} -Name $env:COMPUTERNAME`,
+  };
+}
+
+function renderEnrollmentInstallCommands(token = "", commands = null) {
+  const resolved = commands || enrollmentInstallCommands(token);
+  setText("enrollment-linux-command", resolved.linux || "");
+  setText("enrollment-windows-command", resolved.windows || "");
+  const hint = $("enrollment-install-hint");
+  if (!hint) return;
+  clear(hint);
+  if (!token) {
+    hint.append(
+      "Generate a token above to replace ",
+      h("code", {}, "insert enrollment code here"),
+      " with the enrollment code in both commands. The code is shown only once.",
+    );
+    return;
+  }
+  hint.append(
+    "Enrollment code ",
+    h("code", {}, token),
+    " is inserted into both commands below. It is shown only once, so copy it now.",
+  );
+}
+
+async function copyEnrollmentValue(elementId, label) {
+  const value = $(elementId)?.textContent || "";
+  if (await copyText(value)) toast(`${label} copied.`);
+  else toast("Could not copy. Select the text manually.", "warn");
 }
 
 async function loadEnrollmentTokens() {
@@ -9944,8 +9995,7 @@ function wireEvents() {
       });
       $("enrollment-result").hidden = false;
       setText("enrollment-token", data.token);
-      setText("enrollment-command", data.install_command);
-      $("enrollment-result").dataset.command = data.install_command;
+      renderEnrollmentInstallCommands(data.token, data.install_commands);
       loadEnrollmentTokens();
       toast("Enrollment token created. Copy it now.");
     } catch (error) {
@@ -9953,11 +10003,17 @@ function wireEvents() {
     }
   });
 
-  $("copy-enrollment").addEventListener("click", async () => {
-    const command = $("enrollment-result").dataset.command || "";
-    if (await copyText(command)) toast("Install command copied.");
-    else toast("Could not copy. Select the text manually.", "warn");
-  });
+  $("copy-enrollment-token").addEventListener("click", () =>
+    copyEnrollmentValue("enrollment-token", "Enrollment code"),
+  );
+
+  $("copy-enrollment-linux").addEventListener("click", () =>
+    copyEnrollmentValue("enrollment-linux-command", "Linux install command"),
+  );
+
+  $("copy-enrollment-windows").addEventListener("click", () =>
+    copyEnrollmentValue("enrollment-windows-command", "Windows install command"),
+  );
 
   $("audit-refresh").addEventListener("click", loadAudit);
 

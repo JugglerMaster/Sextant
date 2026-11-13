@@ -462,6 +462,7 @@ const discoverySummary = {
 };
 let remoteInstallJob = null;
 let domainCommand = null;
+const enrollmentTokens = [];
 const discoveryIntegrations = [
   {
     kind: "snmp",
@@ -965,6 +966,35 @@ window.fetch = async (path, options = {}) => {
     };
   } else if (method === "GET" && key === "/api/system/settings") {
     response = { status: 200, body: JSON.parse(JSON.stringify(systemSettings)) };
+  } else if (method === "GET" && key === "/api/enrollment-tokens") {
+    response = { status: 200, body: { tokens: enrollmentTokens.map((token) => ({ ...token })) } };
+  } else if (method === "POST" && key === "/api/enrollment-tokens") {
+    const token = "sextant_enroll_ui_smoke_code";
+    const entry = {
+      id: `enr_${enrollmentTokens.length + 1}`,
+      label: String(body?.label || ""),
+      created_by: "admin",
+      created_at: "2026-11-13T08:00:00Z",
+      expires_at: "2026-11-13T08:30:00Z",
+      used_at: null,
+      used_by_agent: null,
+      state: "active",
+    };
+    enrollmentTokens.unshift(entry);
+    response = {
+      status: 200,
+      body: {
+        id: entry.id,
+        token,
+        label: entry.label,
+        expires_at: entry.expires_at,
+        install_command: `sextant-agent enroll --server http://localhost:8080 --token ${token}`,
+        install_commands: {
+          linux: `sudo ./deploy/install-linux-agent.sh 'http://localhost:8080' '${token}' "$(hostname)"`,
+          windows: `.\\deploy\\install-windows-agent.ps1 -Server 'http://localhost:8080' -Token '${token}' -Name $env:COMPUTERNAME`,
+        },
+      },
+    };
   } else if (method === "PATCH" && key === "/api/system/settings") {
     if (body?.server) Object.assign(systemSettings.server, body.server);
     if (body?.domain) {
@@ -2359,6 +2389,43 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   resetButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   if (!window.document.getElementById("reset-password-dialog").open) throw new Error("reset password dialog did not open");
   window.document.querySelector("[data-close-reset-password]").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+  window.document.querySelector('[data-page="enroll"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(60);
+  if (window.document.getElementById("page-enroll").hidden) throw new Error("Enrollment page did not open");
+  const enrollmentHint = window.document.getElementById("enrollment-install-hint");
+  const linuxCommand = window.document.getElementById("enrollment-linux-command");
+  const windowsCommand = window.document.getElementById("enrollment-windows-command");
+  if (!enrollmentHint.textContent.includes("insert enrollment code here")) {
+    throw new Error("Enrollment hint does not explain the enrollment-code placeholder");
+  }
+  if (!linuxCommand.textContent.includes("install-linux-agent.sh") || !linuxCommand.textContent.includes("insert enrollment code here")) {
+    throw new Error("Linux install command placeholder did not render");
+  }
+  if (!windowsCommand.textContent.includes("install-windows-agent.ps1") || !windowsCommand.textContent.includes("insert enrollment code here")) {
+    throw new Error("Windows install command placeholder did not render");
+  }
+  const enrollmentForm = window.document.getElementById("enrollment-form");
+  enrollmentForm.elements.label.value = "smoke token";
+  enrollmentForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await sleep(140);
+  const generatedCode = window.document.getElementById("enrollment-token").textContent;
+  if (!generatedCode.startsWith("sextant_enroll_")) throw new Error("Enrollment code did not render");
+  if (!enrollmentHint.textContent.includes(generatedCode)) {
+    throw new Error("Enrollment code was not inserted into the hint");
+  }
+  if (!linuxCommand.textContent.includes(generatedCode)) {
+    throw new Error("Enrollment code was not inserted into the Linux command");
+  }
+  if (!windowsCommand.textContent.includes(generatedCode)) {
+    throw new Error("Enrollment code was not inserted into the Windows command");
+  }
+  if (linuxCommand.textContent.includes("insert enrollment code here") || windowsCommand.textContent.includes("insert enrollment code here")) {
+    throw new Error("Enrollment commands still contain the placeholder after generation");
+  }
+  if (window.document.getElementById("enrollment-list").textContent.includes("No enrollment tokens")) {
+    throw new Error("Enrollment history did not refresh");
+  }
 
   window.document.querySelector('[data-page="docker-hosts"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(60);

@@ -585,12 +585,20 @@
               <button class="button button-primary" type="submit">Generate token</button>
             </form>
             <div id="enrollment-result" class="callout" hidden>
-              <p class="eyebrow">Copy this now</p>
+              <p class="eyebrow">Enrollment code — copy this now</p>
               <code id="enrollment-token" class="code-block"></code>
-              <p class="form-hint">Run this on the target host:</p>
-              <code id="enrollment-command" class="code-block"></code>
-              <button class="button button-secondary button-small" id="copy-enrollment" type="button">Copy command</button>
+              <button class="button button-secondary button-small" id="copy-enrollment-token" type="button">Copy code</button>
             </div>
+            <div class="panel-head panel-head-spaced">
+              <div><p class="eyebrow">Install</p><h3>Install on a Linux or Windows host</h3></div>
+            </div>
+            <p class="form-hint" id="enrollment-install-hint"></p>
+            <p class="form-hint"><strong>Linux</strong> — run as root on the endpoint from a Sextant source checkout. Requires Python 3.11+ and <code>python3-venv</code>.</p>
+            <code id="enrollment-linux-command" class="code-block"></code>
+            <button class="button button-secondary button-small" id="copy-enrollment-linux" type="button">Copy Linux command</button>
+            <p class="form-hint"><strong>Windows</strong> — run in an elevated PowerShell on the endpoint from a Sextant source checkout. Requires Python 3.11+.</p>
+            <code id="enrollment-windows-command" class="code-block"></code>
+            <button class="button button-secondary button-small" id="copy-enrollment-windows" type="button">Copy Windows command</button>
           </article>
           <article class="panel panel-span">
             <div class="panel-head"><div><p class="eyebrow">History</p><h2>Recent enrollment tokens</h2></div></div>

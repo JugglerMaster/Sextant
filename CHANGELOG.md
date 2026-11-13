@@ -4,6 +4,17 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.5] - 2026-11-13
+
+### Added
+
+- The Enrollment screen now shows ready-to-run Linux and Windows installer
+  commands. Before a token is generated the commands show an
+  `insert enrollment code here` placeholder; generating a token inserts the
+  code into the hint and both commands, each with its own copy button. The API
+  response adds `install_commands` (Linux and Windows) alongside the existing
+  `install_command`.
+
 ## [0.8.4] - 2026-11-12
 
 ### Fixed
@@ -443,6 +454,7 @@ semantic versioning.
 Pre-rename baseline: agents, profiles, package inventory and store, remote
 install, telemetry history, alerts, fleet UI, and the initial test suite.
 
+[0.8.5]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.5
 [0.8.4]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.4
 [0.8.3]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.3
 [0.8.2]: https://github.com/JugglerMaster/Sextant/releases/tag/v0.8.2

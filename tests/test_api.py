@@ -67,6 +67,24 @@ def test_login_rate_limit(app):
         assert "retry-after" in blocked.headers
 
 
+def test_enrollment_returns_linux_and_windows_install_commands(client, admin):
+    response = client.post(
+        "/api/enrollment-tokens",
+        json={"label": "installers", "expires_minutes": 30},
+        headers=headers(admin),
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    linux = data["install_commands"]["linux"]
+    windows = data["install_commands"]["windows"]
+    assert data["token"] in linux
+    assert data["token"] in windows
+    assert "install-linux-agent.sh" in linux
+    assert "install-windows-agent.ps1" in windows
+    assert "insert enrollment code here" not in linux
+    assert "insert enrollment code here" not in windows
+
+
 def test_enrollment_is_one_time_and_agent_requires_token(client, admin):
     token = issue_token(admin)
     agent = enroll_agent(admin, token)

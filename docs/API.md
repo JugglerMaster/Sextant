@@ -1278,7 +1278,8 @@ Create body:
 
 `expires_minutes` is optional (5–1440). When omitted, `SEXTANT_ENROLLMENT_TTL_MINUTES` (default 30) is used.
 
-Response includes the plaintext token **once** and an install command:
+Response includes the plaintext token **once**, a bare enroll command, and
+OS-specific installer commands:
 
 ```json
 {
@@ -1286,7 +1287,11 @@ Response includes the plaintext token **once** and an install command:
   "token": "sextant_enroll_...",
   "label": "Linux lab",
   "expires_at": "2026-11-06T08:30:00Z",
-  "install_command": "sextant-agent enroll --server https://ops.example.com --token sextant_enroll_..."
+  "install_command": "sextant-agent enroll --server https://ops.example.com --token sextant_enroll_...",
+  "install_commands": {
+    "linux": "sudo ./deploy/install-linux-agent.sh 'https://ops.example.com' 'sextant_enroll_...' \"$(hostname)\"",
+    "windows": ".\\deploy\\install-windows-agent.ps1 -Server 'https://ops.example.com' -Token 'sextant_enroll_...' -Name $env:COMPUTERNAME"
+  }
 }
 ```
 

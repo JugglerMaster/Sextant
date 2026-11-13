@@ -22,7 +22,8 @@ D6 adds an admin-only **Import** panel (format, file/paste, preview counts, conf
 - **Packages** — inventory with interactive table, **desired-state rule editor** (admin), drift summary, Sync now.
 - **Profiles** — create/edit/reset/delete profiles, modules, action gates, cadences, tag assignments.
 - **Remote install** — Linux key-based SSH and Windows WinRM-over-HTTPS install jobs with OS-aware prerequisite test, one-time password field (Windows), install/log/history, and admin-only access.
-- **Wake targets**, **Enrollment**, **Users**, **Audit**, **Security**.
+- **Wake targets**, **Users**, **Audit**, **Security**.
+- **Enrollment** — admins generate a one-time code and see Linux and Windows installer commands. Before generation the commands show `insert enrollment code here`; generating a token inserts the code into the hint and both commands, with copy buttons. The code is shown once, and the history lists active, used, and expired tokens.
 - Update banner, toasts, native dialogs, dark theme, responsive breakpoints.
 
 ---
