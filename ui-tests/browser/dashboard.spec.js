@@ -127,6 +127,7 @@ for (const theme of THEMES) {
 
     await page.locator('#enrollment-form input[name="label"]').fill("Playwright token");
     await page.locator("#enrollment-form").getByRole("button", { name: "Generate token" }).click();
+    await expect(page.locator("#enrollment-token")).toContainText(/^sextant_enroll_/);
     const code = (await page.locator("#enrollment-token").textContent()).trim();
     expect(code).toMatch(/^sextant_enroll_/);
     await expect(page.locator("#enrollment-install-hint")).toContainText(code);
