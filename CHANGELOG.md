@@ -4,6 +4,14 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.9] - 2026-11-15
+
+### Added
+
+- Audit log now supports server-side pagination, filtering (actor, action,
+  free-text search, and date range), and CSV export (`/api/export/audit.csv`),
+  with a matching paginated/filterable dashboard table and Export CSV button.
+
 ## [0.8.8] - 2026-11-15
 
 ### Fixed

@@ -891,8 +891,8 @@ svg { display: block; }
 .bulk-actions .bulk-inline-field input,
 .bulk-actions .bulk-inline-field select { width: auto; min-width: 128px; min-height: 30px; height: 30px; padding: 4px 9px; font-size: 11px; }
 .bulk-actions .bulk-inline-field select { padding-right: 30px; }
-.service-toolbar, .user-toolbar { flex-wrap: wrap; justify-content: flex-start; }
-.service-toolbar .form-hint, .user-toolbar .form-hint { margin-left: auto; }
+.service-toolbar, .user-toolbar, .audit-toolbar { flex-wrap: wrap; justify-content: flex-start; }
+.service-toolbar .form-hint, .user-toolbar .form-hint, .audit-toolbar .form-hint { margin-left: auto; }
 .mini-search { width: min(220px, 45vw); height: 32px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-input); font-size: 11px; outline: none; }
 .mini-search:focus { border-color: var(--accent); }
 

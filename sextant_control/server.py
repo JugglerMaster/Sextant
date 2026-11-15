@@ -198,6 +198,8 @@ COMMAND_HISTORY_MAX_LIMIT = 200
 COMMAND_OUTPUT_CHUNK_BYTES = 64 * 1024
 COMMAND_OUTPUT_REPLAY_LIMIT = 2000
 COMMAND_OUTPUT_POLL_LIMIT = 500
+AUDIT_HISTORY_DEFAULT_LIMIT = 100
+AUDIT_HISTORY_MAX_LIMIT = 500
 BULK_ACTION_MAX_AGENTS = 200
 BULK_ACTIONS = {
     "refresh",
@@ -260,6 +262,40 @@ def _command_history_filters(
         None if limit is None else int(limit),
         int(offset),
         normalized_status or None,
+        normalized_query,
+        since_value,
+        until_value,
+    )
+
+
+def _audit_history_filters(
+    limit: int | None,
+    offset: int,
+    actor: str,
+    action: str,
+    query: str,
+    since: str,
+    until: str,
+) -> tuple[int | None, int, str | None, str | None, str | None, str | None, str | None]:
+    if limit is not None and not 1 <= int(limit) <= AUDIT_HISTORY_MAX_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"limit must be between 1 and {AUDIT_HISTORY_MAX_LIMIT}.",
+        )
+    if int(offset) < 0:
+        raise HTTPException(status_code=400, detail="offset must be zero or greater.")
+    normalized_actor = (actor or "").strip() or None
+    normalized_action = (action or "").strip() or None
+    normalized_query = (query or "").strip() or None
+    since_value = _timestamp_filter(since, "since")
+    until_value = _timestamp_filter(until, "until")
+    if since_value and until_value and since_value > until_value:
+        raise HTTPException(status_code=400, detail="since must not be after until.")
+    return (
+        None if limit is None else int(limit),
+        int(offset),
+        normalized_actor,
+        normalized_action,
         normalized_query,
         since_value,
         until_value,
@@ -4629,14 +4665,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/audit")
     def audit_log(
-        limit: int = 100,
+        limit: int = AUDIT_HISTORY_DEFAULT_LIMIT,
+        offset: int = 0,
+        actor: str = "",
+        action: str = "",
+        q: str = "",
+        since: str = "",
+        until: str = "",
         user: dict[str, Any] = Depends(require_admin),
         database: Database = Depends(get_db),
     ) -> dict[str, Any]:
         del user
-        limit = max(1, min(int(limit), 500))
-        with database.connection() as conn:
-            rows = conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        limit, offset, actor, action, q, since, until = _audit_history_filters(
+            limit, offset, actor, action, q, since, until
+        )
+        rows, total = database.audit_history(
+            limit=limit,
+            offset=offset,
+            actor=actor,
+            action=action,
+            query=q,
+            since=since,
+            until=until,
+        )
         return {
             "events": [
                 {
@@ -4649,7 +4700,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "ip": row["ip"],
                 }
                 for row in rows
-            ]
+            ],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
         }
 
     # ---- Discovery (D1-D5) -------------------------------------------
@@ -8677,6 +8731,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             output.getvalue(),
             media_type="text/csv",
             headers={"Content-Disposition": 'attachment; filename="sextant-commands.csv"'},
+        )
+
+    @app.get("/api/export/audit.csv")
+    def export_audit_csv(
+        actor: str = Query(default=""),
+        action: str = Query(default=""),
+        q: str = Query(default=""),
+        since: str = Query(default=""),
+        until: str = Query(default=""),
+        limit: int | None = Query(default=None),
+        offset: int = Query(default=0),
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+    ) -> Response:
+        del user
+        limit, offset, actor, action, q, since, until = _audit_history_filters(
+            limit, offset, actor, action, q, since, until
+        )
+        rows, _total = database.audit_history(
+            limit=limit,
+            offset=offset,
+            actor=actor,
+            action=action,
+            query=q,
+            since=since,
+            until=until,
+        )
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["at", "actor", "action", "target", "ip", "detail"])
+        for row in rows:
+            writer.writerow(
+                [
+                    row["at"] or "",
+                    row["actor"] or "",
+                    row["action"] or "",
+                    row["target"] or "",
+                    row["ip"] or "",
+                    row["detail"] or "{}",
+                ]
+            )
+        return Response(
+            output.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="sextant-audit.csv"'},
         )
 
     return app

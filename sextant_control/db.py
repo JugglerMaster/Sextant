@@ -1478,6 +1478,60 @@ class Database:
             rows = conn.execute(sql, row_params).fetchall()
         return list(rows), total
 
+    def audit_history(
+        self,
+        limit: int | None = 100,
+        offset: int = 0,
+        actor: str | None = None,
+        action: str | None = None,
+        query: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> tuple[list[sqlite3.Row], int]:
+        """Return filtered audit rows plus the unpaginated match count.
+
+        Every user-supplied value is bound as a SQL parameter. ``limit=None``
+        returns all matches, which the CSV export uses.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if actor:
+            clauses.append("actor = ?")
+            params.append(actor)
+        if action:
+            clauses.append("action = ?")
+            params.append(action)
+        if query:
+            pattern = f"%{query}%"
+            clauses.append(
+                """(actor LIKE ? OR action LIKE ? OR target LIKE ? OR detail LIKE ?
+                    OR ip LIKE ?)"""
+            )
+            params.extend([pattern] * 5)
+        if since:
+            clauses.append("at >= ?")
+            params.append(since)
+        if until:
+            clauses.append("at <= ?")
+            params.append(until)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connection() as conn:
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS n FROM audit_log{where}", params
+                ).fetchone()["n"]
+            )
+            sql = f"SELECT * FROM audit_log{where} ORDER BY id DESC"
+            row_params = list(params)
+            if limit is not None:
+                sql += " LIMIT ? OFFSET ?"
+                row_params.extend([max(1, int(limit)), max(0, int(offset))])
+            elif offset:
+                sql += " LIMIT -1 OFFSET ?"
+                row_params.append(max(0, int(offset)))
+            rows = conn.execute(sql, row_params).fetchall()
+        return list(rows), total
+
     def add_command_output(
         self,
         command_id: str,

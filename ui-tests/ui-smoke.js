@@ -1539,6 +1539,27 @@ window.fetch = async (path, options = {}) => {
       status: 200,
       body: { commands: filtered.slice(offset, offset + limit), total: filtered.length, limit, offset },
     };
+  } else if (method === "GET" && key === "/api/audit") {
+    const params = new URLSearchParams(url.split("?")[1] || "");
+    const q = (params.get("q") || "").toLowerCase();
+    const actor = (params.get("actor") || "").toLowerCase();
+    const action = (params.get("action") || "").toLowerCase();
+    const limit = Number(params.get("limit") || 100);
+    const offset = Number(params.get("offset") || 0);
+    const allEvents = [
+      { id: 4, at: "2026-11-06T08:00:00Z", actor: "admin", action: "command.created", target: "agt_demo", detail: { kind: "shell" }, ip: "10.0.0.1" },
+      { id: 3, at: "2026-11-06T07:59:00Z", actor: "jdoe", action: "auth.login_failed", target: "jdoe", detail: {}, ip: "10.0.0.2" },
+      { id: 2, at: "2026-11-06T07:58:00Z", actor: "admin", action: "auth.login", target: "admin", detail: {}, ip: "10.0.0.3" },
+      { id: 1, at: "2026-11-06T07:57:00Z", actor: "jdoe", action: "agent.delete", target: "agt_old", detail: {}, ip: "10.0.0.4" },
+    ];
+    let filtered = allEvents;
+    if (actor) filtered = filtered.filter((event) => event.actor.toLowerCase() === actor);
+    if (action) filtered = filtered.filter((event) => event.action.toLowerCase() === action);
+    if (q) filtered = filtered.filter((event) => JSON.stringify(event).toLowerCase().includes(q));
+    response = {
+      status: 200,
+      body: { events: filtered.slice(offset, offset + limit), total: filtered.length, limit, offset },
+    };
   } else if (method === "POST" && /^\/api\/agents\/[^/]+\/commands$/.test(key)) {
     response = { status: 200, body: { id: "cmd_bulk", agent_id: "agt_demo", kind: body?.kind || "refresh", args: body?.args || {}, status: "queued" } };
   } else if (method === "PATCH" && key === "/api/agents/agt_demo") {
@@ -2412,6 +2433,29 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   userSearch.dispatchEvent(new window.Event("input", { bubbles: true }));
   await sleep(10);
   if (!userCount.textContent.includes("2 of 2 users")) throw new Error("user search did not clear");
+
+  window.document.querySelector('[data-page="audit"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(50);
+  const auditTableHost = window.document.getElementById("audit-table-host");
+  if (!auditTableHost) throw new Error("audit table host missing");
+  if (!auditTableHost.textContent.includes("command.created")) throw new Error("audit page did not render events");
+  const auditCount = auditTableHost.querySelector("[data-audit-count]");
+  if (!auditCount || !auditCount.textContent.includes("4 of 4 events")) throw new Error(`audit count is wrong: ${auditCount?.textContent}`);
+  const auditSearch = auditTableHost.querySelector('input[aria-label="Search audit log"]');
+  if (!auditSearch) throw new Error("audit search input missing");
+  auditSearch.value = "agt_old";
+  auditSearch.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(360);
+  if (!auditCount.textContent.includes("1 of 1 events")) throw new Error(`audit search did not filter: ${auditCount.textContent}`);
+  if (!auditTableHost.textContent.includes("agent.delete")) throw new Error("audit search did not match the expected row");
+  auditSearch.value = "";
+  auditSearch.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(360);
+  if (!auditCount.textContent.includes("4 of 4 events")) throw new Error("audit search did not clear");
+  const auditExport = auditTableHost.querySelector('[data-audit-export="true"]');
+  if (!auditExport || !auditExport.getAttribute("href").includes("/api/export/audit.csv")) throw new Error("audit export link missing");
+  const auditRefresh = window.document.getElementById("audit-refresh");
+  if (!auditRefresh) throw new Error("audit refresh button missing");
   if (!findButton(userList, "Disable")) throw new Error("disable user action missing");
   const sessionsButton = findButton(userList, "Sessions");
   if (!sessionsButton) throw new Error("sessions action missing");

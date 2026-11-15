@@ -1338,7 +1338,22 @@ Resetting a password returns `{"user_id": 2, "username": "bob"}`. Resetting your
 
 ## Audit (admin)
 
-`GET /api/audit?limit=100` returns newest-first events (1–500):
+`GET /api/audit` returns newest-first events with server-side pagination and
+filtering:
+
+```text
+GET /api/audit?limit=100&offset=0&actor=alice&action=auth.login&q=search&since=2026-01-01T00:00:00Z&until=2026-01-31T23:59:59Z
+```
+
+- `limit` — 1–500 (default 100).
+- `offset` — zero or greater.
+- `actor` — exact match on the actor username.
+- `action` — exact match on the action name.
+- `q` — case-insensitive substring match across actor, action, target,
+  detail, and source IP.
+- `since` / `until` — ISO 8601 timestamps (inclusive) on the event time.
+
+Response:
 
 ```json
 {
@@ -1352,9 +1367,22 @@ Resetting a password returns `{"user_id": 2, "username": "bob"}`. Resetting your
       "detail": {"command_id":"cmd_123","kind":"shell","agent":"box"},
       "ip": "10.0.0.5"
     }
-  ]
+  ],
+  "total": 1,
+  "limit": 100,
+  "offset": 0
 }
 ```
+
+`GET /api/export/audit.csv` exports the filtered audit log as CSV
+(admin-only) with the same `actor`, `action`, `q`, `since`, and `until`
+filters:
+
+```text
+GET /api/export/audit.csv?actor=alice&action=auth.login&q=search&since=2026-01-01T00:00:00Z&until=2026-01-31T23:59:59Z
+```
+
+Columns: `at,actor,action,target,ip,detail` (detail is the JSON blob).
 
 ## Agent endpoints
 

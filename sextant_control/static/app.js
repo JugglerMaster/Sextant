@@ -63,6 +63,7 @@ const state = {
   selectedAgents: new Set(),
   drawerTrigger: null,
   userSearch: "",
+  auditHistory: null,
   theme: "dark",
   updates: null,
   updatesBusy: false,
@@ -3976,40 +3977,262 @@ async function deleteEnrollmentToken(token) {
   }
 }
 
-async function loadAudit() {
-  const host = $("audit-table-host");
-  clear(host);
-  const body = h("tbody", {});
+const AUDIT_PAGE_SIZES = [50, 100, 200];
+
+function auditState() {
+  if (!state.auditHistory) {
+    state.auditHistory = {
+      q: "",
+      actor: "",
+      action: "",
+      since: "",
+      until: "",
+      limit: 100,
+      offset: 0,
+      events: [],
+      total: 0,
+      loaded: false,
+      loading: false,
+      error: "",
+      seq: 0,
+      timer: null,
+      paint: null,
+    };
+  }
+  return state.auditHistory;
+}
+
+function auditTimestamp(value, end) {
+  if (!value) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return `${value}T${end ? "23:59:59" : "00:00:00"}Z`;
+  return value;
+}
+
+function auditQuery(audit) {
+  const params = new URLSearchParams();
+  params.set("limit", String(audit.limit));
+  params.set("offset", String(audit.offset));
+  if (audit.actor) params.set("actor", audit.actor);
+  if (audit.action) params.set("action", audit.action);
+  if (audit.q) params.set("q", audit.q);
+  const since = auditTimestamp(audit.since, false);
+  const until = auditTimestamp(audit.until, true);
+  if (since) params.set("since", since);
+  if (until) params.set("until", until);
+  return params;
+}
+
+function auditExportUrl(audit) {
+  const params = auditQuery(audit);
+  params.delete("limit");
+  params.delete("offset");
+  const query = params.toString();
+  return `/api/export/audit.csv${query ? `?${query}` : ""}`;
+}
+
+function auditRow(event) {
+  return h(
+    "tr",
+    {},
+    h("td", { class: "mono" }, localTime(event.at)),
+    h("td", {}, h("strong", {}, event.actor)),
+    h("td", {}, h("span", { class: "tag" }, event.action)),
+    h("td", { class: "mono" }, short(event.target || "—", 36)),
+    h("td", { class: "mono" }, event.ip || "—"),
+    h("td", { class: "mono" }, short(JSON.stringify(event.detail || {}), 110)),
+  );
+}
+
+async function loadAuditData() {
+  const audit = auditState();
+  const seq = audit.seq + 1;
+  audit.seq = seq;
+  audit.loading = true;
+  audit.error = "";
+  audit.paint?.();
+  let retry = false;
   try {
-    const data = await api("/api/audit?limit=200");
-    if (!data.events.length) {
-      body.append(h("tr", {}, h("td", { colspan: "6", class: "table-empty" }, "No audit events yet.")));
-    } else {
-      for (const event of data.events) {
-        body.append(
-          h(
-            "tr",
-            {},
-            h("td", { class: "mono" }, localTime(event.at)),
-            h("td", {}, h("strong", {}, event.actor)),
-            h("td", {}, h("span", { class: "tag" }, event.action)),
-            h("td", { class: "mono" }, short(event.target || "—", 36)),
-            h("td", { class: "mono" }, event.ip || "—"),
-            h("td", { class: "mono" }, short(JSON.stringify(event.detail || {}), 110)),
-          ),
-        );
-      }
+    const data = await api(`/api/audit?${auditQuery(audit).toString()}`);
+    if (seq !== audit.seq || state.page !== "audit") return;
+    audit.events = Array.isArray(data.events) ? data.events : [];
+    audit.total = Number(data.total ?? audit.events.length);
+    audit.loaded = true;
+    if (audit.total > 0 && audit.offset >= audit.total) {
+      audit.offset = Math.max(0, Math.floor((audit.total - 1) / audit.limit) * audit.limit);
+      retry = true;
     }
   } catch (error) {
-    body.append(h("tr", {}, h("td", { colspan: "6", class: "table-empty" }, error.message)));
+    if (seq !== audit.seq || state.page !== "audit") return;
+    audit.error = error.message;
+  } finally {
+    if (seq === audit.seq) {
+      audit.loading = false;
+      if (state.page === "audit") audit.paint?.();
+      if (audit.error) toast(audit.error, "error");
+    }
   }
+  if (retry) loadAuditData();
+}
+
+function loadAudit() {
+  const host = $("audit-table-host");
+  const audit = auditState();
+  clear(host);
+  const body = h("tbody", {});
+  const count = h("span", { class: "form-hint", "data-audit-count": "true" });
+  const exportLink = h(
+    "a",
+    {
+      class: "button button-secondary button-small",
+      href: auditExportUrl(audit),
+      download: "sextant-audit.csv",
+      "data-audit-export": "true",
+    },
+    "Export CSV",
+  );
+  const prev = button(
+    "Previous",
+    "button-secondary button-small",
+    () => {
+      if (audit.offset <= 0) return;
+      audit.offset = Math.max(0, audit.offset - audit.limit);
+      loadAuditData();
+    },
+    true,
+  );
+  const next = button(
+    "Next",
+    "button-secondary button-small",
+    () => {
+      if (audit.offset + audit.limit >= audit.total) return;
+      audit.offset += audit.limit;
+      loadAuditData();
+    },
+    true,
+  );
+  const search = h("input", {
+    type: "search",
+    placeholder: "Search audit log",
+    "aria-label": "Search audit log",
+    value: audit.q,
+  });
+  const actor = h("input", {
+    type: "search",
+    placeholder: "Actor",
+    "aria-label": "Filter audit by actor",
+    value: audit.actor,
+  });
+  const action = h("input", {
+    type: "search",
+    placeholder: "Action",
+    "aria-label": "Filter audit by action",
+    value: audit.action,
+  });
+  const since = h("input", { type: "date", "aria-label": "Audit events since", value: audit.since });
+  const until = h("input", { type: "date", "aria-label": "Audit events until", value: audit.until });
+  const pageSize = h(
+    "select",
+    { "aria-label": "Audit events per page" },
+    ...AUDIT_PAGE_SIZES.map((value) =>
+      h("option", { value: String(value), selected: value === audit.limit }, String(value)),
+    ),
+  );
+  const refresh = button("Refresh audit", "button-secondary button-small", () => loadAuditData());
+  const paint = () => {
+    clear(body);
+    if (audit.loading && !audit.loaded) {
+      body.append(h("tr", {}, h("td", { colspan: "6", class: "table-empty" }, "Loading audit log…")));
+    } else if (audit.error) {
+      body.append(h("tr", {}, h("td", { colspan: "6", class: "table-empty" }, audit.error)));
+    } else if (!audit.events.length) {
+      body.append(h("tr", {}, h("td", { colspan: "6", class: "table-empty" }, "No audit events match these filters.")));
+    } else {
+      body.append(...audit.events.map((event) => auditRow(event)));
+    }
+    const start = audit.total ? audit.offset + 1 : 0;
+    const end = audit.total ? Math.min(audit.offset + audit.events.length, audit.total) : 0;
+    count.textContent = `${start}-${end} of ${audit.total} events`;
+    prev.disabled = audit.loading || audit.offset <= 0;
+    next.disabled = audit.loading || audit.offset + audit.limit >= audit.total;
+    exportLink.href = auditExportUrl(audit);
+  };
+  audit.paint = paint;
+  const debounce = () => {
+    clearTimeout(audit.timer);
+    audit.timer = setTimeout(loadAuditData, HISTORY_SEARCH_DELAY);
+  };
+  search.addEventListener("input", () => {
+    audit.q = search.value.trim();
+    audit.offset = 0;
+    exportLink.href = auditExportUrl(audit);
+    debounce();
+  });
+  actor.addEventListener("input", () => {
+    audit.actor = actor.value.trim();
+    audit.offset = 0;
+    exportLink.href = auditExportUrl(audit);
+    debounce();
+  });
+  action.addEventListener("input", () => {
+    audit.action = action.value.trim();
+    audit.offset = 0;
+    exportLink.href = auditExportUrl(audit);
+    debounce();
+  });
+  since.addEventListener("change", () => {
+    audit.since = since.value;
+    audit.offset = 0;
+    loadAuditData();
+  });
+  until.addEventListener("change", () => {
+    audit.until = until.value;
+    audit.offset = 0;
+    loadAuditData();
+  });
+  pageSize.addEventListener("change", () => {
+    audit.limit = Number(pageSize.value);
+    audit.offset = 0;
+    loadAuditData();
+  });
   const table = h(
     "table",
     { class: "data-table" },
-    h("thead", {}, h("tr", {}, h("th", {}, "Time"), h("th", {}, "Actor"), h("th", {}, "Action"), h("th", {}, "Target"), h("th", {}, "Source IP"), h("th", {}, "Detail"))),
+    h(
+      "thead",
+      {},
+      h(
+        "tr",
+        {},
+        h("th", {}, "Time"),
+        h("th", {}, "Actor"),
+        h("th", {}, "Action"),
+        h("th", {}, "Target"),
+        h("th", {}, "Source IP"),
+        h("th", {}, "Detail"),
+      ),
+    ),
     body,
   );
-  host.append(interactiveTable(table, { placeholder: "Filter audit", pageSize: 50 }));
+  host.append(
+    h(
+      "div",
+      { class: "section-toolbar audit-toolbar" },
+      search,
+      actor,
+      action,
+      since,
+      until,
+      pageSize,
+      count,
+      prev,
+      next,
+      exportLink,
+      refresh,
+    ),
+    h("div", { class: "table-wrap" }, table),
+  );
+  paint();
+  loadAuditData();
 }
 
 function userRow(user) {
@@ -10125,7 +10348,7 @@ function wireEvents() {
     copyEnrollmentValue("enrollment-windows-command", "Windows install command"),
   );
 
-  $("audit-refresh").addEventListener("click", loadAudit);
+  $("audit-refresh").addEventListener("click", loadAuditData);
 
   $("profile-form").addEventListener("submit", saveProfile);
   $("profile-cancel").addEventListener("click", resetProfileForm);
