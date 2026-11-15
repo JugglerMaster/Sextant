@@ -12,8 +12,9 @@ After each turn, cut a new build in git **unless something is unresolved**.
   `.venv/bin/python -m build --no-isolation --outdir dist`
 - Commit everything with a clear message.
 - Push the commit(s) to GitHub (`git push origin main`) once the build is done.
-- Publish the GitHub release so it shows up next to the older versions:
-  tag the release commit and attach the built artifacts (match the existing
+- **Tag the release and update the GitHub release** so the new version shows up
+  next to the older ones. Every build gets its own tag and release — do not skip
+  this. Tag the release commit and attach the built artifacts (match the existing
   releases — wheel + `SHA256SUMS`):
 
   ```bash
@@ -24,7 +25,9 @@ After each turn, cut a new build in git **unless something is unresolved**.
     --title "Sextant X.Y.Z" --notes-file /tmp/release-notes.md
   ```
 
-  Use the matching `CHANGELOG.md` section as the release body.
+  Use the matching `CHANGELOG.md` section as the release body. If the release
+  already exists, update it instead of creating a duplicate
+  (`gh release edit vX.Y.Z --notes-file /tmp/release-notes.md`).
 
 If a turn is blocked, incomplete, or waiting on a decision, do **not** build,
 commit, or push. Leave the working tree as-is and state clearly what is
