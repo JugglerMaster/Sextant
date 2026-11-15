@@ -1524,6 +1524,9 @@ window.fetch = async (path, options = {}) => {
       discoveryActiveScan = { ...discoveryActiveScan, status: "cancelled", finished_at: "2026-11-06T08:06:00Z" };
     }
     response = { status: 200, body: { scan: discoveryActiveScan } };
+  } else if (method === "GET" && key === "/api/agents/agt_demo/history" && window.__historyEmpty) {
+    const params = new URLSearchParams(url.split("?")[1] || "");
+    response = { status: 200, body: { agent_id: "agt_demo", hours: Number(params.get("hours") || 24), points: [] } };
   } else if (method === "GET" && key === "/api/agents/agt_demo/commands") {
     const params = new URLSearchParams(url.split("?")[1] || "");
     const status = params.get("status") || "all";
@@ -2343,11 +2346,46 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     throw new Error("trend activity sections missing after 7d toggle");
   }
 
+  window.__historyEmpty = true;
+  const dayRange = findButton(trendsBody, "24h");
+  dayRange.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  const emptyChart = trendsBody.querySelector(".detail-chart");
+  if (!emptyChart) throw new Error("empty trend range should still render a chart placeholder");
+  if (!emptyChart.querySelector(".chart-empty-text") || !emptyChart.textContent.includes("No telemetry data")) {
+    throw new Error("empty trend range did not render its placeholder");
+  }
+  if (!emptyChart.querySelector(".chart-grid") || !emptyChart.querySelector(".chart-axis-label")) {
+    throw new Error("empty trend placeholder should keep gridlines and axis labels");
+  }
+  const emptyCards = trendsBody.querySelectorAll(".chart-card");
+  if (emptyCards.length !== 1 || emptyCards[0].querySelectorAll("polyline").length) {
+    throw new Error("empty trend range should render a single placeholder card without series lines");
+  }
+  window.__historyEmpty = false;
+  const dayRangeReset = findButton(trendsBody, "7d");
+  dayRangeReset.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(80);
+  if (trendsBody.querySelectorAll(".chart-card").length !== 5) {
+    throw new Error("trend charts did not recover after the empty range");
+  }
+
   const editButton = findButton(window.document.getElementById("drawer-actions"), "Edit policy");
   if (!editButton) throw new Error("agent policy edit action missing");
   editButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   if (!window.document.getElementById("agent-edit-dialog").open) throw new Error("agent edit dialog did not open");
   window.document.querySelector("[data-close-agent-edit]").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+  const wakeButton = findButton(window.document.getElementById("drawer-actions"), "Wake");
+  if (!wakeButton) throw new Error("wake action missing for an online agent with a MAC address");
+  wakeButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  if (!window.__requests.some((request) => request.method === "POST" && request.path === "/api/agents/agt_demo/wake")) {
+    throw new Error("wake action did not call the wake endpoint");
+  }
+  if (!window.document.getElementById("toast-region").textContent.includes("Wake packet sent")) {
+    throw new Error("wake action did not report success");
+  }
 
   window.document.querySelector('[data-page="users"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(30);
@@ -3443,7 +3481,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!reconnectedSource.closed) throw new Error("SSE stream stayed open after logout");
 
   if (errors.length) throw new Error(`browser errors: ${errors.join(" | ")}`);
-  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, update banner/Check now/Update now/hash-disabled state, admin Updates panel with Check now/Update now/Rollback/restart instructions, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/exposure/conflicts/segments/table/drawer/edit/verify/promotion commands/token clearing/import preview/history/integration settings/secret redaction/SNMP fixture-only/server-and-agent scan source/start/cancel/relay-disabled/disabled/unacknowledged states, Windows remote-install WinRM/password states, policy/user search/session dialogs");
+  console.log("UI_DOM_OK: login, SSE live dashboard with polling fallback, update banner/Check now/Update now/hash-disabled state, admin Updates panel with Check now/Update now/Rollback/restart instructions, bulk power/service/profile actions, saved views, theme toggle, command palette, drawer with wake action, services filters, GPU processes, remote terminal, paginated history search/filter/paging/export, trends charts including empty-range placeholder, timeline, Docker Hosts list/detail/refresh/empty/auto-refresh plus drift badges, inspect/logs/exec/console/clone/remove/cleanup/offline states, Compose Files list/editor/revisions/multi-host deploy/per-host summary/deployment history, Discovery summary/filters/exposure/conflicts/segments/table/drawer/edit/verify/promotion commands/token clearing/import preview/history/integration settings/secret redaction/SNMP fixture-only/server-and-agent scan source/start/cancel/relay-disabled/disabled/unacknowledged states, Windows remote-install WinRM/password states, policy/user search/session dialogs");
   window.close();
 })().catch((error) => {
   console.error(error.stack || error.message);

@@ -1633,12 +1633,12 @@ async function bulkRefresh() {
 async function bulkWake() {
   const agents = selectedAgents();
   if (!agents.length) return;
-  const offline = agents.filter((agent) => !agent.online && agent.mac);
-  if (!offline.length) {
-    toast("No selected machines needed a wake packet.", "warn");
+  const eligible = agents.filter((agent) => agent.mac);
+  if (!eligible.length) {
+    toast("No selected machines have a MAC address for wake.", "warn");
     return;
   }
-  await runBulk("Wake", "wake", offline);
+  await runBulk("Wake", "wake", eligible);
 }
 
 async function bulkPower(action) {
@@ -2008,8 +2008,8 @@ function renderDrawerActions(agent) {
     return;
   }
   const powerAllowed = agent.policy?.allow_power !== false;
+  if (agent.mac) actions.append(button("Wake", "button-secondary", () => wakeAgent(agent)));
   if (!agent.online) {
-    if (agent.mac) actions.append(button("Wake", "button-secondary", () => wakeAgent(agent)));
     actions.append(h("span", { class: "form-hint" }, "Offline: shell and service actions are disabled until the next heartbeat."));
     if (powerAllowed) actions.append(button("Cancel power action", "button-ghost", () => queuePower(agent, "cancel")));
   } else {
@@ -2171,10 +2171,18 @@ function sparkline(values, color) {
     value === null || value === undefined || value === "" ? null : Number(value),
   );
   const usable = numeric.filter((value) => Number.isFinite(value));
-  const max = Math.max(1, ...usable);
-  const min = Math.min(0, ...usable);
   const width = 180;
   const height = 38;
+  if (!usable.length) {
+    return h(
+      "svg",
+      { class: "sparkline", viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": "no data" },
+      h("line", { class: "chart-grid", x1: 0, y1: height / 2, x2: width, y2: height / 2 }),
+      h("text", { class: "sparkline-empty", x: width / 2, y: height / 2 + 3, "text-anchor": "middle" }, "No data"),
+    );
+  }
+  const max = Math.max(1, ...usable);
+  const min = Math.min(0, ...usable);
   const span = Math.max(1, max - min);
   const xFor = (index) => (numeric.length === 1 ? 0 : (index / (numeric.length - 1)) * width);
   const yFor = (value) => height - ((value - min) / span) * (height - 4) - 2;
@@ -2219,7 +2227,15 @@ async function renderTrend(body, agent) {
     clear(host);
     const points = data.points || [];
     if (!telemetryHasSamples(points)) {
-      host.append(h("div", { class: "empty-inline" }, "No telemetry history yet."));
+      const svg = h(
+        "svg",
+        { class: "sparkline", viewBox: "0 0 180 38", role: "img", "aria-label": "No telemetry history in the last 24 hours" },
+        h("line", { class: "chart-grid", x1: 0, y1: 19, x2: 180, y2: 19 }),
+        h("text", { class: "sparkline-empty", x: 90, y: 22, "text-anchor": "middle" }, "No data in last 24h"),
+      );
+      const label = h("div", { class: "sparkline-label" }, h("span", {}, "All metrics"), h("strong", {}, "No data"));
+      host.append(h("div", { class: "sparkline-row" }, label, svg));
+      host.append(h("div", { class: "empty-inline" }, "Samples appear after this machine reports a heartbeat."));
       return;
     }
     const series = [
@@ -2229,9 +2245,11 @@ async function renderTrend(body, agent) {
       ["GPU util %", points.map((point) => point.gpu_max_util), "var(--purple)"],
       ["GPU temp °C", points.map((point) => point.gpu_max_temp), "var(--red)"],
     ];
+    let rendered = false;
     for (const [label, values, color] of series) {
-      const usable = values.filter((value) => value !== null && value !== undefined);
+      const usable = values.filter((value) => value !== null && value !== undefined && Number.isFinite(Number(value)));
       if (!usable.length) continue;
+      rendered = true;
       const latest = usable[usable.length - 1];
       host.append(
         h(
@@ -2242,7 +2260,7 @@ async function renderTrend(body, agent) {
         ),
       );
     }
-    if (!host.childElementCount) host.append(h("div", { class: "empty-inline" }, "No numeric trend data yet."));
+    if (!rendered) host.append(h("div", { class: "empty-inline" }, "No numeric trend data yet."));
   } catch (error) {
     if (state.detailId !== detailId || state.detailTab !== "overview") return;
     clear(host);
@@ -2296,6 +2314,52 @@ function detailChart(values, spec, points, rangeKey) {
   const plotHeight = height - pad.top - pad.bottom;
   const numeric = values.map((value) => (value === null || value === undefined || value === "" ? null : Number(value)));
   const usable = numeric.filter((value) => Number.isFinite(value));
+  const times = (points || []).map((point) => parseDate(point?.at)?.getTime() ?? null);
+  const validTimes = times.filter((value) => Number.isFinite(value));
+  const minTime = validTimes.length ? Math.min(...validTimes) : null;
+  const maxTime = validTimes.length ? Math.max(...validTimes) : null;
+  const timeSpan = minTime !== null && maxTime !== null ? maxTime - minTime : 0;
+  if (!usable.length) {
+    const now = Date.now();
+    const end = maxTime ?? now;
+    const start = minTime ?? (end - (timeSpan || 24 * 3600 * 1000));
+    const xForEmpty = (ratio) => pad.left + ratio * plotWidth;
+    const domainMin = spec.domain ? spec.domain[0] : 0;
+    const domainMax = spec.domain ? spec.domain[1] : 100;
+    const domainSpan = Math.max(0.0001, domainMax - domainMin);
+    const yForEmpty = (value) => pad.top + plotHeight - ((Math.min(domainMax, Math.max(domainMin, value)) - domainMin) / domainSpan) * plotHeight;
+    const gridLines = [];
+    const axisLabels = [];
+    for (const tick of [domainMax, (domainMax + domainMin) / 2, domainMin]) {
+      const y = yForEmpty(tick);
+      gridLines.push(h("line", { class: "chart-grid", x1: pad.left, y1: y, x2: pad.left + plotWidth, y2: y }));
+      axisLabels.push(
+        h("text", { class: "chart-axis-label", x: pad.left - 8, y: y + 3, "text-anchor": "end" }, chartAxisValue(tick, spec.unit)),
+      );
+    }
+    const xTicks = [0, 0.25, 0.5, 0.75, 1];
+    const xLabels = xTicks.map((ratio) => {
+      const time = start + ratio * (end - start);
+      const x = xForEmpty(ratio);
+      const anchor = ratio === 0 ? "start" : ratio === 1 ? "end" : "middle";
+      return h(
+        "text",
+        { class: "chart-axis-label", x, y: height - 10, "text-anchor": anchor },
+        chartTimeLabel(new Date(time).toISOString(), rangeKey),
+      );
+    });
+    const emptyCenterX = pad.left + plotWidth / 2;
+    const emptyCenterY = pad.top + plotHeight / 2;
+    return h(
+      "svg",
+      { class: "detail-chart", viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": `${spec.title} history — no data` },
+      ...gridLines,
+      ...axisLabels,
+      ...xLabels,
+      h("text", { class: "chart-empty-text", x: emptyCenterX, y: emptyCenterY - 6, "text-anchor": "middle" }, "No data"),
+      h("text", { class: "chart-empty-sub", x: emptyCenterX, y: emptyCenterY + 12, "text-anchor": "middle" }, `in the selected ${rangeKey === "168" ? "7 day" : "24 hour"} range`),
+    );
+  }
   let min = spec.domain ? spec.domain[0] : Math.min(...usable);
   let max = spec.domain ? spec.domain[1] : Math.max(...usable);
   if (!spec.domain) {
@@ -2304,11 +2368,6 @@ function detailChart(values, spec, points, rangeKey) {
     max += spread * 0.12;
   }
   const span = Math.max(0.0001, max - min);
-  const times = (points || []).map((point) => parseDate(point?.at)?.getTime() ?? null);
-  const validTimes = times.filter((value) => Number.isFinite(value));
-  const minTime = validTimes.length ? Math.min(...validTimes) : null;
-  const maxTime = validTimes.length ? Math.max(...validTimes) : null;
-  const timeSpan = minTime !== null && maxTime !== null ? maxTime - minTime : 0;
   const xFor = (index) => {
     const time = times[index];
     if (Number.isFinite(time) && timeSpan > 0) {
@@ -2420,13 +2479,45 @@ async function loadTrendCharts(host, agent, rangeKey) {
     clear(host);
     const points = data.points || [];
     if (!telemetryHasSamples(points)) {
-      host.append(
-        h(
-          "div",
-          { class: "empty-inline trend-empty" },
-          `No telemetry history in the last ${range.label}. Samples appear after this machine reports a heartbeat.`,
-        ),
+      const rangeHours = range.hours;
+      const rangeLabel = range.label;
+      const now = Date.now();
+      const end = now;
+      const start = now - rangeHours * 3600 * 1000;
+      const xForEmpty = (ratio) => 52 + ratio * (640 - 52 - 16);
+      const yForEmpty = (value) => 16 + (220 - 16 - 34) - ((Math.min(100, Math.max(0, value)) - 0) / 100) * (220 - 16 - 34);
+      const gridLines = [];
+      const axisLabels = [];
+      for (const tick of [100, 50, 0]) {
+        const y = yForEmpty(tick);
+        gridLines.push(h("line", { class: "chart-grid", x1: 52, y1: y, x2: 640 - 16, y2: y }));
+        axisLabels.push(
+          h("text", { class: "chart-axis-label", x: 44, y: y + 3, "text-anchor": "end" }, chartAxisValue(tick, "%")),
+        );
+      }
+      const xTicks = [0, 0.25, 0.5, 0.75, 1];
+      const xLabels = xTicks.map((ratio) => {
+        const time = start + ratio * (end - start);
+        const x = xForEmpty(ratio);
+        const anchor = ratio === 0 ? "start" : ratio === 1 ? "end" : "middle";
+        return h(
+          "text",
+          { class: "chart-axis-label", x, y: 210, "text-anchor": anchor },
+          chartTimeLabel(new Date(time).toISOString(), rangeKey),
+        );
+      });
+      const emptyCenterX = 52 + (640 - 52 - 16) / 2;
+      const emptyCenterY = 16 + (220 - 16 - 34) / 2;
+      const svg = h(
+        "svg",
+        { class: "detail-chart", viewBox: "0 0 640 220", role: "img", "aria-label": "No telemetry history in this range" },
+        ...gridLines,
+        ...axisLabels,
+        ...xLabels,
+        h("text", { class: "chart-empty-text", x: emptyCenterX, y: emptyCenterY - 6, "text-anchor": "middle" }, "No telemetry data"),
+        h("text", { class: "chart-empty-sub", x: emptyCenterX, y: emptyCenterY + 12, "text-anchor": "middle" }, `in the last ${rangeLabel}. Samples appear after this machine reports a heartbeat.`),
       );
+      host.append(h("div", { class: "chart-card chart-card-empty" }, svg));
       return;
     }
     for (const spec of TREND_SERIES) {

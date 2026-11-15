@@ -197,6 +197,7 @@ textarea:focus-visible,
 .sparkline-label span { color: var(--text-dim); font-size: 11px; }
 .sparkline-label strong { font-size: 15px; }
 .sparkline { width: 180px; height: 38px; overflow: visible; }
+.sparkline-empty { fill: var(--text-dim); font-family: var(--font); font-size: 9px; }
 html, body { height: 100%; }
 body {
   margin: 0;
@@ -830,6 +831,8 @@ svg { display: block; }
 .chart-axis-label { fill: var(--text-dim); font-family: var(--mono); font-size: 9px; }
 .chart-point { stroke: var(--row-bg); stroke-width: 1; }
 .chart-foot { display: flex; justify-content: space-between; gap: 10px; padding-top: 5px; border-top: 1px solid var(--line); color: var(--text-dim); font-family: var(--mono); font-size: 9.5px; }
+.chart-empty-text { fill: var(--text-soft); font-family: var(--font); font-size: 14px; font-weight: 600; }
+.chart-empty-sub { fill: var(--text-dim); font-family: var(--font); font-size: 10px; }
 .what-changed { display: grid; gap: 8px; }
 .what-changed-summary { margin: 0; }
 .what-changed-list { display: grid; gap: 4px; }

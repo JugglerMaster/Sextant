@@ -4,6 +4,17 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.8] - 2026-11-15
+
+### Fixed
+
+- The device drawer now shows **Wake** for any agent that has reported a MAC
+  address, including machines that are currently online, and bulk wake now
+  includes online machines instead of silently skipping them.
+- History and trend charts now render an empty state (gridlines, axis labels,
+  and a "No data" note) instead of a blank chart when the selected range has no
+  telemetry samples.
+
 ## [0.8.7] - 2026-11-13
 
 ### Changed
