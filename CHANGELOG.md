@@ -4,6 +4,19 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.13] - 2026-11-16
+
+### Added
+
+- Agent update rollout system with per-agent state tracking and rollback:
+  - `agent_rollouts` and `agent_rollout_agents` tables track directed updates per agent.
+  - Rollout endpoints: create, list, get, status, retry, rollback.
+  - Server tracks rollout state and advances rollouts when all agents are complete.
+  - Background sweep marks stale directed agents as failed and advances rollouts.
+  - Agent auto-applies directed updates and reports the result to the server.
+  - Agent rollback command handling and rollback_update in selfupdate.
+  - `_switch_current` now stores the previous version for rollback.
+
 ## [0.8.12] - 2026-11-16
 
 ### Fixed

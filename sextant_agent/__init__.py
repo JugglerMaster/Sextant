@@ -1,3 +1,3 @@
 """Cross-platform agent for Sextant."""
 
-__version__ = "0.8.12"
+__version__ = "0.8.13"

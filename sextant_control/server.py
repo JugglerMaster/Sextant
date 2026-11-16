@@ -132,6 +132,9 @@ from .models import (
     UserUpdateIn,
     WakeTargetIn,
     WakeTargetWakeIn,
+    AgentRolloutCreateIn,
+    AgentRolloutStatusIn,
+    AgentUpdateResultIn,
 )
 from .snmp import (
     SNMPError,
@@ -798,6 +801,119 @@ def _record_agent_events(database: Database, events: list[dict[str, Any]]) -> No
         except Exception:  # best-effort: never break the heartbeat/command path
             logger.debug("agent event recording failed", exc_info=True)
 
+def _rollout_release(database: Database, version: str) -> sqlite3.Row | None:
+    package = database.get_store_package("sextant-agent")
+    if package is None:
+        return None
+    for row in database.list_store_releases(package["id"]):
+        if row["artifact_type"] == "agent-wheel" and not row["yanked_at"] and str(row["version"]).strip().lstrip("vV") == version.strip().lstrip("vV"):
+            return row
+    return None
+
+def _directed_update_payload(database: Database, rollout: dict[str, Any], agent: dict[str, Any]) -> dict[str, Any]:
+    release = _rollout_release(database, rollout["target_version"])
+    if release is None:
+        return {
+            "available": False,
+            "directed": True,
+            "current_version": str(agent.get("agent_version") or ""),
+            "reason": "target release not in store",
+        }
+    return {
+        "available": True,
+        "directed": True,
+        "current_version": str(agent.get("agent_version") or ""),
+        "version": release["version"],
+        "release_id": release["id"],
+        "sha256": release["sha256"],
+        "size": int(release["size"] or 0),
+        "filename": release["filename"],
+        "channel": "rollout",
+        "min_version": "",
+        "notes_url": "",
+        "download_url": f"/api/agent/{agent['id']}/store/releases/{release['id']}/download",
+    }
+
+def advance_rollout(rollout_id: str, database: Database, config: Settings) -> None:
+    """Direct the next batch when the current one is settled; complete when done."""
+    rollout = database.get_agent_rollout(rollout_id)
+    if not rollout or rollout["status"] != "active":
+        return
+    batch_size = rollout["batch_size"]
+    current_batch = rollout["current_batch"]
+    agents = database.get_rollout_agents(rollout_id)
+    if not agents:
+        database.update_agent_rollout_status(rollout_id, "completed", utcnow_iso())
+        return
+    batch_agents = [a for a in agents if a["position"] // batch_size == current_batch]
+    settled = all(a["status"] in ("succeeded", "failed") for a in batch_agents)
+    has_directed = any(a["status"] == "directed" for a in batch_agents)
+    if settled and not has_directed:
+        database.mark_rollout_batch_settled(rollout_id, utcnow_iso())
+        if rollout["validation"] and rollout["validation_seconds"] > 0:
+            last_settled = parse_iso(rollout.get("last_batch_settled_at") or "")
+            if last_settled and (utcnow() - last_settled).total_seconds() < rollout["validation_seconds"]:
+                return
+        next_batch = current_batch + 1
+        next_batch_agents = [
+            a for a in agents if a["position"] // batch_size == next_batch and a["status"] == "pending"
+        ]
+        if next_batch_agents:
+            database.direct_rollout_agents(
+                rollout_id, [a["agent_id"] for a in next_batch_agents], utcnow_iso()
+            )
+            database.set_rollout_batch(rollout_id, next_batch, "")
+        else:
+            database.update_agent_rollout_status(rollout_id, "completed", utcnow_iso())
+    elif not has_directed:
+        pending_in_batch = [a for a in batch_agents if a["status"] == "pending"]
+        if pending_in_batch:
+            database.direct_rollout_agents(
+                rollout_id, [a["agent_id"] for a in pending_in_batch], utcnow_iso()
+            )
+        else:
+            next_batch = current_batch + 1
+            next_batch_agents = [
+                a for a in agents if a["position"] // batch_size == next_batch and a["status"] == "pending"
+            ]
+            if next_batch_agents:
+                database.direct_rollout_agents(
+                    rollout_id, [a["agent_id"] for a in next_batch_agents], utcnow_iso()
+                )
+                database.set_rollout_batch(rollout_id, next_batch, "")
+            else:
+                database.update_agent_rollout_status(rollout_id, "completed", utcnow_iso())
+
+def _rollout_sweep(database: Database, config: Settings) -> None:
+    """Mark stale directed agents as failed and advance active rollouts."""
+    rollouts = database.list_agent_rollouts()
+    for rollout in rollouts:
+        if rollout["status"] != "active":
+            continue
+        directed = database.get_rollout_agents_by_status(rollout["id"], "directed")
+        for agent_id in directed:
+            state = database.get_rollout_agent_state(rollout["id"], agent_id)
+            if not state:
+                continue
+            directed_at = parse_iso(state.get("directed_at") or "")
+            if directed_at and (utcnow() - directed_at).total_seconds() > config.agent_update_stale_seconds:
+                database.set_rollout_agent_status(
+                    rollout["id"],
+                    agent_id,
+                    "failed",
+                    completed_at=utcnow_iso(),
+                    last_error="directed agent did not report within timeout",
+                )
+        advance_rollout(rollout["id"], database, config)
+
+def _rollout_sweep_loop(database: Database, config: Settings) -> None:
+    """Periodic background sweep for agent update rollouts."""
+    while True:
+        try:
+            _rollout_sweep(database, config)
+        except Exception:
+            logger.exception("Rollout sweep failed")
+        time.sleep(30)
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
@@ -825,6 +941,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI) -> Any:
         await notification_service.start()
         _app.state.discovery_manager.start()
+        sweep_thread = threading.Thread(
+            target=_rollout_sweep_loop,
+            args=(_app.state.db, settings),
+            daemon=True,
+        )
+        sweep_thread.start()
         try:
             yield
         finally:
@@ -7235,6 +7357,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "notes_url": release["notes_url"],
                     "download_url": f"/api/agent/{agent_id}/store/releases/{release['id']}/download",
                 }
+        # If the agent is in a directed rollout state, override with the directed update
+        rollout = database.get_active_rollout_for_profile(profile_row_for_docker["id"])
+        if rollout:
+            agent_state = database.get_rollout_agent_state(rollout["id"], agent_id)
+            if agent_state and agent_state["status"] == "directed":
+                agent_update_info = _directed_update_payload(database, rollout, agent)
         return {
             "server_time": utcnow_iso(),
             "offline_after_seconds": config.offline_after_seconds,
@@ -8085,6 +8213,234 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "notes_url": release["notes_url"],
             "download_url": f"/api/agent/{agent['id']}/store/releases/{release['id']}/download",
         }
+
+    @app.get("/api/agent-updates/profiles")
+    def list_agent_update_profiles(
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        del user
+        profiles = database.list_profiles()
+        items = []
+        for profile in profiles:
+            profile_id = profile["id"]
+            target_version = database.get_profile_agent_version(profile_id)
+            agent_count = database.count_profile_agents(profile_id)
+            with database.connection() as conn:
+                row = conn.execute(
+                    "SELECT agent_version, COUNT(*) AS n FROM agents WHERE profile_id = ? GROUP BY agent_version ORDER BY n DESC LIMIT 1",
+                    (profile_id,),
+                ).fetchone()
+            deployed_version = row["agent_version"] if row else ""
+            items.append(
+                {
+                    "profile_id": profile_id,
+                    "slug": profile["slug"],
+                    "name": profile["name"],
+                    "is_system": bool(profile["is_system"]),
+                    "agent_count": agent_count,
+                    "target_version": target_version,
+                    "deployed_version": deployed_version,
+                }
+            )
+        return {"profiles": items}
+
+    @app.post("/api/agent-updates/rollout")
+    def create_agent_update_rollout(
+        payload: AgentRolloutCreateIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        profile = database.get_profile_by_id(payload.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found.")
+        if not payload.target_version:
+            raise HTTPException(status_code=400, detail="Target version is required.")
+        if _rollout_release(database, payload.target_version) is None:
+            raise HTTPException(status_code=404, detail="Target version is not available in the agent store.")
+        rollout = database.create_agent_rollout(
+            payload.profile_id,
+            payload.target_version,
+            batch_size=payload.batch_size,
+            validation=payload.validation,
+            validation_seconds=payload.validation_seconds,
+        )
+        with database.connection() as conn:
+            rows = conn.execute("SELECT id FROM agents WHERE profile_id = ?", (payload.profile_id,)).fetchall()
+        position = 0
+        for row in rows:
+            database.ensure_rollout_agent(rollout["id"], row["id"], position)
+            position += 1
+        advance_rollout(rollout["id"], database, config)
+        database.audit(
+            user["username"],
+            "agent-update.rollout.create",
+            payload.target_version,
+            {
+                "profile_id": payload.profile_id,
+                "batch_size": payload.batch_size,
+                "validation": payload.validation,
+                "agent_count": position,
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return database.get_agent_rollout(rollout["id"])
+
+    @app.get("/api/agent-updates/rollouts")
+    def list_agent_update_rollouts(
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        del user
+        return {"rollouts": database.list_agent_rollouts()}
+
+    @app.get("/api/agent-updates/rollouts/{rollout_id}")
+    def get_agent_update_rollout(
+        rollout_id: str,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        del user
+        rollout = database.get_agent_rollout(rollout_id)
+        if rollout is None:
+            raise HTTPException(status_code=404, detail="Rollout not found.")
+        agents = database.get_rollout_agents(rollout_id)
+        return {
+            **rollout,
+            "agents": agents,
+            "summary": {
+                "total": len(agents),
+                "pending": sum(1 for a in agents if a["status"] == "pending"),
+                "directed": sum(1 for a in agents if a["status"] == "directed"),
+                "succeeded": sum(1 for a in agents if a["status"] == "succeeded"),
+                "failed": sum(1 for a in agents if a["status"] == "failed"),
+            },
+        }
+
+    @app.post("/api/agent-updates/rollouts/{rollout_id}/status")
+    def update_agent_update_rollout_status(
+        rollout_id: str,
+        payload: AgentRolloutStatusIn,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        rollout = database.get_agent_rollout(rollout_id)
+        if rollout is None:
+            raise HTTPException(status_code=404, detail="Rollout not found.")
+        if rollout["status"] not in ("active", "paused"):
+            raise HTTPException(status_code=409, detail="Rollout is not active or paused.")
+        database.update_agent_rollout_status(rollout_id, payload.status, utcnow_iso() if payload.status == "completed" else "")
+        database.audit(
+            user["username"],
+            "agent-update.rollout.status",
+            rollout_id,
+            {"status": payload.status},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return database.get_agent_rollout(rollout_id)
+
+    @app.post("/api/agent-updates/rollouts/{rollout_id}/retry")
+    def retry_agent_update_rollout_failed(
+        rollout_id: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        rollout = database.get_agent_rollout(rollout_id)
+        if rollout is None:
+            raise HTTPException(status_code=404, detail="Rollout not found.")
+        if rollout["status"] not in ("active", "paused"):
+            raise HTTPException(status_code=409, detail="Rollout is not active or paused.")
+        failed = database.get_rollout_agents_by_status(rollout_id, "failed")
+        for agent_id in failed:
+            with database.transaction() as conn:
+                conn.execute(
+                    "UPDATE agent_rollout_agents SET status = 'pending', directed_at = NULL, completed_at = NULL, last_error = '' WHERE rollout_id = ? AND agent_id = ?",
+                    (rollout_id, agent_id),
+                )
+        advance_rollout(rollout_id, database, config)
+        database.audit(
+            user["username"],
+            "agent-update.rollout.retry",
+            rollout_id,
+            {"failed": len(failed)},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return database.get_agent_rollout(rollout_id)
+
+    @app.post("/api/agent-updates/rollback/{agent_id}")
+    def rollback_agent_update(
+        agent_id: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        with database.connection() as conn:
+            agent = conn.execute("SELECT id, agent_version, profile_id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        if agent is None:
+            raise HTTPException(status_code=404, detail="Agent not found.")
+        rollout = database.get_active_rollout_for_profile(agent["profile_id"])
+        command_id = f"rollback_{secrets.token_hex(8)}"
+        if rollout:
+            with database.transaction() as conn:
+                conn.execute(
+                    "UPDATE agent_rollout_agents SET status = 'failed', completed_at = ?, last_error = 'manual rollback' WHERE rollout_id = ? AND agent_id = ?",
+                    (utcnow_iso(), rollout["id"], agent_id),
+                )
+        database.create_command(
+            command_id,
+            agent_id,
+            "rollback",
+            {
+                "reason": "manual rollback",
+                "rollout_id": rollout["id"] if rollout else "",
+                "requested_at": utcnow_iso(),
+            },
+            user["username"],
+        )
+        database.audit(
+            user["username"],
+            "agent-update.rollback",
+            agent_id,
+            {"rollout_id": rollout["id"] if rollout else ""},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return {"agent_id": agent_id, "command_id": command_id}
+
+    @app.post("/api/agent/{agent_id}/update/result")
+    def report_agent_update_result(
+        payload: AgentUpdateResultIn,
+        agent: dict[str, Any] = Depends(agent_auth),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        agent_id = agent["id"]
+        if payload.status == "success" and payload.version:
+            with database.transaction() as conn:
+                conn.execute("UPDATE agents SET agent_version = ? WHERE id = ?", (payload.version, agent_id))
+                conn.execute(
+                    """INSERT INTO agent_events (agent_id, at, kind, severity, title, body, payload)
+                       VALUES (?, ?, 'update', 'info', 'Self update applied', ?, ?)
+                       ON CONFLICT(agent_id, at, kind, title) DO UPDATE SET payload = excluded.payload""",
+                    (agent_id, utcnow_iso(), payload.version, dumps({"status": payload.status, "error": payload.error})),
+                )
+        with database.connection() as conn:
+            row = conn.execute("SELECT profile_id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        profile_id = row["profile_id"] if row else ""
+        rollout = database.get_active_rollout_for_profile(profile_id)
+        if rollout:
+            if payload.status == "success":
+                database.set_rollout_agent_status(rollout["id"], agent_id, "succeeded", completed_at=utcnow_iso())
+            else:
+                database.set_rollout_agent_status(rollout["id"], agent_id, "failed", completed_at=utcnow_iso(), last_error=payload.error)
+            advance_rollout(rollout["id"], database, config)
+        return {"status": payload.status, "version": payload.version, "error": payload.error}
 
     @app.get("/api/agents/{agent_id}/packages")
     def get_agent_packages(

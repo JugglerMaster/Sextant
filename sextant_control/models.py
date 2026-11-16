@@ -775,6 +775,24 @@ class UpdateApplyIn(BaseModel):
     version: str = Field(min_length=1, max_length=64)
 
 
+class AgentRolloutCreateIn(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=64)
+    target_version: str = Field(min_length=1, max_length=64)
+    batch_size: int = Field(default=1, ge=1, le=1000)
+    validation: bool = Field(default=False)
+    validation_seconds: int = Field(default=300, ge=0, le=86400)
+
+
+class AgentRolloutStatusIn(BaseModel):
+    status: Literal["completed", "paused", "cancelled"]
+
+
+class AgentUpdateResultIn(BaseModel):
+    version: str = Field(default="", max_length=64)
+    status: Literal["success", "failure"]
+    error: str = Field(default="", max_length=2000)
+
+
 class AgentWakeIn(BaseModel):
     broadcast: str = Field(default="255.255.255.255", max_length=64)
     port: int = Field(default=9, ge=1, le=65535)

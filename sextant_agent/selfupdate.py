@@ -229,12 +229,61 @@ def _switch_current(install_dir: Path, version: str) -> None:
     legacy = install_dir / ".venv"
     if not current.exists() and legacy.exists():
         current.symlink_to(".venv")
+    previous = _link_target(current)
+    if previous is not None:
+        previous_version = previous.relative_to(install_dir / "releases").parts[0]
+        (install_dir / ".previous_version").write_text(previous_version, encoding="utf-8")
     target = Path("releases") / version / "venv"
     temporary = install_dir / f".current-{os.getpid()}"
     if temporary.exists() or temporary.is_symlink():
         temporary.unlink()
     temporary.symlink_to(target)
     os.replace(temporary, current)
+
+def rollback_update(
+    config: AgentConfig,
+    *,
+    install_dir: Path | None = None,
+    config_path: Path | None = None,
+    restart: bool = False,
+) -> dict[str, Any]:
+    if not config.allow_self_update:
+        return {"status": "disabled", "error": "allow_self_update is false in the agent config."}
+    install_dir = Path(install_dir) if install_dir else default_install_dir()
+    previous_file = install_dir / ".previous_version"
+    if not previous_file.exists():
+        return {"status": "failed", "error": "No previous version stored; cannot rollback."}
+    version = previous_file.read_text(encoding="utf-8").strip()
+    if not version:
+        return {"status": "failed", "error": "Previous version is empty."}
+    target = install_dir / "releases" / version / "venv"
+    if not target.exists():
+        return {"status": "failed", "error": f"Previous release {version} is missing from {install_dir}."}
+    if not _health_check(target, Path(config_path) if config_path else _config_path()):
+        return {"status": "failed", "error": "Previous release failed its health check; current version left unchanged."}
+    try:
+        _switch_current(install_dir, version)
+    except Exception as exc:
+        return {"status": "failed", "error": str(exc)}
+    _prune_releases(install_dir)
+    result: dict[str, Any] = {
+        "status": "switched",
+        "version": version,
+        "install_dir": str(install_dir),
+        "restart_required": True,
+    }
+    if restart:
+        if _is_windows():
+            restarted, restart_error = _restart_windows_task()
+            result["restart_required"] = not restarted
+            if not restarted:
+                result["restart_error"] = restart_error
+        else:
+            restarted = _run(["systemctl", "restart", "sextant-agent"], timeout=60)
+            result["restart_required"] = restarted.returncode != 0
+            if restarted.returncode != 0:
+                result["restart_error"] = restarted.stderr[-500:]
+    return result
 
 
 def _prune_releases(install_dir: Path, keep: int = 3) -> None:

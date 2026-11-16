@@ -282,6 +282,38 @@ CREATE TABLE IF NOT EXISTS package_inventory_state (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS profile_agent_versions (
+    profile_id TEXT PRIMARY KEY REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    version TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_rollouts (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    target_version TEXT NOT NULL,
+    batch_size INTEGER NOT NULL DEFAULT 1 CHECK (batch_size >= 1),
+    validation INTEGER NOT NULL DEFAULT 0 CHECK (validation IN (0, 1)),
+    validation_seconds INTEGER NOT NULL DEFAULT 300 CHECK (validation_seconds >= 0),
+    current_batch INTEGER NOT NULL DEFAULT 0 CHECK (current_batch >= 0),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'paused', 'cancelled')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    last_batch_settled_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agent_rollout_agents (
+    rollout_id TEXT NOT NULL REFERENCES agent_rollouts(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'directed', 'succeeded', 'failed')),
+    directed_at TEXT,
+    completed_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (rollout_id, agent_id)
+);
+
 CREATE TABLE IF NOT EXISTS profile_tag_assignments (
     tag TEXT PRIMARY KEY COLLATE NOCASE,
     profile_id TEXT NOT NULL,
@@ -2455,6 +2487,261 @@ class Database:
             return int(
                 conn.execute("SELECT COUNT(*) AS n FROM agents WHERE profile_id = ?", (profile_id,)).fetchone()["n"]
             )
+
+    def set_profile_agent_version(self, profile_id: str, version: str) -> bool:
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO profile_agent_versions (profile_id, version, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(profile_id) DO UPDATE SET version = excluded.version, updated_at = excluded.updated_at",
+                (profile_id, version, utcnow_iso()),
+            )
+            return conn.execute(
+                "SELECT 1 FROM profile_agent_versions WHERE profile_id = ?", (profile_id,)
+            ).fetchone() is not None
+
+    def get_profile_agent_version(self, profile_id: str) -> str:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT version FROM profile_agent_versions WHERE profile_id = ?", (profile_id,)
+            ).fetchone()
+            return row["version"] if row else ""
+
+    def list_profile_agent_versions(self) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT p.id, p.slug, p.name, p.is_system,
+                       pav.version AS target_version, pav.updated_at AS version_updated_at
+                 FROM agent_profiles p
+                 LEFT JOIN profile_agent_versions pav ON pav.profile_id = p.id"""
+            ).fetchall()
+            return [
+                {
+                    "profile_id": row["id"],
+                    "slug": row["slug"],
+                    "name": row["name"],
+                    "is_system": bool(row["is_system"]),
+                    "target_version": row["target_version"] or "",
+                    "version_updated_at": row["version_updated_at"] or "",
+                }
+                for row in rows
+            ]
+
+    def create_agent_rollout(
+        self, profile_id: str, target_version: str, batch_size: int = 1, validation: bool = False, validation_seconds: int = 300
+    ) -> dict[str, Any]:
+        with self.transaction() as conn:
+            rollout_id = f"rollout_{secrets.token_hex(8)}"
+            now = utcnow_iso()
+            conn.execute(
+                """INSERT INTO agent_rollouts (id, profile_id, target_version, batch_size, validation, validation_seconds, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
+                (rollout_id, profile_id, target_version, int(batch_size), int(validation), int(validation_seconds), now, now),
+            )
+            return {
+                "id": rollout_id,
+                "profile_id": profile_id,
+                "target_version": target_version,
+                "batch_size": int(batch_size),
+                "validation": bool(validation),
+                "validation_seconds": int(validation_seconds),
+                "status": "active",
+                "created_at": now,
+                "updated_at": now,
+                "completed_at": "",
+            }
+
+    def get_agent_rollout(self, rollout_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM agent_rollouts WHERE id = ?", (rollout_id,)).fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row["id"],
+                "profile_id": row["profile_id"],
+                "target_version": row["target_version"],
+                "batch_size": int(row["batch_size"]),
+                "validation": bool(row["validation"]),
+                "validation_seconds": int(row["validation_seconds"]),
+                "current_batch": int(row["current_batch"]),
+                "status": row["status"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "completed_at": row["completed_at"] or "",
+            }
+
+    def list_agent_rollouts(self) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT r.*, p.name AS profile_name
+                   FROM agent_rollouts r
+                   JOIN agent_profiles p ON p.id = r.profile_id
+                   ORDER BY r.created_at DESC"""
+            ).fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "profile_id": row["profile_id"],
+                    "profile_name": row["profile_name"],
+                    "target_version": row["target_version"],
+                    "batch_size": int(row["batch_size"]),
+                    "validation": bool(row["validation"]),
+                    "validation_seconds": int(row["validation_seconds"]),
+                    "current_batch": int(row["current_batch"]),
+                    "status": row["status"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "completed_at": row["completed_at"] or "",
+                }
+                for row in rows
+            ]
+
+    def update_agent_rollout_status(self, rollout_id: str, status: str, completed_at: str = "") -> bool:
+        with self.transaction() as conn:
+            cur = conn.execute(
+                """UPDATE agent_rollouts SET status = ?, updated_at = ?, completed_at = CASE WHEN ? = '' THEN completed_at ELSE ? END
+                   WHERE id = ? AND status != ?""",
+                (status, utcnow_iso(), completed_at, completed_at, rollout_id, status),
+            )
+            return cur.rowcount == 1
+
+    def cancel_agent_rollout(self, rollout_id: str) -> bool:
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE agent_rollouts SET status = 'cancelled', updated_at = ?, completed_at = ? WHERE id = ?",
+                (utcnow_iso(), utcnow_iso(), rollout_id),
+            )
+            return cur.rowcount == 1
+
+    def get_active_rollout_for_profile(self, profile_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_rollouts WHERE profile_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+                (profile_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row["id"],
+                "profile_id": row["profile_id"],
+                "target_version": row["target_version"],
+                "batch_size": int(row["batch_size"]),
+                "validation": bool(row["validation"]),
+                "status": row["status"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "completed_at": row["completed_at"] or "",
+            }
+
+    def direct_rollout_agents(self, rollout_id: str, agent_ids: list[str], directed_at: str) -> int:
+        with self.transaction() as conn:
+            count = 0
+            for agent_id in agent_ids:
+                cur = conn.execute(
+                    "UPDATE agent_rollout_agents SET status = 'directed', directed_at = ? WHERE rollout_id = ? AND agent_id = ? AND status = 'pending'",
+                    (directed_at, rollout_id, agent_id),
+                )
+                count += int(cur.rowcount)
+            return count
+
+    def set_rollout_batch(self, rollout_id: str, current_batch: int, last_batch_settled_at: str) -> bool:
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE agent_rollouts SET current_batch = ?, last_batch_settled_at = ?, updated_at = ? WHERE id = ?",
+                (int(current_batch), last_batch_settled_at, utcnow_iso(), rollout_id),
+            )
+            return cur.rowcount == 1
+
+    def mark_rollout_batch_settled(self, rollout_id: str, at: str) -> bool:
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE agent_rollouts SET last_batch_settled_at = ? WHERE id = ? AND (last_batch_settled_at IS NULL OR last_batch_settled_at = '')",
+                (at, rollout_id),
+            )
+            return cur.rowcount == 1
+
+    def get_rollout_agents(self, rollout_id: str) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT r.*, a.name AS agent_name, a.hostname AS agent_hostname, a.agent_version AS current_version
+                   FROM agent_rollout_agents r
+                   JOIN agents a ON a.id = r.agent_id
+                   ORDER BY r.position ASC, a.name COLLATE NOCASE"""
+            ).fetchall()
+            return [
+                {
+                    "agent_id": row["agent_id"],
+                    "agent_name": row["agent_name"],
+                    "agent_hostname": row["agent_hostname"],
+                    "current_version": row["current_version"] or "",
+                    "position": int(row["position"]),
+                    "status": row["status"],
+                    "directed_at": row["directed_at"] or "",
+                    "completed_at": row["completed_at"] or "",
+                    "last_error": row["last_error"] or "",
+                }
+                for row in rows
+            ]
+
+    def get_rollout_agent_state(self, rollout_id: str, agent_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_rollout_agents WHERE rollout_id = ? AND agent_id = ?",
+                (rollout_id, agent_id),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "agent_id": row["agent_id"],
+                "position": int(row["position"]),
+                "status": row["status"],
+                "directed_at": row["directed_at"] or "",
+                "completed_at": row["completed_at"] or "",
+                "last_error": row["last_error"] or "",
+            }
+
+    def ensure_rollout_agent(self, rollout_id: str, agent_id: str, position: int) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO agent_rollout_agents (rollout_id, agent_id, position, status)
+                   VALUES (?, ?, ?, 'pending')
+                   ON CONFLICT(rollout_id, agent_id) DO NOTHING""",
+                (rollout_id, agent_id, position),
+            )
+
+    def set_rollout_agent_status(
+        self,
+        rollout_id: str,
+        agent_id: str,
+        status: str,
+        directed_at: str = "",
+        completed_at: str = "",
+        last_error: str = "",
+    ) -> bool:
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE agent_rollout_agents SET status = ?, directed_at = CASE WHEN ? = '' THEN directed_at ELSE ? END,"
+                " completed_at = CASE WHEN ? = '' THEN completed_at ELSE ? END, last_error = ?"
+                " WHERE rollout_id = ? AND agent_id = ?",
+                (status, directed_at, directed_at, completed_at, completed_at, last_error, rollout_id, agent_id),
+            )
+            return cur.rowcount == 1
+
+    def count_rollout_agents_by_status(self, rollout_id: str, status: str) -> int:
+        with self.connection() as conn:
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM agent_rollout_agents WHERE rollout_id = ? AND status = ?",
+                    (rollout_id, status),
+                ).fetchone()["n"]
+            )
+
+    def get_rollout_agents_by_status(self, rollout_id: str, status: str) -> list[str]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT agent_id FROM agent_rollout_agents WHERE rollout_id = ? AND status = ? ORDER BY position ASC",
+                (rollout_id, status),
+            ).fetchall()
+            return [row["agent_id"] for row in rows]
 
     def set_agent_profile(self, agent_id: str, profile_id: str) -> bool:
         with self.transaction() as conn:

@@ -15,6 +15,7 @@ from .config import AgentConfig
 from .console import ConsoleError, ConsoleManager
 from .docker import DOCKER_MUTATION_ACTIONS, DockerCollector
 from .executor import execute_command
+from . import selfupdate
 
 logger = logging.getLogger("sextant_agent")
 
@@ -200,6 +201,10 @@ class AgentRunner:
         if kind == "refresh":
             self.collector.request_inventory_refresh()
             self.docker.request_inventory()
+            return
+        if kind == "rollback":
+            self._execute_rollback(command)
+            return
         uploader = _OutputUploader(self.client, command_id) if command_id else None
 
         def on_chunk(stream: str, text: str) -> None:
@@ -418,6 +423,23 @@ class AgentRunner:
             self.docker.request_inventory()
             return False
 
+    def _execute_rollback(self, command: dict[str, Any]) -> None:
+        """Rollback the agent to the previous version."""
+        command_id = str(command.get("id", ""))
+        logger.info("Rolling back agent %s", command.get("reason", ""))
+        try:
+            result = selfupdate.rollback_update(self.config, restart=True)
+        except Exception as exc:
+            result = {"status": "failed", "error": str(exc)}
+        status = result.get("status", "failed")
+        error = result.get("error", "")
+        logger.info("Rollback %s: %s", status, error or "")
+        if status == "switched":
+            self._report_update_result("success", result.get("version", ""), "")
+        else:
+            self._report_update_result("failure", "", error or "")
+        self._post_result(command_id, {"status": status, "exit_code": None, "stdout": "", "stderr": error, "error": error})
+
     def _post_result(self, command_id: str, result: dict[str, Any]) -> None:
         if not command_id:
             return
@@ -443,11 +465,49 @@ class AgentRunner:
         if version and version == self._update_notice:
             return
         self._update_notice = version
-        logger.warning(
-            "Agent update %s is available (current %s). Run: sextant-agent update --apply --restart",
-            info.get("version"),
-            info.get("current_version"),
-        )
+        if info.get("directed"):
+            self._apply_directed_update(info)
+        else:
+            logger.warning(
+                "Agent update %s is available (current %s). Run: sextant-agent update --apply --restart",
+                info.get("version"),
+                info.get("current_version"),
+            )
+
+    def _apply_directed_update(self, info: dict[str, Any]) -> None:
+        """Apply a server-directed update and report the result."""
+        version = str(info.get("version") or "")
+        logger.info("Applying directed agent update to %s", version)
+        try:
+            result = selfupdate.apply_update(
+                self.config,
+                info,
+                restart=True,
+            )
+        except Exception as exc:
+            result = {"status": "failed", "error": str(exc)}
+        status = result.get("status", "failed")
+        error = result.get("error", "")
+        if status in {"switched", "staged"}:
+            self._report_update_result("success", version, "")
+        else:
+            self._report_update_result("failure", version, error or "")
+        logger.info("Directed update %s: %s", status, error or "")
+
+    def _report_update_result(self, status: str, version: str, error: str) -> None:
+        """Report the update result to the server."""
+        try:
+            self.client._request(
+                "POST",
+                f"/api/agent/{self.config.id}/update/result",
+                {
+                    "status": status,
+                    "version": version,
+                    "error": error,
+                },
+            )
+        except Exception as exc:
+            logger.warning("Failed to report update result: %s", exc)
 
     def _apply_profile(self, profile: Any) -> None:
         if not isinstance(profile, dict):

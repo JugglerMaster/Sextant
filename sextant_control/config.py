@@ -178,6 +178,7 @@ class Settings:
     cookie_name: str = "sextant_session"
     cookie_secure: bool = False
     offline_after_seconds: int = 90
+    agent_update_stale_seconds: int = 600
     alert_ack_ttl_hours: int = 168
     notify_enabled: bool = True
     notify_interval_seconds: int = 20
@@ -331,6 +332,7 @@ class Settings:
             cookie_name=env.get("SEXTANT_COOKIE_NAME", "sextant_session").strip() or "sextant_session",
             cookie_secure=_bool(env.get("SEXTANT_COOKIE_SECURE"), False),
             offline_after_seconds=_int(env.get("SEXTANT_OFFLINE_AFTER_SECONDS"), 90, 15),
+            agent_update_stale_seconds=_int(env.get("SEXTANT_AGENT_UPDATE_STALE_SECONDS"), 600, 30),
             alert_ack_ttl_hours=min(8760, _int(env.get("SEXTANT_ALERT_ACK_TTL_HOURS"), 168, 1)),
             notify_enabled=_bool(env.get("SEXTANT_NOTIFY_ENABLED"), True),
             notify_interval_seconds=min(3600, _int(env.get("SEXTANT_NOTIFY_INTERVAL_SECONDS"), 20, 5)),
