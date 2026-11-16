@@ -1171,6 +1171,9 @@ function renderAgentUpdatesRollouts() {
       html += ` <button class='button button-ghost button-small' data-agent-update-pause='${rollout.id}' data-agent-update-resume='${rollout.id}'>Pause</button>`;
       html += ` <button class='button button-ghost button-small' data-agent-update-retry='${rollout.id}'>Retry failed</button>`;
     }
+    if (rollout.status !== "active") {
+      html += ` <button class='button button-danger button-small' data-agent-update-delete='${rollout.id}'>Delete</button>`;
+    }
     html += "</tr>";
   }
   html += "</tbody></table>";
@@ -1329,6 +1332,16 @@ function agentUpdateRollback(agentId) {
   if (!confirmed) return;
   api(`/api/agent-updates/rollback/${agentId}`, { method: "POST" }).then(() => {
     toast("Rollback sent.", "ok");
+    void loadAgentUpdates(true);
+  }).catch((err) => toast(err.message, "error"));
+}
+
+function deleteAgentUpdateRollout(rolloutId) {
+  const confirmed = confirmAction("Delete rollout", `Delete rollout ${rolloutId}? This removes its tracking and cannot be undone. Agents already updated are unaffected.`);
+  if (!confirmed) return;
+  api(`/api/agent-updates/rollouts/${rolloutId}`, { method: "DELETE" }).then(() => {
+    toast("Rollout deleted.", "ok");
+    if (state.agentUpdatesSelected === rolloutId) state.agentUpdatesSelected = null;
     void loadAgentUpdates(true);
   }).catch((err) => toast(err.message, "error"));
 }
@@ -10682,6 +10695,8 @@ function wireEvents() {
     if (retry) { agentUpdateAction("retry", retry.dataset.agentUpdateRetry); return; }
     const rollback = event.target.closest("[data-agent-update-rollback]");
     if (rollback) { agentUpdateRollback(rollback.dataset.agentUpdateRollback); return; }
+    const deleteRollout = event.target.closest("[data-agent-update-delete]");
+    if (deleteRollout) { deleteAgentUpdateRollout(deleteRollout.dataset.agentUpdateDelete); return; }
   });
 
   $("user-form").addEventListener("submit", async (event) => {

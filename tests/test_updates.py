@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from sextant_control import selfupdate, updates
+from sextant_control.db import utcnow_iso
 from sextant_control.server import create_app
 from tests.helpers import headers, login
 
@@ -158,6 +159,105 @@ def test_prepare_agent_releases_requires_feed(settings):
         admin = login(client)
         response = client.post("/api/agent-updates/prepare", headers=headers(admin))
         assert response.status_code == 409
+
+
+def test_delete_rollout(settings, monkeypatch):
+    feed = [_feed_release("0.9.1")]
+    monkeypatch.setattr(updates, "list_releases", lambda feed_url, limit=30: feed)
+
+    def fake_download(url, destination, **kwargs):
+        data = b"wheel"
+        Path(destination).write_bytes(data)
+        return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+    monkeypatch.setattr(selfupdate, "download_artifact", fake_download)
+    app = create_app(replace(settings, update_feed="github:owner/repo"))
+    with TestClient(app) as client:
+        admin = login(client)
+        # Prepare the agent release into the store
+        client.post("/api/agent-updates/prepare", headers=headers(admin))
+
+        # Create a rollout for the default profile
+        rollout = client.post(
+            "/api/agent-updates/rollout",
+            json={"profile_id": "prof_workstation", "target_version": "0.9.1"},
+            headers=headers(admin),
+        )
+        assert rollout.status_code == 200, rollout.text
+        rollout_id = rollout.json()["id"]
+
+        # Delete the rollout
+        deleted = client.delete(
+            f"/api/agent-updates/rollouts/{rollout_id}",
+            headers=headers(admin),
+        )
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json()["deleted"] == rollout_id
+
+        # Verify the rollout is gone
+        remaining = client.get(
+            "/api/agent-updates/rollouts", headers=headers(admin)
+        )
+        assert remaining.status_code == 200
+        assert remaining.json()["rollouts"] == []
+
+        # Verify deleting a non-existent rollout returns 404
+        missing = client.delete(
+            "/api/agent-updates/rollouts/does-not-exist",
+            headers=headers(admin),
+        )
+        assert missing.status_code == 404
+
+
+def test_delete_active_rollout_rejected(settings, monkeypatch, db):
+    feed = [_feed_release("0.9.1")]
+    monkeypatch.setattr(updates, "list_releases", lambda feed_url, limit=30: feed)
+
+    def fake_download(url, destination, **kwargs):
+        data = b"wheel"
+        Path(destination).write_bytes(data)
+        return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+    monkeypatch.setattr(selfupdate, "download_artifact", fake_download)
+    app = create_app(replace(settings, update_feed="github:owner/repo"))
+    with TestClient(app) as client:
+        admin = login(client)
+        client.post("/api/agent-updates/prepare", headers=headers(admin))
+
+        # Create an agent in the profile so the rollout stays active
+        now = utcnow_iso()
+        with db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO agents (id, name, hostname, machine_id, os, token_hash, agent_version, profile_id, enrolled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("agent-test-1", "test-agent", "test-agent.example", "machine-1", "linux", "hash", "0.8.0", "prof_workstation", now),
+            )
+
+        rollout = client.post(
+            "/api/agent-updates/rollout",
+            json={"profile_id": "prof_workstation", "target_version": "0.9.1"},
+            headers=headers(admin),
+        )
+        assert rollout.status_code == 200, rollout.text
+        rollout_id = rollout.json()["id"]
+
+        # Active rollout cannot be deleted
+        denied = client.delete(
+            f"/api/agent-updates/rollouts/{rollout_id}",
+            headers=headers(admin),
+        )
+        assert denied.status_code == 409
+
+        # Pause it, then delete
+        client.post(
+            f"/api/agent-updates/rollouts/{rollout_id}/status",
+            json={"status": "paused"},
+            headers=headers(admin),
+        )
+        deleted = client.delete(
+            f"/api/agent-updates/rollouts/{rollout_id}",
+            headers=headers(admin),
+        )
+        assert deleted.status_code == 200, deleted.text
 
 
 def test_update_status_requires_admin_and_feed(client, admin):

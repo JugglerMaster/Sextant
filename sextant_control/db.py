@@ -2612,6 +2612,11 @@ class Database:
             )
             return cur.rowcount == 1
 
+    def delete_agent_rollout(self, rollout_id: str) -> bool:
+        with self.transaction() as conn:
+            cur = conn.execute("DELETE FROM agent_rollouts WHERE id = ?", (rollout_id,))
+            return cur.rowcount == 1
+
     def get_active_rollout_for_profile(self, profile_id: str) -> dict[str, Any] | None:
         with self.connection() as conn:
             row = conn.execute(

@@ -13,11 +13,20 @@ semantic versioning.
   agent versions with the newest selected by default.
 - Server updates publish the applied wheel into the local agent store
   automatically when the store is enabled.
+- Delete button on completed/paused/cancelled rollouts in the Updates page.
+  Active rollouts must be paused before they can be deleted. Deleting a
+  rollout removes its tracking and agent rows (via `ON DELETE CASCADE`); agents
+  already updated are unaffected.
 
 ### Changed
 
 - Agent update target versions are sorted newest-first in the Updates page.
 - `download_artifact` can compute the SHA-256 when the feed does not publish one.
+- Rollout list now shows the profile name (and target version) instead of the
+  opaque `rollout_` id, so you can tell which profile a rollout targets at a
+  glance.
+- Per-agent rollout detail now shows the agent name, hostname, and current
+  version (previously blank due to wrong field names).
 
 ### Fixed
 

@@ -8428,6 +8428,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return database.get_agent_rollout(rollout_id)
 
+    @app.delete("/api/agent-updates/rollouts/{rollout_id}")
+    def delete_agent_update_rollout(
+        rollout_id: str,
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        rollout = database.get_agent_rollout(rollout_id)
+        if rollout is None:
+            raise HTTPException(status_code=404, detail="Rollout not found.")
+        if rollout["status"] == "active":
+            raise HTTPException(status_code=409, detail="Cancel the rollout before deleting it.")
+        database.delete_agent_rollout(rollout_id)
+        database.audit(
+            user["username"],
+            "agent-update.rollout.delete",
+            rollout_id,
+            {"profile_id": rollout["profile_id"], "target_version": rollout["target_version"]},
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return {"deleted": rollout_id}
+
     @app.post("/api/agent-updates/rollback/{agent_id}")
     def rollback_agent_update(
         agent_id: str,
