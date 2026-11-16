@@ -4,6 +4,21 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.10] - 2026-11-16
+
+### Changed
+
+- Test suite is now ~6x faster: `create_app` (route/middleware registration)
+  runs once per pytest-xdist worker instead of once per test, and each test gets
+  a fresh DB copied from a session-scoped seed. Added `pytest-xdist` to dev
+  dependencies.
+
+### Fixed
+
+- SSE dashboard stream and `notify_dashboard()` now read `app.state.dashboard_state`
+  at call time, so per-test dashboard state swaps (and the session-scoped app)
+  stay consistent.
+
 ## [0.8.9] - 2026-11-15
 
 ### Added

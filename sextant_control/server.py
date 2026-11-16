@@ -875,7 +875,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.dashboard_state = dashboard_state
 
     def notify_dashboard() -> None:
-        dashboard_state.notify()
+        app.state.dashboard_state.notify()
 
     discovery_manager = DiscoveryManager(
         db,
@@ -3311,7 +3311,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         async def stream() -> Any:
             loop = asyncio.get_running_loop()
-            listener, changed = dashboard_state.subscribe()
+            listener, changed = request.app.state.dashboard_state.subscribe()
             last_revision = -1
             next_refresh = loop.time() + DASHBOARD_SAFETY_REFRESH_SECONDS
             next_heartbeat = loop.time() + SSE_HEARTBEAT_SECONDS
@@ -3319,12 +3319,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 while True:
                     now = loop.time()
-                    revision = dashboard_state.revision()
+                    revision = request.app.state.dashboard_state.revision()
                     refresh_due = now >= next_refresh
                     if last_revision < 0 or revision != last_revision or refresh_due:
                         failed = False
                         try:
-                            payload = await dashboard_state.payload(
+                            payload = await request.app.state.dashboard_state.payload(
                                 revision,
                                 lambda: dashboard_payload(database, config),
                                 max_age=(
@@ -3362,7 +3362,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     # Clear before checking the revision so a notify between the
                     # check and the wait cannot be lost.
                     changed.clear()
-                    if dashboard_state.revision() != last_revision:
+                    if request.app.state.dashboard_state.revision() != last_revision:
                         continue
                     now = loop.time()
                     timeout = min(next_refresh - now, next_heartbeat - now, next_auth - now)
@@ -3372,7 +3372,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         except asyncio.TimeoutError:
                             pass
             finally:
-                dashboard_state.unsubscribe(listener)
+                request.app.state.dashboard_state.unsubscribe(listener)
 
         return StreamingResponse(
             stream(),
