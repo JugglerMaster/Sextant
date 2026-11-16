@@ -19,6 +19,12 @@ semantic versioning.
 - Agent update target versions are sorted newest-first in the Updates page.
 - `download_artifact` can compute the SHA-256 when the feed does not publish one.
 
+### Fixed
+
+- Publisher callback arg mismatch: `apply_update` called the publisher with
+  `wheel=...` while `_publish_agent_wheel` expected `wheel_path=...`, which
+  would raise a `TypeError` when a server update applied with the store enabled.
+
 ## [0.8.14] - 2026-11-16
 
 ### Added
