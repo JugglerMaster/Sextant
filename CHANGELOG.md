@@ -26,6 +26,12 @@ semantic versioning.
 - Updated `docs/INSTALL.md` agent install sections and the UI smoke test to
   match the new commands.
 
+### Fixed
+
+- Notification recovery test flakiness: SQLite backup API for per-test DB copy
+  (handles WAL mode) and retry in `_recovery_notification` for transient
+  read-visibility timing.
+
 ## [0.8.10] - 2026-11-16
 
 ### Changed

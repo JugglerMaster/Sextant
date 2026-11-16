@@ -394,7 +394,12 @@ class NotificationService:
         if not self.settings.telegram_recovery:
             return
         agent_id = str(row["id"])
-        raised = self.database.get_notification(f"alert.raised:{agent_id}:{incident_id}")
+        for _attempt in range(5):
+            raised = self.database.get_notification(f"alert.raised:{agent_id}:{incident_id}")
+            if raised is not None:
+                break
+            import time as _t
+            _t.sleep(0.1)
         if raised is None:
             return
         event_key = f"alert.cleared:{agent_id}:{incident_id}"

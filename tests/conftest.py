@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -60,7 +60,14 @@ def db(settings: Settings, app: "TestApp") -> Database:
     root at this test's data dir."""
     db_path = settings.database_path
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(app.state._seed_db_path, db_path)
+    # Force a WAL checkpoint on the seed, then copy via backup API.
+    src = sqlite3.connect(str(app.state._seed_db_path))
+    src.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    dst = sqlite3.connect(str(db_path))
+    src.backup(dst)
+    dst.commit()
+    src.close()
+    dst.close()
     db = Database(db_path)
     db.set_docker_compose_setting(str(settings.docker_compose_root))
     return db
