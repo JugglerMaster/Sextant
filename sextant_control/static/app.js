@@ -1165,7 +1165,7 @@ function renderAgentUpdatesRollouts() {
     const pct = total ? Math.round((done / total) * 100) : 0;
     const statusClass = agentUpdatesStatusClass(rollout.status);
     const selected = state.agentUpdatesSelected === rollout.id;
-    html += ` <tr><td><strong>${rollout.id.slice(0, 8)}</strong></td><td>${rollout.target_version}</td><td>${rollout.profile_slug || ""}</td><td><span class='status-pill ${statusClass}'>${agentUpdatesStatusLabel(rollout.status)}</span></td><td><div class='progress'><div style='width:${pct}%'></div></div></td><td>${done}/${total}${failed ? ` · ${failed} failed` : ""}</td><td>`;
+    html += ` <tr><td><strong>${(rollout.profile_name || rollout.profile_slug || "unknown").replace(/&/g,"&amp;").replace(/>/g,"&lt;").replace(/</g,"&lt;")}</strong><span class='form-hint'> → ${rollout.target_version}</span></td><td>${rollout.target_version}</td><td>${rollout.profile_name || rollout.profile_slug || ""}</td><td><span class='status-pill ${statusClass}'>${agentUpdatesStatusLabel(rollout.status)}</span></td><td><div class='progress'><div style='width:${pct}%'></div></div></td><td>${done}/${total}${failed ? ` · ${failed} failed` : ""}</td><td>`;
     html += ` <button class='button button-ghost button-small' data-agent-update-select='${rollout.id}'>View</button>`;
     if (rollout.status === "active") {
       html += ` <button class='button button-ghost button-small' data-agent-update-pause='${rollout.id}' data-agent-update-resume='${rollout.id}'>Pause</button>`;
@@ -1191,11 +1191,11 @@ function renderAgentUpdatesDetail() {
     return;
   }
   html += "<table class='data-table'>";
-  html += "<thead><tr><th>Agent</th><th>Profile</th><th>Status</th><th>Version</th><th>Last error</th><th></th></tr></thead>";
+  html += "<thead><tr><th>Agent</th><th>Version</th><th>Status</th><th>Last error</th><th></th></tr></thead>";
   html += "<tbody>";
   for (const agent of agents) {
     const statusClass = agentUpdatesStatusClass(agent.status);
-    html += ` <tr><td><strong>${agent.agent_id || agent.id}</strong></td><td>${agent.profile_slug || agent.profile || ""}</td><td><span class='status-pill ${statusClass}'>${agentUpdatesStatusLabel(agent.status)}</span></td><td>${agent.agent_version || ""}</td><td>${agent.last_error || agent.error || ""}</td><td>`;
+    html += ` <tr><td><strong>${agent.agent_name || agent.agent_id}</strong><br><span class='form-hint'>${agent.agent_hostname || ""}</span></td><td>${agent.current_version || agent.agent_version || ""}</td><td><span class='status-pill ${statusClass}'>${agentUpdatesStatusLabel(agent.status)}</span></td><td>${agent.last_error || agent.error || ""}</td><td>`;
     html += ` <button class='button button-ghost button-small' data-agent-update-rollback='${agent.agent_id || agent.id}'>Rollback</button>`;
     html += "</tr>";
   }
