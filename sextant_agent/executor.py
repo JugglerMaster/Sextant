@@ -197,6 +197,7 @@ def _powershell_capture(
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     prefix = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
+    script = script.rstrip("\r\n") + "\n\n"
     return run_capture(
         [_powershell(), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"],
         timeout,

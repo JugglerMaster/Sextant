@@ -174,6 +174,10 @@ def _run(args: list[str], timeout: int = 10, input_text: str | None = None) -> s
 
 def _powershell_script(script: str, timeout: int = 20) -> subprocess.CompletedProcess[str] | None:
     exe = shutil.which("powershell") or shutil.which("pwsh") or "powershell"
+    # PowerShell reads the script from stdin; a single trailing newline is not
+    # enough for it to flush the final statement, so ensure a blank line at the
+    # end (two trailing newlines) before sending the script.
+    script = script.rstrip("\r\n") + "\n\n"
     return _run(
         [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"],
         timeout=timeout,
