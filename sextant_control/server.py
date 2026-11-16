@@ -8112,6 +8112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def publish_agent_wheel(**kwargs: Any) -> sqlite3.Row | None:
             if not config.store_enabled:
                 return None
+            kwargs["wheel_path"] = kwargs.pop("wheel")
             return _publish_agent_wheel(
                 database,
                 store,
