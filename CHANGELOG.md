@@ -24,6 +24,9 @@ semantic versioning.
 - Publisher callback arg mismatch: `apply_update` called the publisher with
   `wheel=...` while `_publish_agent_wheel` expected `wheel_path=...`, which
   would raise a `TypeError` when a server update applied with the store enabled.
+- Windows self-update now records `.previous_version` after switching the
+  `current` junction, so `sextant-agent rollback` works there too. The POSIX
+  switch path ignores legacy `.venv` targets instead of failing.
 
 ## [0.8.14] - 2026-11-16
 

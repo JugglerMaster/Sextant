@@ -148,6 +148,22 @@ def _ensure_windows_current(install_dir: Path) -> Path:
     return current
 
 
+def _record_previous_version(install_dir: Path, previous: Path | None) -> None:
+    """Remember the release we switched away from, when it is a staged release."""
+    if previous is None:
+        return
+    try:
+        relative = previous.relative_to(install_dir / "releases")
+    except ValueError:
+        return
+    if not relative.parts:
+        return
+    version = relative.parts[0]
+    if not version:
+        return
+    (install_dir / ".previous_version").write_text(version, encoding="utf-8")
+
+
 def _switch_windows_current(install_dir: Path, version: str) -> Path | None:
     current = install_dir / "current"
     target = install_dir / "releases" / version / "venv"
@@ -162,6 +178,7 @@ def _switch_windows_current(install_dir: Path, version: str) -> Path | None:
         if previous is not None:
             _create_windows_junction(current, previous)
         raise
+    _record_previous_version(install_dir, previous)
     return previous
 
 
@@ -230,15 +247,14 @@ def _switch_current(install_dir: Path, version: str) -> None:
     if not current.exists() and legacy.exists():
         current.symlink_to(".venv")
     previous = _link_target(current)
-    if previous is not None:
-        previous_version = previous.relative_to(install_dir / "releases").parts[0]
-        (install_dir / ".previous_version").write_text(previous_version, encoding="utf-8")
     target = Path("releases") / version / "venv"
     temporary = install_dir / f".current-{os.getpid()}"
     if temporary.exists() or temporary.is_symlink():
         temporary.unlink()
     temporary.symlink_to(target)
     os.replace(temporary, current)
+    _record_previous_version(install_dir, previous)
+
 
 def rollback_update(
     config: AgentConfig,

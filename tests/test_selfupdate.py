@@ -235,7 +235,62 @@ def test_windows_junction_switch(tmp_path):
         assert previous is not None
         assert (install / "current" / "marker.txt").read_text(encoding="utf-8") == "new"
         assert (install / "venv" / "marker.txt").read_text(encoding="utf-8") == "old"
+        assert not (install / ".previous_version").exists()
+
+        newer = install / "releases" / "1.2.4" / "venv"
+        newer.mkdir(parents=True)
+        (newer / "marker.txt").write_text("newer", encoding="utf-8")
+        selfupdate._switch_windows_current(install, "1.2.4")
+        assert (install / "current" / "marker.txt").read_text(encoding="utf-8") == "newer"
+        assert (install / ".previous_version").read_text(encoding="utf-8") == "1.2.3"
     finally:
         selfupdate._remove_windows_junction(install / "current")
+
+
+def test_record_previous_version_tracks_staged_release(tmp_path):
+    install = tmp_path / "install"
+    previous = install / "releases" / "1.2.3" / "venv"
+    previous.mkdir(parents=True)
+    selfupdate._record_previous_version(install, previous)
+    assert (install / ".previous_version").read_text(encoding="utf-8") == "1.2.3"
+
+
+def test_record_previous_version_ignores_legacy_and_missing(tmp_path):
+    install = tmp_path / "install"
+    legacy = install / "venv"
+    legacy.mkdir(parents=True)
+    selfupdate._record_previous_version(install, legacy)
+    selfupdate._record_previous_version(install, None)
+    assert not (install / ".previous_version").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink test")
+def test_switch_current_records_previous_version(tmp_path):
+    install = tmp_path / "install"
+    old = install / "releases" / "1.2.3" / "venv"
+    old.mkdir(parents=True)
+    new = install / "releases" / "1.2.4" / "venv"
+    new.mkdir(parents=True)
+    current = install / "current"
+    current.symlink_to(old, target_is_directory=True)
+
+    selfupdate._switch_current(install, "1.2.4")
+
+    assert current.resolve() == new.resolve()
+    assert (install / ".previous_version").read_text(encoding="utf-8") == "1.2.3"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink test")
+def test_switch_current_ignores_legacy_previous(tmp_path):
+    install = tmp_path / "install"
+    legacy = install / ".venv"
+    legacy.mkdir(parents=True)
+    (install / "releases" / "1.2.4" / "venv").mkdir(parents=True)
+    current = install / "current"
+    current.symlink_to(".venv", target_is_directory=True)
+
+    selfupdate._switch_current(install, "1.2.4")
+
+    assert not (install / ".previous_version").exists()
 
 
