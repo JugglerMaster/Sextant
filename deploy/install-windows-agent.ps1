@@ -85,9 +85,13 @@ if ($LASTEXITCODE -ne 0) { throw "Package installation failed." }
 
 # Keep a stable current junction so future self-updates only need to repoint it.
 $currentDir = Join-Path $InstallDir 'current'
-cmd /c rmdir "$currentDir" 2>$null | Out-Null
-cmd /c mklink /J "$currentDir" "$venvDir" | Out-Null
-if ($LASTEXITCODE -ne 0) {
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+if (Test-Path $currentDir) { cmd /c rmdir "$currentDir" 2>$null | Out-Null }
+cmd /c mklink /J "$currentDir" "$venvDir" 2>$null | Out-Null
+$mklinkExit = $LASTEXITCODE
+$ErrorActionPreference = $prevEAP
+if ($mklinkExit -ne 0) {
     throw "Could not create the current junction. Remove any existing current directory under $InstallDir."
 }
 $agentExe = Join-Path $currentDir 'Scripts\sextant-agent.exe'
