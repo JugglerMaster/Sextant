@@ -4,6 +4,21 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [Unreleased]
+
+### Added
+
+- "Prep agent wheels" action on the Updates page downloads every published
+  agent wheel from the update feed into the local store and lists all available
+  agent versions with the newest selected by default.
+- Server updates publish the applied wheel into the local agent store
+  automatically when the store is enabled.
+
+### Changed
+
+- Agent update target versions are sorted newest-first in the Updates page.
+- `download_artifact` can compute the SHA-256 when the feed does not publish one.
+
 ## [0.8.14] - 2026-11-16
 
 ### Added

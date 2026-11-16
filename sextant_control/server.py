@@ -12,6 +12,7 @@ import logging
 import re
 import secrets
 import shlex
+import shutil
 import sqlite3
 import threading
 import time
@@ -8065,6 +8066,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         user: dict[str, Any] = Depends(require_admin),
         config: Settings = Depends(get_settings),
         database: Database = Depends(get_db),
+        store: ArtifactStore = Depends(get_store),
     ) -> dict[str, Any]:
         target = str(payload.version or "").strip().lstrip("vV")
 
@@ -8107,6 +8109,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 409,
                 str(decorated.get("apply_disabled_reason") or "The update cannot be applied."),
             )
+        def publish_agent_wheel(**kwargs: Any) -> sqlite3.Row | None:
+            if not config.store_enabled:
+                return None
+            return _publish_agent_wheel(
+                database,
+                store,
+                actor=user["username"],
+                **kwargs,
+            )
+
         try:
             result = selfupdate.apply_update(
                 decorated,
@@ -8116,6 +8128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 trigger_path=config.update_restart_path,
                 state_path=config.update_state_path,
                 max_bytes=config.update_download_max_mb * 1024 * 1024,
+                publisher=publish_agent_wheel,
             )
         except selfupdate.UpdateError as exc:
             database.audit(
@@ -8139,6 +8152,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "sha256": result.get("sha256", ""),
                 "size": result.get("size", 0),
                 "restart_requested": bool(result.get("restart_requested")),
+                "agent_release_id": result.get("agent_release_id", ""),
+                "agent_publish_error": result.get("agent_publish_error", ""),
             },
             ip=client_ip(request, config.trust_proxy),
         )
@@ -8244,6 +8259,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 }
             )
         return {"profiles": items}
+
+    @app.post("/api/agent-updates/prepare")
+    def prepare_agent_update_releases(
+        request: Request,
+        user: dict[str, Any] = Depends(require_admin),
+        database: Database = Depends(get_db),
+        config: Settings = Depends(get_settings),
+        store: ArtifactStore = Depends(get_store),
+    ) -> dict[str, Any]:
+        if not config.store_enabled:
+            raise HTTPException(status_code=404, detail="The package store is disabled.")
+        try:
+            result = _prepare_agent_releases(
+                database,
+                store,
+                config,
+                actor=user["username"],
+            )
+        except selfupdate.UpdateError as exc:
+            database.audit(
+                user["username"],
+                "agent-update.prepare",
+                updates.sanitize_feed(config.update_feed),
+                {"status": "failed", "error": str(exc)},
+                ip=client_ip(request, config.trust_proxy),
+            )
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        database.audit(
+            user["username"],
+            "agent-update.prepare",
+            updates.sanitize_feed(config.update_feed),
+            {
+                "prepared": [item["version"] for item in result["prepared"]],
+                "skipped": result["skipped"],
+                "failed": result["failed"],
+            },
+            ip=client_ip(request, config.trust_proxy),
+        )
+        return result
 
     @app.post("/api/agent-updates/rollout")
     def create_agent_update_rollout(
@@ -9221,6 +9275,209 @@ def _latest_agent_release(database: Database) -> Any:
     if not releases:
         return None
     return max(releases, key=lambda row: updates.parse_version(row["version"]))
+
+
+def _normalize_release_version(value: Any) -> str:
+    return str(value or "").strip().lstrip("vV")
+
+
+def _ensure_agent_store_package(database: Database, actor: str) -> sqlite3.Row:
+    package = database.get_store_package("sextant-agent")
+    if package is not None:
+        return package
+    try:
+        return database.create_store_package(
+            slug="sextant-agent",
+            name="Sextant Agent",
+            vendor="Sextant",
+            description="Sextant agent wheel",
+            kind="agent",
+            platforms=["linux", "windows"],
+            actor=actor,
+        )
+    except sqlite3.IntegrityError:
+        package = database.get_store_package("sextant-agent")
+        if package is None:
+            raise
+        return package
+
+
+def _publish_agent_wheel(
+    database: Database,
+    store: ArtifactStore,
+    *,
+    version: str,
+    wheel_path: Path,
+    sha256: str,
+    size: int,
+    filename: str,
+    actor: str,
+    channel: str = "stable",
+    notes_url: str = "",
+) -> sqlite3.Row:
+    """Copy a verified wheel into the store and record it as an agent release."""
+    target = _normalize_release_version(version)
+    package = _ensure_agent_store_package(database, actor)
+    for row in database.list_store_releases(package["id"]):
+        if row["artifact_type"] == "agent-wheel" and _normalize_release_version(row["version"]) == target:
+            return row
+    temp_path = store.new_temp_path()
+    try:
+        shutil.copyfile(wheel_path, temp_path)
+        store.commit(temp_path, sha256, size)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    manifest = {
+        "schema": 1,
+        "slug": "sextant-agent",
+        "version": target,
+        "artifact_type": "agent-wheel",
+        "filename": filename,
+        "sha256": sha256,
+        "size": size,
+        "channel": channel,
+        "min_version": "",
+        "mandatory": False,
+        "notes_url": notes_url,
+        "signature": None,
+        "key_id": None,
+        "source": "update-feed",
+    }
+    row = database.create_store_release(
+        package_id=package["id"],
+        version=target,
+        artifact_type="agent-wheel",
+        filename=filename,
+        size=size,
+        sha256=sha256,
+        manifest=manifest,
+        actor=actor,
+        channel=channel,
+        notes_url=notes_url,
+    )
+    database.store_event(
+        "published",
+        package_id=package["id"],
+        release_id=row["id"],
+        detail={"version": target, "sha256": sha256, "size": size, "source": "update-feed"},
+        actor=actor,
+    )
+    return row
+
+
+def _prepare_agent_releases(
+    database: Database,
+    store: ArtifactStore,
+    config: Settings,
+    *,
+    actor: str,
+    versions: set[str] | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Download published agent wheels from the update feed into the local store."""
+    if not config.update_feed:
+        raise selfupdate.UpdateError("No update feed is configured.", 409)
+    try:
+        feed_releases = updates.list_releases(config.update_feed, limit=limit)
+    except Exception as exc:
+        raise selfupdate.UpdateError(
+            f"Could not read the update feed: {updates.sanitize_error(exc)}",
+            502,
+        ) from exc
+
+    package = _ensure_agent_store_package(database, actor)
+    rows = database.list_store_releases(package["id"])
+    known = {
+        _normalize_release_version(row["version"])
+        for row in rows
+        if row["artifact_type"] == "agent-wheel"
+    }
+    available = {
+        _normalize_release_version(row["version"])
+        for row in rows
+        if row["artifact_type"] == "agent-wheel" and not row["yanked_at"]
+    }
+    max_bytes = min(
+        config.update_download_max_mb * 1024 * 1024,
+        store.max_blob_bytes,
+    )
+    prepared: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    failed: list[dict[str, str]] = []
+
+    for release in feed_releases:
+        version = _normalize_release_version(release.get("version"))
+        if not version:
+            continue
+        if versions is not None and version not in versions:
+            continue
+        if version in known:
+            skipped.append(version)
+            continue
+        asset = updates.select_server_asset(release.get("assets") or [], version)
+        if not asset:
+            failed.append({"version": version, "error": "release has no wheel asset"})
+            continue
+        url = str(asset.get("url") or "").strip()
+        sha256 = str(asset.get("sha256") or "").strip().casefold()
+        try:
+            size = int(asset.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        filename = Path(
+            str(asset.get("name") or f"sextant-{version}-py3-none-any.whl")
+        ).name[:255]
+        if not url or size <= 0:
+            failed.append(
+                {
+                    "version": version,
+                    "error": "release wheel is missing a URL or size",
+                }
+            )
+            continue
+        temp_path = store.new_temp_path()
+        try:
+            downloaded = selfupdate.download_artifact(
+                url,
+                temp_path,
+                expected_size=size,
+                expected_sha256=sha256,
+                max_bytes=max_bytes,
+            )
+            sha256 = str(downloaded.get("sha256") or sha256).casefold()
+            size = int(downloaded.get("size") or size)
+            row = _publish_agent_wheel(
+                database,
+                store,
+                version=version,
+                wheel_path=temp_path,
+                sha256=sha256,
+                size=size,
+                filename=filename,
+                actor=actor,
+                notes_url=str(release.get("url") or "")[:500],
+            )
+            prepared.append(
+                {
+                    "version": version,
+                    "release_id": row["id"],
+                    "sha256": sha256,
+                    "size": size,
+                }
+            )
+            known.add(version)
+            available.add(version)
+        except Exception as exc:
+            failed.append({"version": version, "error": updates.sanitize_error(exc)})
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    return {
+        "prepared": prepared,
+        "skipped": skipped,
+        "failed": failed,
+        "versions": sorted(available, key=updates.parse_version, reverse=True),
+    }
 
 
 def _policy_from_settings(settings: dict[str, Any]) -> dict[str, bool]:

@@ -225,7 +225,7 @@ def download_artifact(
             f"Downloaded artifact size {total} does not match the expected {expected_size}.",
             400,
         )
-    if actual_sha256.casefold() != str(expected_sha256).casefold():
+    if expected_sha256 and actual_sha256.casefold() != str(expected_sha256).casefold():
         destination.unlink(missing_ok=True)
         raise UpdateError("Downloaded artifact failed SHA-256 verification.", 400)
     return {"size": total, "sha256": actual_sha256}
@@ -439,6 +439,7 @@ def apply_update(
     health: Callable[..., tuple[bool, str]] | None = None,
     switcher: Callable[[Path, Path], Path | None] | None = None,
     trigger: Callable[..., Path] | None = None,
+    publisher: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     downloader = downloader or download_artifact
     stager = stager or stage_venv
@@ -498,6 +499,8 @@ def apply_update(
     release_root = Path(release_root)
     release_dir = release_root / target
     filename = Path(str(asset.get("name") or f"sextant-{target}-py3-none-any.whl")).name
+    published_release: Any = None
+    publish_error = ""
     with tempfile.TemporaryDirectory(prefix="sextant-server-update-") as temp:
         wheel = Path(temp) / filename
         downloader(
@@ -524,6 +527,17 @@ def apply_update(
                 f"Staged server failed its health check; the current release is unchanged. {detail}",
                 500,
             )
+        if publisher is not None:
+            try:
+                published_release = publisher(
+                    version=target,
+                    wheel=wheel,
+                    sha256=sha256,
+                    size=size,
+                    filename=filename,
+                )
+            except Exception as exc:  # publishing the agent wheel is best-effort
+                publish_error = updates.sanitize_error(exc)
 
     previous = switcher(current_link, venv_dir)
     state = {
@@ -573,6 +587,10 @@ def apply_update(
         "restart_requested": restart_requested,
         "restart_trigger": str(trigger_path),
         "restart_error": restart_error,
+        "agent_release_id": (
+            str(published_release["id"]) if published_release is not None else ""
+        ),
+        "agent_publish_error": publish_error,
         "instructions": (
             "The new release is live after the service restarts."
             if restart_requested

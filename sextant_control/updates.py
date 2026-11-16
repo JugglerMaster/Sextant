@@ -232,6 +232,68 @@ def _github_release(repo: str) -> dict[str, Any]:
     raise ValueError("no published release found")
 
 
+def _github_releases(repo: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Return every published GitHub release, newest first."""
+    token = os.environ.get("SEXTANT_GITHUB_TOKEN", "").strip()
+    per_page = max(1, min(int(limit or 20), 100))
+    data = _http_json(
+        f"https://api.github.com/repos/{repo}/releases?per_page={per_page}",
+        token=token,
+    )
+    if not isinstance(data, list):
+        raise ValueError("unexpected GitHub response")
+    releases: list[dict[str, Any]] = []
+    for release in data:
+        if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
+            continue
+        tag = str(release.get("tag_name") or release.get("name") or "").strip()
+        version = tag.lstrip("vV")
+        if not version:
+            continue
+        assets = [
+            normalize_asset(asset, version=version)
+            for asset in release.get("assets") or []
+            if isinstance(asset, dict)
+        ]
+        releases.append(
+            {
+                "version": version,
+                "url": str(release.get("html_url", ""))[:1000],
+                "notes": str(release.get("body") or "")[:4000],
+                "published_at": str(release.get("published_at") or ""),
+                "assets": assets,
+            }
+        )
+    return releases
+
+
+def list_releases(feed: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Return all published releases from the feed, newest version first."""
+    feed = (feed or "").strip()
+    if not feed:
+        raise ValueError("No update feed is configured.")
+    if feed.startswith("github:"):
+        repo = feed.split(":", 1)[1].strip()
+        if not repo:
+            raise ValueError("SEXTANT_UPDATE_FEED is missing the owner/repo")
+        releases = _github_releases(repo, limit=limit)
+    elif feed.startswith("https://") or feed.startswith("http://"):
+        releases = [_static_release(feed)]
+    else:
+        raise ValueError("SEXTANT_UPDATE_FEED must be github:owner/repo or an https URL")
+
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for release in releases:
+        version = str(release.get("version") or "").strip().lstrip("vV")
+        if not version or version.casefold() in seen:
+            continue
+        seen.add(version.casefold())
+        unique.append(release)
+    unique.sort(key=lambda item: parse_version(item.get("version") or ""), reverse=True)
+    return unique
+
+
 def _static_release(url: str) -> dict[str, Any]:
     data = _http_json(url)
     if not isinstance(data, dict):

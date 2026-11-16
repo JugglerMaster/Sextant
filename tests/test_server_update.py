@@ -359,6 +359,44 @@ def test_apply_stages_switches_and_rolls_back(tmp_path, monkeypatch):
     assert json.loads(trigger.read_text())["action"] == "rollback"
 
 
+def test_apply_publishes_agent_wheel(tmp_path, monkeypatch):
+    release_root, current, trigger, state_path = _prepare_roots(tmp_path)
+    seen = {}
+
+    def fake_download(url, destination, **kwargs):
+        Path(destination).write_bytes(b"wheel")
+        return {"size": 5, "sha256": SHA}
+
+    def fake_stage(version, wheel, root):
+        venv = Path(root) / version / "venv"
+        venv.mkdir(parents=True, exist_ok=True)
+        return venv
+
+    def publisher(**kwargs):
+        seen.update(kwargs)
+        return {"id": "rel_test"}
+
+    monkeypatch.setattr(selfupdate, "download_artifact", fake_download)
+    monkeypatch.setattr(selfupdate, "stage_venv", fake_stage)
+    monkeypatch.setattr(selfupdate, "health_check", lambda venv, version: (True, ""))
+
+    result = selfupdate.apply_update(
+        _apply_info(),
+        version="9.9.9",
+        release_root=release_root,
+        current_link=current,
+        trigger_path=trigger,
+        state_path=state_path,
+        max_bytes=1024,
+        publisher=publisher,
+    )
+    assert result["agent_release_id"] == "rel_test"
+    assert result["agent_publish_error"] == ""
+    assert seen["version"] == "9.9.9"
+    assert Path(seen["wheel"]).name == "sextant-9.9.9-py3-none-any.whl"
+    assert seen["sha256"] == SHA
+
+
 def test_apply_health_failure_leaves_current_untouched(tmp_path, monkeypatch):
     release_root, current, trigger, state_path = _prepare_roots(tmp_path)
     old_target = current.resolve()

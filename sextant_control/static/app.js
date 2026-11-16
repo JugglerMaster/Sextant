@@ -1074,16 +1074,41 @@ function agentUpdatesStatusLabel(status) {
 
 async function loadAgentUpdates(silent = false) {
   const rollouts = await api("/api/agent-updates/rollouts");
-  const releases = await api("/api/store/packages/sextant-agent");
+  let releases = [];
+  try {
+    const store = await api("/api/store/packages/sextant-agent");
+    releases = (store.releases || []).filter(
+      (r) => r.artifact_type === "agent-wheel" && !r.yanked_at,
+    );
+  } catch (error) {
+    const message = String(error.message || "");
+    if (!message.includes("not found") && !message.includes("disabled")) throw error;
+  }
   state.agentUpdates = {
     rollouts: rollouts.rollouts || [],
-    releases: (releases.releases || []).filter(
-      (r) => r.artifact_type === "agent-wheel" && !r.yanked_at,
-    ),
+    releases,
   };
   renderAgentUpdatesForm();
   renderAgentUpdatesRollouts();
   if (state.agentUpdatesSelected) renderAgentUpdatesDetail();
+}
+
+function agentVersionParts(value) {
+  return String(value || "")
+    .split(/[^0-9]+/)
+    .filter(Boolean)
+    .map((part) => parseInt(part, 10) || 0);
+}
+
+function compareAgentVersions(left, right) {
+  const a = agentVersionParts(left);
+  const b = agentVersionParts(right);
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (a[index] || 0) - (b[index] || 0);
+    if (difference) return difference;
+  }
+  return 0;
 }
 
 function renderAgentUpdatesForm() {
@@ -1096,12 +1121,21 @@ function renderAgentUpdatesForm() {
         .map((p) => ` <option value="${p.id}">${p.name} (${p.slug})</option> `)
         .join("")
     : " <option disabled>Select a profile</option> ";
-  const releases = state.agentUpdates?.releases || [];
+  const previous = versionSelect.value;
+  const releases = [...(state.agentUpdates?.releases || [])].sort((a, b) =>
+    compareAgentVersions(b.version, a.version),
+  );
   versionSelect.innerHTML = releases.length
     ? releases
-        .map((r) => ` <option value="${r.version}">${r.version} ${r.channel ? "· " + r.channel : ""}</option> `)
+        .map((r, index) =>
+          ` <option value="${r.version}">${r.version}${index === 0 ? " · latest" : ""}${r.channel ? " · " + r.channel : ""}</option> `,
+        )
         .join("")
     : " <option disabled>No agent releases</option> ";
+  if (releases.length) {
+    const keep = releases.some((r) => r.version === previous);
+    versionSelect.value = keep ? previous : releases[0].version;
+  }
 }
 
 function renderAgentUpdatesRollouts() {
@@ -1216,6 +1250,50 @@ function createAgentUpdateRollout() {
     })
     .finally(() => {
       state.agentUpdatesBusy = false;
+      if (label) label.textContent = "";
+    });
+}
+
+function prepareAgentReleases() {
+  const button = $("agent-updates-prepare");
+  const hint = $("agent-updates-prepare-hint");
+  const error = $("agent-updates-error");
+  const label = $("agent-updates-state-label");
+  if (button) button.disabled = true;
+  state.agentUpdatesError = "";
+  if (error) error.textContent = "";
+  if (label) label.textContent = "Preparing agent wheels…";
+  api("/api/agent-updates/prepare", { method: "POST" })
+    .then((result) => {
+      const prepared = result.prepared || [];
+      const skipped = result.skipped || [];
+      const failed = result.failed || [];
+      if (failed.length) {
+        state.agentUpdatesError = failed
+          .map((item) => `${item.version}: ${item.error}`)
+          .join("; ");
+        if (error) error.textContent = state.agentUpdatesError;
+        toast(`Prepared ${prepared.length}, failed ${failed.length}.`, "error");
+      } else {
+        toast(
+          prepared.length
+            ? `Prepared ${prepared.length} agent release(s).`
+            : "Agent store is already up to date.",
+          "ok",
+        );
+      }
+      if (hint) {
+        hint.textContent = `${(result.versions || []).length} version(s) in the store; ${skipped.length} already present.`;
+      }
+      return loadAgentUpdates(true);
+    })
+    .catch((err) => {
+      state.agentUpdatesError = err.message;
+      if (error) error.textContent = err.message;
+      toast(err.message, "error");
+    })
+    .finally(() => {
+      if (button) button.disabled = false;
       if (label) label.textContent = "";
     });
 }
@@ -10588,6 +10666,7 @@ function wireEvents() {
     event.preventDefault();
     createAgentUpdateRollout();
   });
+  $("agent-updates-prepare")?.addEventListener("click", prepareAgentReleases);
   document.addEventListener("click", (event) => {
     const target = event.target.closest("[data-agent-update-select]");
     if (target) {
