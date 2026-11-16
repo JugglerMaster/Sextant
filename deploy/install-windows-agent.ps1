@@ -78,8 +78,8 @@ if (-not (Test-Path $venvPython)) {
 }
 
 Write-Host "Installing sextant from $SourcePath"
-& (Join-Path $venvDir 'Scripts\pip.exe') install --upgrade pip
-if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed." }
+& (Join-Path $venvDir 'Scripts\python.exe') -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) { Write-Warning "pip upgrade failed; continuing with existing pip." }
 & (Join-Path $venvDir 'Scripts\pip.exe') install --no-deps --upgrade $SourcePath
 if ($LASTEXITCODE -ne 0) { throw "Package installation failed." }
 

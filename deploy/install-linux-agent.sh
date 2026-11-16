@@ -50,7 +50,7 @@ fi
 install -d -m 0755 "$INSTALL_DIR"
 install -d -m 0700 "$CONFIG_DIR"
 python3 -m venv "$INSTALL_DIR/.venv"
-"$INSTALL_DIR/.venv/bin/pip" install --upgrade pip
+"$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip || echo "WARNING: pip upgrade failed; continuing with existing pip." >&2
 "$INSTALL_DIR/.venv/bin/pip" install --no-deps "$SOURCE_DIR"
 ln -sfn .venv "$INSTALL_DIR/current"
 
