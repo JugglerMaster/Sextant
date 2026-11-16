@@ -4,6 +4,14 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.12] - 2026-11-16
+
+### Fixed
+
+- Notification recovery test flakiness: SQLite backup API for per-test DB copy
+  (handles WAL mode) and retry in `_recovery_notification` for transient
+  read-visibility timing.
+
 ## [0.8.11] - 2026-11-16
 
 ### Added
@@ -25,12 +33,6 @@ semantic versioning.
   set of environment variables on Linux.
 - Updated `docs/INSTALL.md` agent install sections and the UI smoke test to
   match the new commands.
-
-### Fixed
-
-- Notification recovery test flakiness: SQLite backup API for per-test DB copy
-  (handles WAL mode) and retry in `_recovery_notification` for transient
-  read-visibility timing.
 
 ## [0.8.10] - 2026-11-16
 
