@@ -270,43 +270,37 @@ sudo -u sextant \
 
 ### 3.1 One-command installer (recommended)
 
-Run as root on the endpoint, with the source tree available:
+Run on the endpoint as root. The command downloads the current source from the
+repository and runs the installer, so no source checkout is needed:
 
 ```bash
-sudo SOURCE_DIR=/path/to/sextant \
-  WATCH_SERVICES=ssh,nginx,postgresql \
-  AGENT_TAGS=office \
-  PROFILE=server \
-  ./deploy/install-linux-agent.sh \
-  https://ops.example.com \
-  sextant_enroll_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
-  "fileserver-01"
+curl -fsSL https://raw.githubusercontent.com/JugglerMaster/Sextant/main/deploy/install-agent-bootstrap.py -o /tmp/sextant-install.py && sudo python3 /tmp/sextant-install.py https://ops.example.com sextant_enroll_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx "fileserver-01"
 ```
 
-Use the service names `systemctl` knows. On Debian/Ubuntu the SSH unit is usually `ssh.service`; on RHEL-family it is `sshd.service`.
+Use the service names `systemctl` knows. On Debian/Ubuntu the SSH unit is
+usually `ssh.service`; on RHEL-family it is `sshd.service`.
 
-Optional installer variables:
+The bootstrap exposes the installer's options as flags:
 
-| Variable | Purpose |
+| Flag | Purpose |
 |---|---|
-| `SOURCE_DIR` | Source tree (or built wheel) to install |
-| `SERVICE_FILE` | Optional explicit path to `sextant-agent.service`; otherwise resolved from the source/script tree |
-| `WATCH_SERVICES` | Comma-separated systemd units to monitor |
-| `AGENT_TAGS` | Comma-separated tags shown in the dashboard |
-| `CA_FILE` | Private CA bundle for TLS verification |
-| `ALLOW_PACKAGES` | Set to `0` to disable managed package actions locally (default `1`) |
-| `ALLOW_DOCKER` | Set to `1` to enable read-only Docker discovery/inventory (default `0`) |
-| `ALLOW_DOCKER_EXEC` / `ALLOW_DOCKER_PRUNE` | Enable one-shot container exec / cleanup actions locally |
-| `ALLOW_DOCKER_COMPOSE` | Reserved for future Compose support; stored in the agent config |
-| `ALLOW_DISCOVERY` | Set to `1` to allow server-requested discovery of this agent's local VLAN (Linux only, default `0`) |
-| `DOCKER_SOCKET` / `DOCKER_COMMAND` | Optional local Docker socket/CLI overrides |
-| `DOCKER_COMPOSE_DIR` | Agent-owned Compose runtime directory (default `/var/lib/sextant-agent/docker/stacks`) |
-| `DOCKER_CONSOLE_MAX_SESSIONS` / `DOCKER_CONSOLE_IDLE_SECONDS` | Optional concurrent-console and idle-timeout overrides |
-| `NO_SELF_UPDATE` | Set to `1` to disable agent self-update in the config |
-| `PROFILE` | Profile slug selected at enrollment (default `workstation`) |
-| `INSTALL_DIR` | Default `/opt/sextant-agent` |
-| `CONFIG_DIR` | Default `/etc/sextant-agent` |
-| `CONFIG_FILE` | Default `<CONFIG_DIR>/config.json` |
+| `--tag` | Git tag or branch to install from (default: `main`) |
+| `--source-dir` | Use an existing local source tree instead of downloading it |
+| `--profile` | Profile slug selected at enrollment (default: `workstation`) |
+| `--watch-service` | Service to monitor (repeatable) |
+| `--agent-tags` | Comma-separated dashboard tags |
+| `--ca-file` | Private CA bundle for TLS verification |
+| `--no-self-update` | Disable agent self-update |
+| `--allow-discovery` | Allow server-requested local VLAN discovery |
+| `--no-packages` | Disable managed package actions |
+
+The installer's full set of environment variables is still honored on Linux;
+set them before running the command, e.g.
+`ALLOW_DOCKER=1`, `ALLOW_DOCKER_EXEC=1`, `ALLOW_DOCKER_COMPOSE=1`,
+`ALLOW_DOCKER_PRUNE=1`, `DOCKER_SOCKET`, `DOCKER_COMMAND`,
+`DOCKER_COMPOSE_DIR`, `DOCKER_CONSOLE_MAX_SESSIONS`, and
+`DOCKER_CONSOLE_IDLE_SECONDS`. The installer also accepts `SOURCE_DIR`,
+`SERVICE_FILE`, `INSTALL_DIR`, `CONFIG_DIR`, and `CONFIG_FILE`.
 
 The installer creates `/opt/sextant-agent/.venv`, the `current -> .venv` symlink, installs the package with `--no-deps`, enrolls, writes mode-0600 config, installs `/etc/systemd/system/sextant-agent.service`, and starts it.
 
@@ -411,58 +405,33 @@ or download it from <https://www.python.org/downloads/windows/>. During setup, c
 py -3 --version
 ```
 
-### 4.2 Copy the source
+### 4.2 Download the source
 
-Copy the source tree or a built wheel to the host, for example:
-
-```text
-C:\packages\sextant
-C:\packages\sextant-0.3.1-py3-none-any.whl
-```
-
-A source tree must contain `pyproject.toml`; pass a wheel path directly to `-SourcePath` for a wheel install.
+The install command downloads the current source from the repository
+automatically, so you do not need to copy a source tree or wheel to the host.
+If you prefer to install from a local copy, pass `--source-dir` to the
+bootstrap (it must contain `pyproject.toml`).
 
 ### 4.3 Run the installer
 
-Open **PowerShell as Administrator**, allow the script for this session, and run:
+Open **PowerShell as Administrator** and run:
 
 ```powershell
-Set-Location C:\packages\sextant
-Set-ExecutionPolicy -Scope Process Bypass -Force
-
-.\deploy\install-windows-agent.ps1 `
-  -Server https://ops.example.com `
-  -Token sextant_enroll_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx `
-  -Name "Studio PC" `
-  -Profile workstation `
-  -WatchServices Spooler,WSearch
+curl.exe -fsSL https://raw.githubusercontent.com/JugglerMaster/Sextant/main/deploy/install-agent-bootstrap.py -o $env:TEMP\sextant-install.py; python $env:TEMP\sextant-install.py https://ops.example.com sextant_enroll_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx "Studio PC"
 ```
 
-If you copied only the script, point it at the package:
+The command downloads the current source from the repository and runs the
+installer. The bootstrap exposes the installer's options as flags:
 
-```powershell
-.\install-windows-agent.ps1 `
-  -Server https://ops.example.com `
-  -Token sextant_enroll_... `
-  -SourcePath C:\packages\sextant `
-  -CaFile C:\certs\corp-root-ca.pem
-```
-
-Parameters:
-
-| Parameter | Purpose |
+| Flag | Purpose |
 |---|---|
-| `-Server` | Console base URL; HTTPS strongly recommended |
-| `-Token` | One-time enrollment token |
-| `-Name` | Display name (defaults to `$env:COMPUTERNAME`) |
-| `-SourcePath` | Source tree containing `pyproject.toml` (defaults to the parent of the script) |
-| `-InstallDir` | Default `C:\ProgramData\SextantAgent` |
-| `-WatchServices` | Windows service **names** (not display names) |
-| `-CaFile` | Private CA bundle for TLS verification |
-| `-AllowPackages` | Deprecated: package management is enabled by default |
-| `-NoPackages` | Disable managed package actions locally |
-| `-NoSelfUpdate` | Disable agent self-update in the config |
-| `-Profile` | Profile slug selected at enrollment (default `workstation`) |
+| `--tag` | Git tag or branch to install from (default: `main`) |
+| `--source-dir` | Use an existing local source tree instead of downloading it |
+| `--profile` | Profile slug selected at enrollment (default: `workstation`) |
+| `--watch-service` | Windows service **name** (not display name; repeatable) |
+| `--ca-file` | Private CA bundle for TLS verification |
+| `--no-self-update` | Disable agent self-update |
+| `--no-packages` | Disable managed package actions |
 
 The installer:
 

@@ -3890,9 +3890,11 @@ function powershellSingleQuote(value) {
 function enrollmentInstallCommands(token = "") {
   const server = enrollmentServerUrl();
   const code = token || "insert enrollment code here";
+  const bootstrap =
+    "https://raw.githubusercontent.com/JugglerMaster/Sextant/main/deploy/install-agent-bootstrap.py";
   return {
-    linux: `sudo ./deploy/install-linux-agent.sh ${shellSingleQuote(server)} ${shellSingleQuote(code)} "$(hostname)"`,
-    windows: `.\\deploy\\install-windows-agent.ps1 -Server ${powershellSingleQuote(server)} -Token ${powershellSingleQuote(code)} -Name $env:COMPUTERNAME`,
+    linux: `curl -fsSL ${bootstrap} -o /tmp/sextant-install.py && sudo python3 /tmp/sextant-install.py ${shellSingleQuote(server)} ${shellSingleQuote(code)} "$(hostname)"`,
+    windows: `curl.exe -fsSL ${bootstrap} -o $env:TEMP\\sextant-install.py; python $env:TEMP\\sextant-install.py ${powershellSingleQuote(server)} ${powershellSingleQuote(code)} $env:COMPUTERNAME`,
   };
 }
 

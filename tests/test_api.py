@@ -86,8 +86,10 @@ def test_enrollment_returns_linux_and_windows_install_commands(client, admin):
     windows = data["install_commands"]["windows"]
     assert data["token"] in linux
     assert data["token"] in windows
-    assert "install-linux-agent.sh" in linux
-    assert "install-windows-agent.ps1" in windows
+    assert "install-agent-bootstrap.py" in linux
+    assert "install-agent-bootstrap.py" in windows
+    assert "/tmp/sextant-install.py" in linux
+    assert "sextant-install.py" in windows
     assert "insert enrollment code here" not in linux
     assert "insert enrollment code here" not in windows
 

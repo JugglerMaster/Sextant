@@ -2481,10 +2481,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   if (!enrollmentHint.textContent.includes("insert enrollment code here")) {
     throw new Error("Enrollment hint does not explain the enrollment-code placeholder");
   }
-  if (!linuxCommand.textContent.includes("install-linux-agent.sh") || !linuxCommand.textContent.includes("insert enrollment code here")) {
+  if (!linuxCommand.textContent.includes("install-agent-bootstrap.py") || !linuxCommand.textContent.includes("insert enrollment code here")) {
     throw new Error("Linux install command placeholder did not render");
   }
-  if (!windowsCommand.textContent.includes("install-windows-agent.ps1") || !windowsCommand.textContent.includes("insert enrollment code here")) {
+  if (!windowsCommand.textContent.includes("install-agent-bootstrap.py") || !windowsCommand.textContent.includes("insert enrollment code here")) {
     throw new Error("Windows install command placeholder did not render");
   }
   const enrollmentForm = window.document.getElementById("enrollment-form");

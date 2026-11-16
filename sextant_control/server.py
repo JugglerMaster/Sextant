@@ -518,6 +518,12 @@ def _public_settings(settings: Settings) -> dict[str, Any]:
     }
 
 
+_AGENT_BOOTSTRAP_URL = (
+    "https://raw.githubusercontent.com/JugglerMaster/Sextant/main/"
+    "deploy/install-agent-bootstrap.py"
+)
+
+
 def _powershell_quote(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
@@ -545,16 +551,22 @@ def _discovery_install_command(
 
 
 def _enrollment_install_commands(base_url: str, token: str) -> dict[str, str]:
-    """Build OS-specific installer commands with the one-time token embedded."""
+    """Build OS-specific installer commands with the one-time token embedded.
+
+    Both commands download the current agent source from the repository and
+    run the platform installer, so the endpoint does not need a source
+    checkout.
+    """
     return {
         "linux": (
-            "sudo ./deploy/install-linux-agent.sh "
+            f"curl -fsSL {_AGENT_BOOTSTRAP_URL} -o /tmp/sextant-install.py && "
+            f"sudo python3 /tmp/sextant-install.py "
             f"{shlex.quote(base_url)} {shlex.quote(token)} \"$(hostname)\""
         ),
         "windows": (
-            ".\\deploy\\install-windows-agent.ps1 "
-            f"-Server {_powershell_quote(base_url)} -Token {_powershell_quote(token)} "
-            "-Name $env:COMPUTERNAME"
+            f"curl.exe -fsSL {_AGENT_BOOTSTRAP_URL} -o $env:TEMP\\sextant-install.py; "
+            f"python $env:TEMP\\sextant-install.py "
+            f"{_powershell_quote(base_url)} {_powershell_quote(token)} $env:COMPUTERNAME"
         ),
     }
 

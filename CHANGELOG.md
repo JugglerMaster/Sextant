@@ -4,6 +4,28 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.11] - 2026-11-16
+
+### Added
+
+- `deploy/install-agent-bootstrap.py`: a single cross-platform bootstrap that
+  downloads the current source from the repository and runs the platform
+  installer, so agent install no longer requires a pre-existing source checkout.
+
+### Changed
+
+- Enrollment page and server now emit a single install command per OS that
+  fetches the source from the repository (raw `main` branch) and runs the
+  installer:
+  - Linux: `curl -fsSL <repo>/deploy/install-agent-bootstrap.py -o /tmp/sextant-install.py && sudo python3 /tmp/sextant-install.py <server> <token> "$(hostname)"`
+  - Windows (elevated PowerShell): `curl.exe -fsSL <repo>/deploy/install-agent-bootstrap.py -o $env:TEMP\sextant-install.py; python $env:TEMP\sextant-install.py <server> <token> $env:COMPUTERNAME`
+- The bootstrap exposes the installer's options as flags (`--tag`, `--source-dir`,
+  `--profile`, `--watch-service`, `--agent-tags`, `--ca-file`, `--no-self-update`,
+  `--allow-discovery`, `--no-packages`) and still honors the installer's full
+  set of environment variables on Linux.
+- Updated `docs/INSTALL.md` agent install sections and the UI smoke test to
+  match the new commands.
+
 ## [0.8.10] - 2026-11-16
 
 ### Changed
