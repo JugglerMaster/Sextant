@@ -759,6 +759,39 @@
           <p class="form-hint" id="updates-hint">Updates are staged and health-checked before the stable current symlink is switched. The server restarts through a root-owned systemd handoff.</p>
           <p class="form-error" id="updates-error" role="alert"></p>
         </article>
+
+        <article class="panel" id="agent-updates-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">Fleet</p><h2>Agent updates</h2></div>
+            <span class="form-hint" id="agent-updates-state-label" aria-live="polite"></span>
+          </div>
+          <form id="agent-updates-form" class="form-grid">
+            <label class="field">
+              <span>Profile</span>
+              <select id="agent-updates-profile" required></select>
+            </label>
+            <label class="field">
+              <span>Target version</span>
+              <select id="agent-updates-version" required></select>
+            </label>
+            <label class="field">
+              <span>Batch size</span>
+              <input id="agent-updates-batch-size" type="number" min="1" max="1000" value="1">
+            </label>
+            <label class="field">
+              <span>Validation seconds</span>
+              <input id="agent-updates-validation-seconds" type="number" min="0" max="86400" value="300">
+            </label>
+            <label class="checkbox-row"><input id="agent-updates-validation" type="checkbox"><span>Validate between batches</span></label>
+            <div class="field">
+              <button class="button button-primary" id="agent-updates-create" type="submit">Create rollout</button>
+            </div>
+          </form>
+          <p class="form-hint" id="agent-updates-hint">New agents are directed in batches. Each agent reports success or failure; the rollout advances when the batch settles.</p>
+          <div id="agent-updates-rollouts" class="table-wrap"></div>
+          <div id="agent-updates-detail" class="table-wrap" hidden></div>
+          <p class="form-error" id="agent-updates-error" role="alert"></p>
+        </article>
       </section>
 
       <section class="page" id="page-settings" hidden>

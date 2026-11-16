@@ -877,6 +877,46 @@ const responses = {
       ],
     },
   },
+  "/api/agent-updates/rollouts": {
+    status: 200,
+    body: {
+      rollouts: [
+        {
+          id: "rollout-demo-0001",
+          profile_id: "prof_1",
+          profile_slug: "default",
+          target_version: "0.8.13",
+          batch_size: 1,
+          validation: false,
+          validation_seconds: 300,
+          status: "active",
+          created_at: "2026-11-06T08:00:00Z",
+          created_by: "admin",
+          summary: { total: 1, pending: 0, directed: 1, succeeded: 0, failed: 0 },
+          agents: [
+            {
+              agent_id: "agt_demo",
+              profile_slug: "default",
+              status: "directed",
+              agent_version: "0.8.12",
+              directed_at: "2026-11-06T08:00:00Z",
+              last_error: "",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  "/api/store/packages/sextant-agent": {
+    status: 200,
+    body: {
+      package: { slug: "sextant-agent", name: "Sextant agent" },
+      releases: [
+        { version: "0.8.12", artifact_type: "agent-wheel", channel: "stable", yanked_at: null },
+        { version: "0.8.13", artifact_type: "agent-wheel", channel: "stable", yanked_at: null },
+      ],
+    },
+  },
 };
 
 const savedViews = [];

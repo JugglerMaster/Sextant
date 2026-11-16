@@ -4,6 +4,16 @@ All notable changes to Sextant are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 semantic versioning.
 
+## [0.8.14] - 2026-11-16
+
+### Added
+
+- Agent update rollout UI on the Updates page:
+  - Create a rollout: pick a profile, target agent release, batch size, and validation settings.
+  - Rollout list with progress bar and per-agent status.
+  - Per-agent status table with last error.
+  - Actions: view, pause/resume, retry failed, rollback an agent.
+
 ## [0.8.13] - 2026-11-16
 
 ### Added

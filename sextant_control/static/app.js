@@ -68,6 +68,10 @@ const state = {
   updates: null,
   updatesBusy: false,
   updatesNotice: "",
+  agentUpdates: null,
+  agentUpdatesBusy: false,
+  agentUpdatesError: "",
+  agentUpdatesSelected: null,
   settingsTab: "profile",
   systemSettings: null,
   systemSettingsLoading: false,
@@ -1052,6 +1056,205 @@ async function rollbackServerUpdate() {
   }
 }
 
+function agentUpdatesStatusClass(status) {
+  const map = {
+    pending: "neutral",
+    directed: "warning",
+    succeeded: "online",
+    failed: "critical",
+    skipped: "neutral",
+    current: "online",
+  };
+  return map[status] || "neutral";
+}
+
+function agentUpdatesStatusLabel(status) {
+  return (status || "").replace(/_/g, " ").replace(/([a-z])([A-Z])/g, " $1 $2").replace(/^./, (c) => c.toUpperCase());
+}
+
+async function loadAgentUpdates(silent = false) {
+  const rollouts = await api("/api/agent-updates/rollouts");
+  const releases = await api("/api/store/packages/sextant-agent");
+  state.agentUpdates = {
+    rollouts: rollouts.rollouts || [],
+    releases: (releases.releases || []).filter(
+      (r) => r.artifact_type === "agent-wheel" && !r.yanked_at,
+    ),
+  };
+  renderAgentUpdatesForm();
+  renderAgentUpdatesRollouts();
+  if (state.agentUpdatesSelected) renderAgentUpdatesDetail();
+}
+
+function renderAgentUpdatesForm() {
+  const profileSelect = $("agent-updates-profile");
+  const versionSelect = $("agent-updates-version");
+  if (!profileSelect || !versionSelect) return;
+  const profiles = state.profiles || [];
+  profileSelect.innerHTML = profiles.length
+    ? profiles
+        .map((p) => ` <option value="${p.id}">${p.name} (${p.slug})</option> `)
+        .join("")
+    : " <option disabled>Select a profile</option> ";
+  const releases = state.agentUpdates?.releases || [];
+  versionSelect.innerHTML = releases.length
+    ? releases
+        .map((r) => ` <option value="${r.version}">${r.version} ${r.channel ? "· " + r.channel : ""}</option> `)
+        .join("")
+    : " <option disabled>No agent releases</option> ";
+}
+
+function renderAgentUpdatesRollouts() {
+  const container = $("agent-updates-rollouts");
+  if (!container) return;
+  const rollouts = state.agentUpdates?.rollouts || [];
+  const label = $("agent-updates-state-label");
+  const error = $("agent-updates-error");
+  if (state.agentUpdatesError) {
+    container.innerHTML = "";
+    error.textContent = state.agentUpdatesError;
+    return;
+  }
+  error.textContent = "";
+  if (!rollouts.length) {
+    container.innerHTML = "<p class='table-empty'>No agent update rollouts yet. Create one above.</p>";
+    return;
+  }
+  let html = "<table class='data-table'>";
+  html += "<thead><tr><th>Rollout</th><th>Version</th><th>Profile</th><th>Status</th><th>Progress</th><th>Agents</th><th></th></tr></thead>";
+  html += "<tbody>";
+  for (const rollout of rollouts) {
+    const summary = rollout.summary || {};
+    const total = summary.total || 0;
+    const done = summary.succeeded || 0;
+    const failed = summary.failed || 0;
+    const pct = total ? Math.round((done / total) * 100) : 0;
+    const statusClass = agentUpdatesStatusClass(rollout.status);
+    const selected = state.agentUpdatesSelected === rollout.id;
+    html += ` <tr><td><strong>${rollout.id.slice(0, 8)}</strong></td><td>${rollout.target_version}</td><td>${rollout.profile_slug || ""}</td><td><span class='status-pill ${statusClass}'>${agentUpdatesStatusLabel(rollout.status)}</span></td><td><div class='progress'><div style='width:${pct}%'></div></div></td><td>${done}/${total}${failed ? ` · ${failed} failed` : ""}</td><td>`;
+    html += ` <button class='button button-ghost button-small' data-agent-update-select='${rollout.id}'>View</button>`;
+    if (rollout.status === "active") {
+      html += ` <button class='button button-ghost button-small' data-agent-update-pause='${rollout.id}' data-agent-update-resume='${rollout.id}'>Pause</button>`;
+      html += ` <button class='button button-ghost button-small' data-agent-update-retry='${rollout.id}'>Retry failed</button>`;
+    }
+    html += "</tr>";
+  }
+  html += "</tbody></table>";
+  container.innerHTML = html;
+  if (label) label.textContent = `${rollouts.length} rollout(s)`;
+}
+
+function renderAgentUpdatesDetail() {
+  const rollout = state.agentUpdates?.rollouts.find((r) => r.id === state.agentUpdatesSelected);
+  if (!rollout) return;
+  const container = $("agent-updates-detail");
+  if (!container) return;
+  const agents = rollout.agents || [];
+  const summary = rollout.summary || {};
+  let html = `<p class='form-hint'>${summary.total || 0} agents · ${summary.pending || 0} pending · ${summary.directed || 0} directed · ${summary.succeeded || 0} succeeded · ${summary.failed || 0} failed</p>`;
+  if (!agents.length) {
+    container.innerHTML = html + "<p class='table-empty'>No agents in this rollout.</p>";
+    return;
+  }
+  html += "<table class='data-table'>";
+  html += "<thead><tr><th>Agent</th><th>Profile</th><th>Status</th><th>Version</th><th>Last error</th><th></th></tr></thead>";
+  html += "<tbody>";
+  for (const agent of agents) {
+    const statusClass = agentUpdatesStatusClass(agent.status);
+    html += ` <tr><td><strong>${agent.agent_id || agent.id}</strong></td><td>${agent.profile_slug || agent.profile || ""}</td><td><span class='status-pill ${statusClass}'>${agentUpdatesStatusLabel(agent.status)}</span></td><td>${agent.agent_version || ""}</td><td>${agent.last_error || agent.error || ""}</td><td>`;
+    html += ` <button class='button button-ghost button-small' data-agent-update-rollback='${agent.agent_id || agent.id}'>Rollback</button>`;
+    html += "</tr>";
+  }
+  html += "</tbody></table>";
+  container.innerHTML = html;
+}
+
+function createAgentUpdateRollout() {
+  const form = $("agent-updates-form");
+  if (!form) return;
+  const profileId = $("agent-updates-profile")?.value;
+  const targetVersion = $("agent-updates-version")?.value;
+  const batchSize = parseInt($("agent-updates-batch-size")?.value || "1", 10);
+  const validation = $("agent-updates-validation")?.checked;
+  const validationSeconds = parseInt($("agent-updates-validation-seconds")?.value || "300", 10);
+  if (!profileId || !targetVersion) {
+    toast("Select a profile and target version.", "error");
+    return;
+  }
+  const confirmed = confirmAction(
+    "Create agent update rollout",
+    `Direct ${state.agentUpdates?.rollouts ? "" : ""}agents in ${profileId} to update to ${targetVersion} (batch ${batchSize})?`,
+    "Create rollout",
+  );
+  if (!confirmed) return;
+  state.agentUpdatesBusy = true;
+  state.agentUpdatesError = "";
+  const error = $("agent-updates-error");
+  const label = $("agent-updates-state-label");
+  if (label) label.textContent = "Creating rollout…";
+  api("/api/agent-updates/rollout", {
+    method: "POST",
+    body: {
+      profile_id: profileId,
+      target_version: targetVersion,
+      batch_size: batchSize,
+      validation,
+      validation_seconds: validationSeconds,
+    },
+  })
+    .then((result) => {
+      state.agentUpdatesError = "";
+      toast("Rollout created.", "ok");
+      form.reset();
+      $("agent-updates-validation-seconds").value = "300";
+      void loadAgentUpdates(true);
+    })
+    .catch((err) => {
+      state.agentUpdatesError = err.message;
+      error.textContent = err.message;
+      toast(err.message, "error");
+    })
+    .finally(() => {
+      state.agentUpdatesBusy = false;
+      if (label) label.textContent = "";
+    });
+}
+
+function agentUpdateAction(action, id) {
+  const endpoints = {
+    pause: "/api/agent-updates/rollouts/",
+    resume: "/api/agent-updates/rollouts/",
+    retry: "/api/agent-updates/rollouts/",
+  };
+  if (action === "pause") {
+    const confirmed = confirmAction("Pause rollout", `Pause rollout ${id}? Agents already directed stay directed.`);
+    if (!confirmed) return;
+    api(`/api/agent-updates/rollouts/${id}/status`, { method: "POST", body: { status: "paused" } }).then(() => {
+      toast("Rollout paused.", "ok");
+      void loadAgentUpdates(true);
+    }).catch((err) => toast(err.message, "error"));
+  } else if (action === "resume") {
+    api(`/api/agent-updates/rollouts/${id}/status`, { method: "POST", body: { status: "active" } }).then(() => {
+      toast("Rollout resumed.", "ok");
+      void loadAgentUpdates(true);
+    }).catch((err) => toast(err.message, "error"));
+  } else if (action === "retry") {
+    api(`/api/agent-updates/rollouts/${id}/retry`, { method: "POST" }).then(() => {
+      toast("Failed agents re-sent.", "ok");
+      void loadAgentUpdates(true);
+    }).catch((err) => toast(err.message, "error"));
+  }
+}
+
+function agentUpdateRollback(agentId) {
+  const confirmed = confirmAction("Rollback agent", `Rollback agent ${agentId} to its previous version?`);
+  if (!confirmed) return;
+  api(`/api/agent-updates/rollback/${agentId}`, { method: "POST" }).then(() => {
+    toast("Rollback sent.", "ok");
+    void loadAgentUpdates(true);
+  }).catch((err) => toast(err.message, "error"));
+}
+
 function navigate(page, load = true) {
   if (!PAGE_META[page]) page = "overview";
   if (ADMIN_PAGES.includes(page) && !state.permissions.admin) page = "overview";
@@ -1101,6 +1304,7 @@ function navigate(page, load = true) {
   if (page === "updates") {
     renderUpdatesPanel();
     if (!state.updates) void checkForUpdates();
+    if (state.permissions?.admin) void loadAgentUpdates(true);
   }
   if (page === "security") renderSecurity();
   if (page === "settings") loadSettingsPage();
@@ -10379,6 +10583,27 @@ function wireEvents() {
   $("updates-check-now")?.addEventListener("click", () => checkForUpdates(true));
   $("updates-apply")?.addEventListener("click", applyServerUpdate);
   $("updates-rollback")?.addEventListener("click", rollbackServerUpdate);
+
+  $("agent-updates-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    createAgentUpdateRollout();
+  });
+  document.addEventListener("click", (event) => {
+    const target = event.target.closest("[data-agent-update-select]");
+    if (target) {
+      state.agentUpdatesSelected = target.dataset.agentUpdateSelect;
+      const detail = $("agent-updates-detail");
+      if (detail) detail.hidden = false;
+      renderAgentUpdatesDetail();
+      return;
+    }
+    const pause = event.target.closest("[data-agent-update-pause]");
+    if (pause) { agentUpdateAction("pause", pause.dataset.agentUpdatePause); return; }
+    const retry = event.target.closest("[data-agent-update-retry]");
+    if (retry) { agentUpdateAction("retry", retry.dataset.agentUpdateRetry); return; }
+    const rollback = event.target.closest("[data-agent-update-rollback]");
+    if (rollback) { agentUpdateRollback(rollback.dataset.agentUpdateRollback); return; }
+  });
 
   $("user-form").addEventListener("submit", async (event) => {
     event.preventDefault();
