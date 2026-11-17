@@ -690,8 +690,21 @@ svg { display: block; }
 .list-row-main small { display: block; margin-top: 2px; color: var(--text-dim); font-family: var(--mono); font-size: 9.5px; }
 .list-row-actions { display: flex; flex: none; gap: 6px; }
 .empty-inline { padding: 28px 12px; color: var(--text-dim); font-size: 12px; text-align: center; }
-.docker-row-actions { display: flex; flex-wrap: wrap; gap: 4px; min-width: 210px; }
-.docker-row-actions .button { padding: 4px 7px; font-size: 9.5px; }
+.docker-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 6px;
+  min-width: 0;
+}
+.docker-row-actions .button { padding: 4px 8px; font-size: 10px; }
+.docker-row-actions .action-sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--line);
+  flex: none;
+}
 .docker-cleanup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 10px; }
 .docker-cleanup-card { display: grid; gap: 6px; padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft, transparent); }
 .docker-cleanup-card h4 { margin: 0; font-size: 12px; }
@@ -1158,6 +1171,9 @@ html[data-theme="light"] .stat-card { min-height: 108px; }
 .settings-tabs { margin-bottom: 16px; padding: 0; }
 .settings-tabs .tab { padding: 10px 12px; }
 .settings-tab-panel { margin-top: 4px; }
+.updates-tabs { margin-bottom: 16px; padding: 0; }
+.updates-tabs .tab { padding: 10px 12px; }
+.updates-tab-panel { margin-top: 4px; }
 #ssh-key-details dd { word-break: break-word; }
 
 #domain-join-log {

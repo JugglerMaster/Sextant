@@ -744,58 +744,67 @@
       </section>
 
       <section class="page" id="page-updates" hidden>
-        <article class="panel" id="updates-panel">
-          <div class="panel-head">
-            <div><p class="eyebrow">Maintenance</p><h2>Server updates</h2></div>
-            <span class="form-hint" id="updates-state-label" aria-live="polite"></span>
-          </div>
-          <dl class="detail-list" id="updates-details"></dl>
-          <div class="update-panel-actions">
-            <button class="button button-secondary button-small" id="updates-check-now" type="button">Check now</button>
-            <button class="button button-primary button-small" id="updates-apply" type="button" hidden>Update now</button>
-            <button class="button button-secondary button-small" id="updates-rollback" type="button" hidden>Rollback</button>
-            <a id="updates-notes" class="button button-ghost button-small" href="#" target="_blank" rel="noopener" hidden>Release notes</a>
-          </div>
-          <p class="form-hint" id="updates-hint">Updates are staged and health-checked before the stable current symlink is switched. The server restarts through a root-owned systemd handoff.</p>
-          <p class="form-error" id="updates-error" role="alert"></p>
-        </article>
+        <nav class="tabs updates-tabs" id="updates-tabs" aria-label="Updates sections">
+          <button class="tab is-active" data-updates-tab="server" type="button">Server</button>
+          <button class="tab" data-updates-tab="agents" type="button">Agents</button>
+        </nav>
 
-        <article class="panel" id="agent-updates-panel">
-          <div class="panel-head">
-            <div><p class="eyebrow">Fleet</p><h2>Agent updates</h2></div>
-            <span class="form-hint" id="agent-updates-state-label" aria-live="polite"></span>
-          </div>
-          <div class="update-panel-actions">
-            <button class="button button-secondary button-small" id="agent-updates-prepare" type="button">Prep agent wheels</button>
-            <span class="form-hint" id="agent-updates-prepare-hint">Downloads every published agent release into the local store and selects the newest version.</span>
-          </div>
-          <form id="agent-updates-form" class="form-grid">
-            <label class="field">
-              <span>Profile</span>
-              <select id="agent-updates-profile" required></select>
-            </label>
-            <label class="field">
-              <span>Target version</span>
-              <select id="agent-updates-version" required></select>
-            </label>
-            <label class="field">
-              <span>Batch size</span>
-              <input id="agent-updates-batch-size" type="number" min="1" max="1000" value="1">
-            </label>
-            <label class="field">
-              <span>Validation seconds</span>
-              <input id="agent-updates-validation-seconds" type="number" min="0" max="86400" value="300">
-            </label>
-            <label class="checkbox-row"><input id="agent-updates-validation" type="checkbox"><span>Validate between batches</span></label>
-            <div class="field">
-              <button class="button button-primary" id="agent-updates-create" type="submit">Create rollout</button>
+        <div class="updates-tab-panel" data-updates-panel="server">
+          <article class="panel" id="updates-panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">Maintenance</p><h2>Server updates</h2></div>
+              <span class="form-hint" id="updates-state-label" aria-live="polite"></span>
             </div>
-          </form>
-          <p class="form-hint" id="agent-updates-hint">New agents are directed in batches. Each agent reports success or failure; the rollout advances when the batch settles.</p>
-          <div id="agent-updates-rollouts" class="table-wrap"></div>
-          <div id="agent-updates-detail" class="table-wrap" hidden></div>
-          <p class="form-error" id="agent-updates-error" role="alert"></p>
-        </article>
+            <dl class="detail-list" id="updates-details"></dl>
+            <div class="update-panel-actions">
+              <button class="button button-secondary button-small" id="updates-check-now" type="button">Check now</button>
+              <button class="button button-primary button-small" id="updates-apply" type="button" hidden>Update now</button>
+              <button class="button button-secondary button-small" id="updates-rollback" type="button" hidden>Rollback</button>
+              <a id="updates-notes" class="button button-ghost button-small" href="#" target="_blank" rel="noopener" hidden>Release notes</a>
+            </div>
+            <p class="form-hint" id="updates-hint">Updates are staged and health-checked before the stable current symlink is switched. The server restarts through a root-owned systemd handoff.</p>
+            <p class="form-error" id="updates-error" role="alert"></p>
+          </article>
+        </div>
+
+        <div class="updates-tab-panel" data-updates-panel="agents" hidden>
+          <article class="panel" id="agent-updates-panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">Fleet</p><h2>Agent updates</h2></div>
+              <span class="form-hint" id="agent-updates-state-label" aria-live="polite"></span>
+            </div>
+            <div class="update-panel-actions">
+              <button class="button button-secondary button-small" id="agent-updates-prepare" type="button">Prep agent wheels</button>
+              <span class="form-hint" id="agent-updates-prepare-hint">Downloads every published agent release into the local store and selects the newest version.</span>
+            </div>
+            <form id="agent-updates-form" class="form-grid">
+              <label class="field">
+                <span>Profile</span>
+                <select id="agent-updates-profile" required></select>
+              </label>
+              <label class="field">
+                <span>Target version</span>
+                <select id="agent-updates-version" required></select>
+              </label>
+              <label class="field">
+                <span>Batch size</span>
+                <input id="agent-updates-batch-size" type="number" min="1" max="1000" value="1">
+              </label>
+              <label class="field">
+                <span>Validation seconds</span>
+                <input id="agent-updates-validation-seconds" type="number" min="0" max="86400" value="300">
+              </label>
+              <label class="checkbox-row"><input id="agent-updates-validation" type="checkbox"><span>Validate between batches</span></label>
+              <div class="field">
+                <button class="button button-primary" id="agent-updates-create" type="submit">Create rollout</button>
+              </div>
+            </form>
+            <p class="form-hint" id="agent-updates-hint">New agents are directed in batches. Each agent reports success or failure; the rollout advances when the batch settles.</p>
+            <div id="agent-updates-rollouts" class="table-wrap"></div>
+            <div id="agent-updates-detail" class="table-wrap" hidden></div>
+            <p class="form-error" id="agent-updates-error" role="alert"></p>
+          </article>
+        </div>
       </section>
 
       <section class="page" id="page-settings" hidden>

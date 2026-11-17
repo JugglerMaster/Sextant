@@ -6,6 +6,28 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [0.8.19] - 2026-11-17
+
+### Added
+
+- Tabs on the Updates page (Server and Agents) so the server-update and
+  agent-rollout sections are no longer one long block of text.
+- Visual separators in the Docker container action row to group lifecycle
+  actions from destructive actions.
+- Test coverage for agent update rollouts (`tests/test_agent_rollouts.py`):
+  create, advance, status, complete, pause, rollback, retry, and 409 guards.
+- Test coverage for `run_power`, `run_service`, and `_normalize_windows_startup`
+  (`tests/test_agent_extra.py`).
+
+### Fixed
+
+- `report_agent_update_result` now records the self-update event through
+  `record_agent_event` (correct `agent_events` columns) instead of an
+  out-of-schema `INSERT` that would 500.
+- Manual agent rollback now inserts the command via a direct `INSERT INTO
+  commands` (the `database.create_command` helper does not exist).
+- Rollout detail now includes `last_batch_settled_at` (validation window).
+
 ## [0.8.18] - 2026-11-17
 
 ### Added

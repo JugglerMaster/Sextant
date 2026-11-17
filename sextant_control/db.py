@@ -2570,6 +2570,7 @@ class Database:
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
                 "completed_at": row["completed_at"] or "",
+                "last_batch_settled_at": row["last_batch_settled_at"] or "",
             }
 
     def list_agent_rollouts(self) -> list[dict[str, Any]]:

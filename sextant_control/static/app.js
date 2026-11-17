@@ -72,6 +72,7 @@ const state = {
   agentUpdatesBusy: false,
   agentUpdatesError: "",
   agentUpdatesSelected: null,
+  updatesTab: "server",
   settingsTab: "profile",
   systemSettings: null,
   systemSettingsLoading: false,
@@ -1393,6 +1394,7 @@ function navigate(page, load = true) {
   if (page === "profiles") loadProfiles();
   if (page === "remote-install") loadRemoteInstall();
   if (page === "updates") {
+    renderUpdatesTabs();
     renderUpdatesPanel();
     if (!state.updates) void checkForUpdates();
     if (state.permissions?.admin) void loadAgentUpdates(true);
@@ -5692,11 +5694,12 @@ function renderDockerContainers(body, detail) {
           { class: "docker-row-actions" },
           button("Inspect", "button-ghost button-small", () => openDockerContainerDetail(container), false),
           button("Logs", "button-ghost button-small", () => openDockerLogs(container), !canMutate),
-          button("Exec", "button-secondary button-small", () => openDockerExec(container), !canExec),
           button("Console", "button-primary button-small", () => openDockerConsole(container), !canExec || !running),
           running
             ? button("Stop", "button-ghost button-small", () => dockerLifecycle(container, "container.stop"), !canMutate)
             : button("Start", "button-secondary button-small", () => dockerLifecycle(container, "container.start"), !canMutate),
+          h("span", { class: "action-sep" }),
+          button("Exec", "button-secondary button-small", () => openDockerExec(container), !canExec),
           button("Restart", "button-ghost button-small", () => dockerLifecycle(container, "container.restart"), !canMutate),
           paused
             ? button("Unpause", "button-ghost button-small", () => dockerLifecycle(container, "container.unpause"), !canMutate)
@@ -5704,6 +5707,7 @@ function renderDockerContainers(body, detail) {
           button("Rename", "button-ghost button-small", () => openDockerRename(container), !canMutate),
           button("Update", "button-ghost button-small", () => openDockerUpdate(container), !canMutate),
           button("Clone", "button-ghost button-small", () => openDockerClone(container), !canMutate),
+          h("span", { class: "action-sep" }),
           button("Remove", "button-danger button-small", () => removeDockerContainer(container), !canMutate),
         ),
       ),
@@ -7207,6 +7211,23 @@ function renderSettingsTabs() {
   });
   document.querySelectorAll("[data-settings-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.settingsPanel !== active;
+  });
+}
+
+function updatesTabs() {
+  return [...document.querySelectorAll("#updates-tabs .tab")];
+}
+
+function renderUpdatesTabs() {
+  let active = state.updatesTab || "server";
+  if (!["server", "agents"].includes(active)) active = "server";
+  state.updatesTab = active;
+  updatesTabs().forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.updatesTab === active);
+    tab.setAttribute("aria-pressed", tab.dataset.updatesTab === active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-updates-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.updatesPanel !== active;
   });
 }
 
@@ -10739,6 +10760,12 @@ function wireEvents() {
     tab.addEventListener("click", () => {
       state.settingsTab = tab.dataset.settingsTab || "profile";
       renderSettings();
+    });
+  });
+  document.querySelectorAll("#updates-tabs .tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      state.updatesTab = tab.dataset.updatesTab || "server";
+      renderUpdatesTabs();
     });
   });
   $("ssh-settings-form")?.elements.source?.addEventListener("change", syncSshFields);

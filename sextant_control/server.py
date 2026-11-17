@@ -8491,17 +8491,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "UPDATE agent_rollout_agents SET status = 'failed', completed_at = ?, last_error = 'manual rollback' WHERE rollout_id = ? AND agent_id = ?",
                     (utcnow_iso(), rollout["id"], agent_id),
                 )
-        database.create_command(
-            command_id,
-            agent_id,
-            "rollback",
-            {
-                "reason": "manual rollback",
-                "rollout_id": rollout["id"] if rollout else "",
-                "requested_at": utcnow_iso(),
-            },
-            user["username"],
-        )
+        with database.transaction() as conn:
+            conn.execute(
+                """INSERT INTO commands (id, agent_id, kind, args, status, created_by, created_at)
+                   VALUES (?, ?, ?, ?, 'queued', ?, ?)""",
+                (
+                    command_id,
+                    agent_id,
+                    "rollback",
+                    dumps({
+                        "reason": "manual rollback",
+                        "rollout_id": rollout["id"] if rollout else "",
+                        "requested_at": utcnow_iso(),
+                    }),
+                    user["username"],
+                    utcnow_iso(),
+                ),
+            )
         database.audit(
             user["username"],
             "agent-update.rollback",
@@ -8522,11 +8528,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if payload.status == "success" and payload.version:
             with database.transaction() as conn:
                 conn.execute("UPDATE agents SET agent_version = ? WHERE id = ?", (payload.version, agent_id))
-                conn.execute(
-                    """INSERT INTO agent_events (agent_id, at, kind, severity, title, body, payload)
-                       VALUES (?, ?, 'update', 'info', 'Self update applied', ?, ?)
-                       ON CONFLICT(agent_id, at, kind, title) DO UPDATE SET payload = excluded.payload""",
-                    (agent_id, utcnow_iso(), payload.version, dumps({"status": payload.status, "error": payload.error})),
+                database.record_agent_event(
+                    agent_id=agent_id,
+                    kind="update",
+                    severity="info",
+                    title="Self update applied",
+                    detail={"status": payload.status, "version": payload.version, "error": payload.error},
+                    conn=conn,
                 )
         with database.connection() as conn:
             row = conn.execute("SELECT profile_id FROM agents WHERE id = ?", (agent_id,)).fetchone()
