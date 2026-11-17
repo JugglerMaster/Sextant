@@ -6,6 +6,8 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [0.8.18] - 2026-11-17
+
 ### Added
 
 - "Prep agent wheels" action on the Updates page downloads every published
