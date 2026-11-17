@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
+from sextant_control.views import effective_offline_after_seconds
 from tests.helpers import enroll_agent, headers, heartbeat, login, sample_metrics
 
 
@@ -140,6 +143,74 @@ def test_docker_profile_gate_and_cadence_sync_on_heartbeat(client, admin):
     assert beat["policy"]["allow_docker"] is True
     assert beat["policy"]["allow_docker_exec"] is False
     assert beat["policy"]["allow_docker_compose"] is False
+
+
+def test_offline_window_scales_with_profile_heartbeat(settings):
+    assert effective_offline_after_seconds(settings) == 90
+    assert effective_offline_after_seconds(settings, 0) == 90
+    assert effective_offline_after_seconds(settings, 30) == 90
+    assert effective_offline_after_seconds(settings, 60) == 90
+    assert effective_offline_after_seconds(settings, 360) == 450
+
+
+def test_slow_heartbeat_profile_stays_online_between_polls(client, admin, db):
+    profile = next(
+        item
+        for item in client.get("/api/profiles").json()["profiles"]
+        if item["slug"] == "workstation"
+    )
+    settings = profile["settings"]
+    settings["heartbeat_seconds"] = 360
+    updated = client.patch(
+        f"/api/profiles/{profile['id']}",
+        json={"settings": settings},
+        headers=headers(admin),
+    )
+    assert updated.status_code == 200, updated.text
+
+    agent = enroll_agent(admin)
+    beat = heartbeat(admin, agent, sample_metrics())
+    assert beat["profile"]["heartbeat_seconds"] == 360
+    with db.connection() as conn:
+        stored = conn.execute(
+            "SELECT heartbeat_seconds FROM agents WHERE id = ?", (agent["agent_id"],)
+        ).fetchone()
+    assert stored["heartbeat_seconds"] == 360
+
+    def set_last_seen(seconds_ago: int) -> None:
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat(
+            timespec="seconds"
+        ).replace("+00:00", "Z")
+        with db.transaction() as conn:
+            conn.execute(
+                "UPDATE agents SET last_seen = ? WHERE id = ?",
+                (stamp, agent["agent_id"]),
+            )
+
+    # 200s is stale for the 90s default but well inside a 360s cadence.
+    set_last_seen(200)
+    dashboard = client.get("/api/dashboard").json()
+    assert dashboard["stats"]["online"] == 1
+    assert dashboard["agents"][0]["online"] is True
+
+    with db.connection() as conn:
+        events = conn.execute(
+            "SELECT COUNT(*) AS n FROM agent_events WHERE agent_id = ? AND kind = 'online'",
+            (agent["agent_id"],),
+        ).fetchone()["n"]
+    heartbeat(admin, agent, sample_metrics())
+    with db.connection() as conn:
+        after = conn.execute(
+            "SELECT COUNT(*) AS n FROM agent_events WHERE agent_id = ? AND kind = 'online'",
+            (agent["agent_id"],),
+        ).fetchone()["n"]
+    assert after == events
+
+    # Past cadence + grace the agent is genuinely offline.
+    set_last_seen(500)
+    dashboard = client.get("/api/dashboard").json()
+    assert dashboard["stats"]["online"] == 0
+    assert dashboard["agents"][0]["online"] is False
 
 
 def test_unknown_profile_is_rejected(client, admin):

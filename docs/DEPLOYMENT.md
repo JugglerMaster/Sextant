@@ -262,7 +262,7 @@ curl -fsS -b /tmp/rc.cookies \
 # 4. Poll commands/agent detail or use the dashboard Remote tab for the result.
 ```
 
-A healthy agent heartbeat appears as online within `SEXTANT_OFFLINE_AFTER_SECONDS` (default 90) and should show disk/service telemetry.
+A healthy agent heartbeat appears as online within `SEXTANT_OFFLINE_AFTER_SECONDS` (default 90) and should show disk/service telemetry. Agents on profiles with a slower heartbeat get a wider window: one full `heartbeat_seconds` cadence plus a grace period of `max(30, heartbeat_seconds / 4)` seconds, never below `SEXTANT_OFFLINE_AFTER_SECONDS`.
 
 ## Backups
 

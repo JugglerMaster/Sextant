@@ -1663,8 +1663,11 @@ function staleInfo(agent) {
   const now = Date.now();
   const lastSeen = Date.parse(agent.last_seen || "");
   const inventoryAt = Date.parse(agent.service_inventory_at || "");
+  // Mirror the server window: one full cadence plus grace, never below 90s.
+  const heartbeatWindowSeconds =
+    heartbeatSeconds + Math.max(30, Math.floor(heartbeatSeconds / 4));
   const heartbeatStale = Boolean(
-    lastSeen && now - lastSeen > Math.max(2 * heartbeatSeconds * 1000, 90_000),
+    lastSeen && now - lastSeen > Math.max(heartbeatWindowSeconds * 1000, 90_000),
   );
   const inventoryStale = Boolean(
     inventoryAt && now - inventoryAt > inventorySeconds * 1.5 * 1000,

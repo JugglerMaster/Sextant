@@ -16,7 +16,11 @@ from typing import Any
 from . import __version__
 from .config import Settings
 from .db import Database, loads, parse_iso, utcnow, utcnow_iso
-from .views import _agent_alerts
+from .views import (
+    _agent_alerts,
+    effective_offline_after_seconds,
+    heartbeat_seconds_from_row,
+)
 
 logger = logging.getLogger("sextant_control.notifications")
 
@@ -284,10 +288,10 @@ class NotificationService:
                 allow_clear=bool(row["last_seen"]),
             )
             last_seen = parse_iso(row["last_seen"])
-            online = bool(
-                last_seen
-                and (now - last_seen).total_seconds() <= self.settings.offline_after_seconds
+            window = effective_offline_after_seconds(
+                self.settings, heartbeat_seconds_from_row(row)
             )
+            online = bool(last_seen and (now - last_seen).total_seconds() <= window)
             if "offline" in events:
                 self._offline_transition(row, last_seen, online)
             if online:

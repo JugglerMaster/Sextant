@@ -311,6 +311,37 @@ def _decorate_alerts(
     return decorated
 
 
+def heartbeat_seconds_from_row(row: sqlite3.Row, key: str = "heartbeat_seconds") -> int:
+    """Read an agent's negotiated heartbeat cadence, tolerating older rows."""
+    try:
+        value = row[key]
+    except (IndexError, KeyError):
+        return 0
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def effective_offline_after_seconds(
+    settings: Settings, heartbeat_seconds: int | None = None
+) -> int:
+    """Return the online window, allowing for the agent's heartbeat cadence.
+
+    Relaxed profiles may only check in every few minutes, so a window shorter
+    than the cadence would mark a healthy agent offline between polls. Allow
+    one full cadence plus a grace period for jitter and slow requests.
+    """
+    window = max(1, int(settings.offline_after_seconds))
+    try:
+        cadence = int(heartbeat_seconds or 0)
+    except (TypeError, ValueError):
+        cadence = 0
+    if cadence > 0:
+        window = max(window, cadence + max(30, cadence // 4))
+    return window
+
+
 def agent_to_dict(
     row: sqlite3.Row,
     settings: Settings,
@@ -319,7 +350,8 @@ def agent_to_dict(
 ) -> dict[str, Any]:
     now = now or datetime.now().astimezone()
     last_seen = parse_iso(row["last_seen"])
-    online = bool(last_seen and (now - last_seen).total_seconds() <= settings.offline_after_seconds)
+    window = effective_offline_after_seconds(settings, heartbeat_seconds_from_row(row))
+    online = bool(last_seen and (now - last_seen).total_seconds() <= window)
     disks = loads(row["disks"], [])
     gpus = loads(row["gpus"], [])
     services = loads(row["services"], [])
@@ -408,9 +440,10 @@ def docker_host_to_dict(
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     last_seen = parse_iso(row["agent_last_seen"])
-    online = bool(
-        last_seen and (now - last_seen).total_seconds() <= config.offline_after_seconds
+    window = effective_offline_after_seconds(
+        config, heartbeat_seconds_from_row(row, "agent_heartbeat_seconds")
     )
+    online = bool(last_seen and (now - last_seen).total_seconds() <= window)
     inventory_at = parse_iso(row["inventory_at"])
     age_seconds = None
     if inventory_at is not None:

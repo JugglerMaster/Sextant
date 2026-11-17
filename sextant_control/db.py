@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS agents (
     watch_services TEXT NOT NULL DEFAULT '[]',
     policy TEXT NOT NULL DEFAULT '{"allow_shell":true,"allow_power":true,"allow_service":true,"allow_packages":false}',
     profile_id TEXT NOT NULL DEFAULT 'prof_workstation',
+    heartbeat_seconds INTEGER NOT NULL DEFAULT 30,
     enrolled_at TEXT NOT NULL,
     last_seen TEXT,
     service_inventory_at TEXT,
@@ -878,6 +879,8 @@ class Database:
             )
         if "profile_id" not in agent_columns:
             conn.execute("ALTER TABLE agents ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'prof_workstation'")
+        if "heartbeat_seconds" not in agent_columns:
+            conn.execute("ALTER TABLE agents ADD COLUMN heartbeat_seconds INTEGER NOT NULL DEFAULT 30")
         if "service_inventory_at" not in agent_columns:
             conn.execute("ALTER TABLE agents ADD COLUMN service_inventory_at TEXT")
 
@@ -3297,7 +3300,8 @@ class Database:
     @staticmethod
     def _docker_host_select() -> str:
         return """SELECT d.*, a.name AS agent_name, a.hostname AS agent_hostname,
-                         a.os AS agent_os, a.last_seen AS agent_last_seen
+                         a.os AS agent_os, a.last_seen AS agent_last_seen,
+                         a.heartbeat_seconds AS agent_heartbeat_seconds
                   FROM docker_hosts d
                   JOIN agents a ON a.id = d.agent_id
                   WHERE d.reason NOT IN ('disabled', 'unsupported_os')

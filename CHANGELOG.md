@@ -36,6 +36,14 @@ semantic versioning.
 - Windows self-update now records `.previous_version` after switching the
   `current` junction, so `sextant-agent rollback` works there too. The POSIX
   switch path ignores legacy `.venv` targets instead of failing.
+- Agents on profiles with a slow heartbeat no longer flap offline between
+  check-ins. The online window is now one full `heartbeat_seconds` cadence plus
+  a grace period (`max(30, heartbeat_seconds / 4)`), never below
+  `SEXTANT_OFFLINE_AFTER_SECONDS`, so a 360s Workstation cadence stays online
+  instead of being marked offline 90s after every heartbeat. The negotiated
+  cadence is stored on the agent row and used by the dashboard, command
+  policy, discovery relay, notification loop, Docker host view, and the
+  heartbeat-stale badge.
 
 ## [0.8.14] - 2026-11-16
 

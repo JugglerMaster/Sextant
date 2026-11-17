@@ -177,6 +177,8 @@ from .views import (
     discovered_device_to_dict,
     discovery_event_to_dict,
     discovery_scan_to_dict,
+    effective_offline_after_seconds,
+    heartbeat_seconds_from_row,
     role_at_least,
     session_to_dict,
     store_package_to_dict,
@@ -1265,7 +1267,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="Administrator access required for domain commands.")
         with database.transaction() as conn:
             agent = conn.execute(
-                "SELECT id, name, last_seen, policy, profile_id, os FROM agents WHERE id = ?",
+                "SELECT id, name, last_seen, policy, profile_id, os, heartbeat_seconds FROM agents WHERE id = ?",
                 (agent_id,),
             ).fetchone()
             if agent is None:
@@ -1357,7 +1359,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
             last_seen = parse_iso(agent["last_seen"])
             online = bool(
-                last_seen and (utcnow() - last_seen).total_seconds() <= config.offline_after_seconds
+                last_seen
+                and (utcnow() - last_seen).total_seconds()
+                <= effective_offline_after_seconds(
+                    config, heartbeat_seconds_from_row(agent)
+                )
             )
             if not online and config.offline_command_policy == "reject":
                 raise HTTPException(
@@ -6485,7 +6491,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "segment": segment,
                     "online": bool(
                         last_seen
-                        and (now - last_seen).total_seconds() <= config.offline_after_seconds
+                        and (now - last_seen).total_seconds()
+                        <= effective_offline_after_seconds(
+                            config, heartbeat_seconds_from_row(row)
+                        )
                     ),
                     "eligible": not reasons,
                     "reasons": reasons,
@@ -6922,6 +6931,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         profile_id = profile_row["id"]
                     break
             profile_settings = loads(profile_row["settings"], {}) if profile_row is not None else {}
+            heartbeat_seconds = _profile_heartbeat_seconds(profile_settings)
             default_policy = dumps(
                 _policy_from_settings(profile_settings)
                 if profile_settings
@@ -6960,7 +6970,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 conn.execute(
                     """UPDATE agents SET
                        name = ?, hostname = ?, machine_id = ?, os = ?, os_version = ?, arch = ?,
-                       ip = ?, mac = ?, token_hash = ?, agent_version = ?, profile_id = ?, policy = ?, enrolled_at = ?, last_seen = NULL
+                       ip = ?, mac = ?, token_hash = ?, agent_version = ?, heartbeat_seconds = ?,
+                       profile_id = ?, policy = ?, enrolled_at = ?, last_seen = NULL
                        WHERE id = ?""",
                     (
                         (payload.name or payload.hostname)[:255],
@@ -6973,6 +6984,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         payload.mac,
                         hash_token(agent_token),
                         payload.agent_version,
+                        heartbeat_seconds,
                         profile_id,
                         default_policy,
                         utcnow_iso(),
@@ -6991,8 +7003,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 conn.execute(
                     """INSERT INTO agents
                        (id, name, hostname, machine_id, os, os_version, arch, ip, mac, token_hash,
-                        agent_version, tags, notes, watch_services, policy, profile_id, enrolled_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        agent_version, heartbeat_seconds, tags, notes, watch_services, policy, profile_id, enrolled_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         agent_id,
                         (payload.name or payload.hostname)[:255],
@@ -7005,6 +7017,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         payload.mac,
                         hash_token(agent_token),
                         payload.agent_version,
+                        heartbeat_seconds,
                         dumps(tags),
                         payload.notes,
                         dumps(watch_services),
@@ -7027,7 +7040,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "agent_token": agent_token,
             "reenrolled": reenrolled,
             "server_time": utcnow_iso(),
-            "heartbeat_interval": int(profile_settings.get("heartbeat_seconds", 30)),
+            "heartbeat_interval": _profile_heartbeat_seconds(profile_settings),
             "profile": profile_row["slug"] if profile_row is not None else "workstation",
             "version": __version__,
         }
@@ -7093,21 +7106,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
         previous_packages = _package_snapshot(database.list_package_inventory(agent_id))
         previous_version = str(agent["agent_version"] or "")
-        old_last_seen = parse_iso(agent["last_seen"] if "last_seen" in agent else None)
-        was_online = bool(
-            old_last_seen
-            and (now - old_last_seen).total_seconds() <= config.offline_after_seconds
-        )
         profile_row_for_docker = database.get_profile_by_id(
             agent["profile_id"]
         ) or database.get_profile_by_slug("workstation")
+        heartbeat_seconds = _profile_heartbeat_seconds(
+            _profile_settings(profile_row_for_docker)
+        )
+        old_last_seen = parse_iso(agent["last_seen"] if "last_seen" in agent else None)
+        was_online = bool(
+            old_last_seen
+            and (now - old_last_seen).total_seconds()
+            <= effective_offline_after_seconds(
+                config, heartbeat_seconds_from_row(agent)
+            )
+        )
         docker_allowed = _docker_effective_allowed(agent, profile_row_for_docker, config)
 
         with database.transaction() as conn:
             conn.execute(
                 """UPDATE agents SET
                    hostname = ?, machine_id = ?, os = ?, os_version = ?, arch = ?, ip = ?, mac = ?,
-                   agent_version = ?, last_seen = ?, service_inventory_at = ?, cpu_pct = ?, mem_pct = ?, mem_total = ?, mem_used = ?,
+                   agent_version = ?, heartbeat_seconds = ?, last_seen = ?, service_inventory_at = ?, cpu_pct = ?, mem_pct = ?, mem_total = ?, mem_used = ?,
                    uptime_seconds = ?, disks = ?, gpus = ?, services = ?, startup = ?, extra = ?
                    WHERE id = ?""",
                 (
@@ -7119,6 +7138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     (payload.ip or agent["ip"])[:128],
                     (payload.mac or agent["mac"])[:64],
                     (payload.agent_version or agent["agent_version"])[:64],
+                    heartbeat_seconds,
                     stamp,
                     payload.service_inventory_collected_at or agent["service_inventory_at"],
                     round(float(payload.cpu_pct), 1),
@@ -9730,6 +9750,15 @@ def _docker_cleanup_preview(database: Database, agent_id: str) -> list[dict[str,
 def _profile_settings(row: Any) -> dict[str, Any]:
     settings = loads(row["settings"], {}) if row is not None else {}
     return settings if isinstance(settings, dict) else {}
+
+
+def _profile_heartbeat_seconds(settings: dict[str, Any]) -> int:
+    """Clamp the profile cadence the same way the agent does."""
+    try:
+        value = int(settings.get("heartbeat_seconds", 30))
+    except (TypeError, ValueError):
+        value = 30
+    return max(10, min(value, 3600))
 
 
 def _profile_payload(row: Any) -> dict[str, Any] | None:

@@ -49,7 +49,7 @@ Inventory updated: 3h ago · 24h cadence
 
 Do not label an old inventory as “stale” solely because the heartbeat is recent — they run on different cadences. Staleness rules:
 
-- **Heartbeat stale** when `now - last_seen > max(2 × heartbeat_seconds, offline threshold)`.
+- **Heartbeat stale** when `now - last_seen` exceeds the server's online window: `max(heartbeat_seconds + max(30, heartbeat_seconds / 4), offline threshold)`.
 - **Inventory stale** when `now - inventory_updated > 1.5 × profile package_inventory_seconds` (or service cadence for services).
 - Show the cadence next to the age so an old timestamp is understandable.
 

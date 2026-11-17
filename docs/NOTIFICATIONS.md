@@ -12,7 +12,7 @@ Related: [Roadmap](ROADMAP.md), [Architecture](ARCHITECTURE.md), [UI status](UI.
 The server now runs a background notification evaluator when Telegram is configured. With no browser open it:
 
 - reconciles disk, memory, GPU-temperature, and watched-service conditions for every agent;
-- detects offline → online transitions using `SEXTANT_OFFLINE_AFTER_SECONDS`;
+- detects offline → online transitions using the agent's heartbeat cadence (one full cadence plus a grace period) with `SEXTANT_OFFLINE_AFTER_SECONDS` as the floor;
 - sends one Telegram alert per incident, plus an optional recovery message;
 - respects the existing alert acknowledgement, snooze, and acknowledgement-expiry behavior;
 - retries failed deliveries with backoff and keeps an outbox in SQLite.
