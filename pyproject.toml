@@ -27,7 +27,7 @@ classifiers = [
   "Topic :: System :: Networking",
 ]
 dependencies = [
-  "fastapi>=0.162,<0.163",
+  "fastapi>=0.162.2,<0.163",
   "starlette>=1.10,<2",
   "uvicorn>=0.30,<1",
 ]
