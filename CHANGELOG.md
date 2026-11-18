@@ -6,6 +6,8 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [0.8.20] - 2026-11-17
+
 ### Fixed
 
 - Agent update rollouts no longer stall when the agent had already logged a
