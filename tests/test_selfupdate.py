@@ -112,6 +112,77 @@ def test_selfupdate_apply_verifies_and_switches(monkeypatch, tmp_path):
     assert switched == ["1.2.3"]
 
 
+def test_selfupdate_apply_linux_schedules_restart(monkeypatch, tmp_path):
+    data = b"new-wheel"
+    sha = hashlib.sha256(data).hexdigest()
+    info = {
+        "available": True,
+        "version": "1.2.3",
+        "sha256": sha,
+        "size": len(data),
+        "filename": "sextant-1.2.3-py3-none-any.whl",
+        "download_url": "/api/agent/agt_test/store/releases/rel_test/download",
+    }
+
+    def fake_download(self, path, destination, max_bytes=0):
+        Path(destination).write_bytes(data)
+        return len(data)
+
+    scheduled = []
+    monkeypatch.setattr("sextant_agent.selfupdate._is_windows", lambda: False)
+    monkeypatch.setattr("sextant_agent.selfupdate.AgentClient.download", fake_download)
+    monkeypatch.setattr("sextant_agent.selfupdate._stage_venv", lambda version, wheel, install_dir: tmp_path / "venv")
+    monkeypatch.setattr("sextant_agent.selfupdate._health_check", lambda venv, cfg: True)
+    monkeypatch.setattr("sextant_agent.selfupdate._switch_current", lambda install_dir, version: None)
+    monkeypatch.setattr("sextant_agent.selfupdate._prune_releases", lambda install_dir: None)
+    monkeypatch.setattr("sextant_agent.selfupdate._schedule_agent_restart", lambda: scheduled.append(True))
+
+    result = selfupdate.apply_update(
+        _agent_config(),
+        info,
+        install_dir=tmp_path,
+        config_path=tmp_path / "config.json",
+        restart=True,
+    )
+    assert result["status"] == "switched"
+    assert result["restart_required"] is False
+    assert scheduled == [True]
+
+    # Without restart, no scheduling.
+    result2 = selfupdate.apply_update(
+        _agent_config(),
+        info,
+        install_dir=tmp_path,
+        config_path=tmp_path / "config.json",
+        restart=False,
+    )
+    assert result2["status"] == "switched"
+    assert result2["restart_required"] is True
+    assert scheduled == [True]
+    info = {
+        "available": True,
+        "version": "1.2.3",
+        "sha256": "0" * 64,
+        "size": 4,
+        "filename": "wheel.whl",
+        "download_url": "/download",
+    }
+
+    def fake_download(self, path, destination, max_bytes=0):
+        Path(destination).write_bytes(b"data")
+        return 4
+
+    monkeypatch.setattr("sextant_agent.selfupdate.AgentClient.download", fake_download)
+    result = selfupdate.apply_update(
+        _agent_config(),
+        info,
+        install_dir=tmp_path,
+        config_path=tmp_path / "config.json",
+    )
+    assert result["status"] == "failed"
+    assert "verification" in result["error"].lower()
+
+
 def test_selfupdate_rejects_bad_hash(monkeypatch, tmp_path):
     info = {
         "available": True,
@@ -294,3 +365,39 @@ def test_switch_current_ignores_legacy_previous(tmp_path):
     assert not (install / ".previous_version").exists()
 
 
+
+
+def test_rollback_update_schedules_restart(monkeypatch, tmp_path):
+    (tmp_path / ".previous_version").write_text("0.8.0", encoding="utf-8")
+    (tmp_path / "releases" / "0.8.0" / "venv").mkdir(parents=True)
+
+    scheduled = []
+    monkeypatch.setattr("sextant_agent.selfupdate._is_windows", lambda: False)
+    monkeypatch.setattr("sextant_agent.selfupdate._health_check", lambda venv, cfg: True)
+    monkeypatch.setattr("sextant_agent.selfupdate._switch_current", lambda install_dir, version: None)
+    monkeypatch.setattr("sextant_agent.selfupdate._prune_releases", lambda install_dir: None)
+    monkeypatch.setattr("sextant_agent.selfupdate._schedule_agent_restart", lambda: scheduled.append(True))
+
+    result = selfupdate.rollback_update(
+        _agent_config(),
+        install_dir=tmp_path,
+        config_path=tmp_path / "config.json",
+        restart=True,
+    )
+    assert result["status"] == "switched"
+    assert result["version"] == "0.8.0"
+    assert result["restart_required"] is False
+    assert scheduled == [True]
+
+    # Without restart, no scheduling.
+    (tmp_path / ".previous_version").write_text("0.8.0", encoding="utf-8")
+    (tmp_path / "releases" / "0.8.0" / "venv").mkdir(parents=True, exist_ok=True)
+    result2 = selfupdate.rollback_update(
+        _agent_config(),
+        install_dir=tmp_path,
+        config_path=tmp_path / "config.json",
+        restart=False,
+    )
+    assert result2["status"] == "switched"
+    assert result2["restart_required"] is True
+    assert scheduled == [True]

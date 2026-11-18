@@ -2448,6 +2448,16 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     throw new Error("wake action did not report success");
   }
 
+  const updateAgentButton = findButton(window.document.getElementById("drawer-actions"), "Update agent");
+  if (!updateAgentButton) throw new Error("update agent action missing for an online agent");
+  updateAgentButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await sleep(30);
+  const updateConfirm = window.document.getElementById("confirm-dialog");
+  if (!updateConfirm.open) throw new Error("update agent confirmation dialog did not open");
+  if (!updateConfirm.textContent.includes("Update")) throw new Error("update agent confirmation text missing");
+  updateConfirm.close("cancel");
+  await sleep(30);
+
   window.document.querySelector('[data-page="users"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await sleep(30);
   const userList = window.document.getElementById("user-list");

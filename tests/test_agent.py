@@ -31,6 +31,8 @@ from sextant_agent.executor import (
     run_capture,
     run_shell,
     truncate_output,
+    _is_agent_service_restart,
+    _schedule_agent_restart,
 )
 
 
@@ -177,6 +179,40 @@ def test_run_shell_and_timeout():
     timed = run_shell("bash", "sleep 3", 1, 1000)
     assert timed["status"] == "failed"
     assert "timed out" in timed["error"].lower()
+
+
+def test_is_agent_service_restart_detection():
+    # Positive cases: restart/stop/reload of the agent service.
+    assert _is_agent_service_restart("systemctl restart sextant-agent")
+    assert _is_agent_service_restart("systemctl stop sextant-agent")
+    assert _is_agent_service_restart("systemctl reload sextant-agent")
+    assert _is_agent_service_restart("systemctl restart sextant.agent")
+    assert _is_agent_service_restart("schtasks /End /TN SextantAgent")
+    assert _is_agent_service_restart("Restart-Service SextantAgent")
+    assert _is_agent_service_restart("systemctl kill sextant-agent")
+
+    # Negative cases: status checks, other services, unrelated commands.
+    assert not _is_agent_service_restart("systemctl status sextant-agent")
+    assert not _is_agent_service_restart("systemctl restart nginx")
+    assert not _is_agent_service_restart("ls /opt")
+    assert not _is_agent_service_restart("echo sextant-agent")
+    assert not _is_agent_service_restart("")
+
+
+def test_run_shell_schedules_agent_restart(monkeypatch):
+    scheduled = []
+    monkeypatch.setattr("sextant_agent.executor._schedule_agent_restart", lambda: scheduled.append(True))
+    result = run_shell("bash", "systemctl restart sextant-agent", 5, 1000)
+    assert result["status"] == "succeeded"
+    assert result["exit_code"] == 0
+    assert "Scheduled restart" in result["stdout"]
+    assert scheduled == [True]
+
+    # Normal commands are not intercepted.
+    result = run_shell("bash", "printf 'hello'", 5, 1000)
+    assert result["status"] == "succeeded"
+    assert result["stdout"] == "hello"
+    assert scheduled == [True]  # no additional call
 
 
 def test_executor_chunk_callback_streams_stdout_and_stderr_before_completion():
