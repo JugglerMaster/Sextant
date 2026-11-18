@@ -2320,6 +2320,7 @@ function renderDrawerActions(agent) {
       actions.append(button("Reboot", "button-secondary", () => queuePower(agent, "reboot")));
       actions.append(button("Shut down", "button-danger", () => queuePower(agent, "shutdown")));
     }
+    actions.append(button("Update agent", "button-secondary", () => updateAgent(agent)));
   }
   if (state.permissions.admin) {
     if (state.profiles.length) {
@@ -4054,6 +4055,28 @@ async function wakeAgent(agent) {
   try {
     const result = await api(`/api/agents/${agent.id}/wake`, { method: "POST", body: {} });
     toast(`Wake packet sent to ${result.mac} (${result.sent} packets).`);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function updateAgent(agent) {
+  if (!state.permissions.operate) return toast("Operator access required.", "error");
+  const isWindows = String(agent.os || "").toLowerCase() === "windows";
+  const command = isWindows
+    ? `& "C:\\ProgramData\\SextantAgent\\current\\Scripts\\sextant-agent.exe" update --config "C:\\ProgramData\\SextantAgent\\config.json" --apply --restart`
+    : `/opt/sextant-agent/current/bin/sextant-agent update --config /etc/sextant-agent/config.json --apply --restart`;
+  const shell = isWindows ? "powershell" : "bash";
+  const confirmed = await confirmAction(
+    `Update ${agent.name}?`,
+    "This downloads and applies the latest agent release from the server, then restarts the agent. The machine's agent will be briefly offline during the restart.",
+    "Update agent",
+  );
+  if (!confirmed) return;
+  try {
+    await sendCommand(agent.id, "shell", { shell, command, timeout: 300 }, "Agent update command queued.");
+    loadAgentDetail(agent.id);
+    loadDashboard(true);
   } catch (error) {
     toast(error.message, "error");
   }

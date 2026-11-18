@@ -6,7 +6,14 @@ semantic versioning.
 
 ## [Unreleased]
 
-## [0.8.21] - 2026-11-18
+## [0.8.22] - 2026-11-18
+
+### Added
+
+- Manual **Update agent** button in the device drawer (next to Reboot/Shut
+  down) that queues an agent self-update command. The command runs the
+  agent's update CLI with `--apply --restart`; the restart is scheduled in a
+  detached process so the result is reported before the service is torn down.
 
 ### Fixed
 
