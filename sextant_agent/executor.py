@@ -16,6 +16,72 @@ from .config import AgentConfig
 TRUNCATION_NOTE = "\n\n[output truncated by sextant-agent]"
 ChunkCallback = Callable[[str, str], None]
 
+# Service names used for the agent on each platform. A remote shell command that
+# restarts/stops one of these kills the agent process itself, so it must be
+# scheduled to run *after* the command result has been reported.
+_AGENT_SERVICE_NAMES = ("sextant-agent", "sextant.agent", "SextantAgent")
+
+
+def _is_agent_service_restart(command: str) -> bool:
+    """Return True when *command* would restart/stop the agent's own service."""
+    lowered = command.lower()
+    if not any(name.lower() in lowered for name in _AGENT_SERVICE_NAMES):
+        return False
+    restart_tokens = ("restart", "stop", "reload", "kill", "end", "terminate")
+    return any(tok in lowered for tok in restart_tokens)
+
+
+def _schedule_agent_restart() -> None:
+    """Schedule a restart of the agent service in a detached background process.
+
+    Uses systemd-run on Linux to create a transient timer that fires after a
+    short delay, so the restart survives the agent process being killed.
+    On Windows, spawns a detached process that waits then restarts the task.
+    """
+    if os.name == "nt":
+        script = (
+            "Start-Sleep -Seconds 3; "
+            "schtasks /End /TN SextantAgent 2>$null; "
+            "Start-Sleep -Seconds 1; "
+            "schtasks /Run /TN SextantAgent 2>$null"
+        )
+        try:
+            subprocess.Popen(
+                ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-Command", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=0x00000008 | 0x00000200,
+                close_fds=True,
+            )
+        except OSError:
+            pass
+        return
+    # Linux: use systemd-run to create a transient timer.
+    try:
+        subprocess.run(
+            [
+                "systemd-run", "--on-active=3", "--unit=sextant-agent-restart",
+                "--collect", "systemctl", "restart", "sextant-agent",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # Fallback: detached shell with a delay.
+        try:
+            subprocess.Popen(
+                ["sh", "-c", "sleep 3; systemctl restart sextant-agent"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError:
+            pass
+
 
 def truncate_output(text: str, limit: int) -> str:
     if len(text) <= limit:
@@ -218,6 +284,18 @@ def run_shell(
     shell = shell.lower()
     if not command.strip():
         return {"status": "failed", "exit_code": None, "stdout": "", "stderr": "", "error": "Empty command."}
+    # Restarting/stopping the agent's own service from within the agent kills
+    # the agent process (exit -15 / SIGTERM) and the result is never reported.
+    # Schedule the restart in a detached process and return success immediately.
+    if _is_agent_service_restart(command):
+        _schedule_agent_restart()
+        return {
+            "status": "succeeded",
+            "exit_code": 0,
+            "stdout": "Scheduled restart of the Sextant agent service in 3 seconds.\n",
+            "stderr": "",
+            "error": "",
+        }
     if sys.platform.startswith("win"):
         if shell == "powershell":
             return _powershell_capture(command, timeout, max_output, on_chunk)

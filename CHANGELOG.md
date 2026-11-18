@@ -6,11 +6,16 @@ semantic versioning.
 
 ## [Unreleased]
 
-## [0.8.20] - 2026-11-17
+## [0.8.21] - 2026-11-18
 
 ### Fixed
 
-- Agent update rollouts no longer stall when the agent had already logged a
+- Restarting or stopping the agent's own service through Sextant's remote
+  shell no longer fails with exit -15 (SIGTERM). The agent now detects
+  commands that target the agent service and schedules the restart in a
+  detached process, returning success immediately so the result is reported
+  before the service is torn down. The same fix applies to the self-update
+  and rollback restart paths.
   notice for the target version: a `directed` update now bypasses the
   notify-only dedupe and is applied on the next heartbeat.
 - A directed rollout is marked successful when the agent heartbeats from the

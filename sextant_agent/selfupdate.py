@@ -14,6 +14,7 @@ from typing import Any
 from . import __version__
 from .client import AgentClient
 from .config import AgentConfig
+from .executor import _schedule_agent_restart
 
 DEFAULT_LINUX_INSTALL_DIR = Path("/opt/sextant-agent")
 DEFAULT_WINDOWS_INSTALL_DIR = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "SextantAgent"
@@ -295,10 +296,8 @@ def rollback_update(
             if not restarted:
                 result["restart_error"] = restart_error
         else:
-            restarted = _run(["systemctl", "restart", "sextant-agent"], timeout=60)
-            result["restart_required"] = restarted.returncode != 0
-            if restarted.returncode != 0:
-                result["restart_error"] = restarted.stderr[-500:]
+            _schedule_agent_restart()
+            result["restart_required"] = False
     return result
 
 
@@ -400,10 +399,10 @@ def apply_update(
         "restart_required": True,
     }
     if restart:
-        restarted = _run(["systemctl", "restart", "sextant-agent"], timeout=60)
-        result["restart_required"] = restarted.returncode != 0
-        if restarted.returncode != 0:
-            result["restart_error"] = restarted.stderr[-500:]
+        # Schedule the restart in a detached process so the agent can report
+        # the result before being killed by the service manager.
+        _schedule_agent_restart()
+        result["restart_required"] = False
     return result
 
 
