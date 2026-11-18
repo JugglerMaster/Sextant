@@ -15,6 +15,8 @@ semantic versioning.
   agent's update CLI with `--apply --restart`; the restart is scheduled in a
   detached process so the result is reported before the service is torn down.
 
+## [0.8.21] - 2026-11-18
+
 ### Fixed
 
 - Restarting or stopping the agent's own service through Sextant's remote
