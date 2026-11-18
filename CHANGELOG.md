@@ -6,6 +6,16 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Agent update rollouts no longer stall when the agent had already logged a
+  notice for the target version: a `directed` update now bypasses the
+  notify-only dedupe and is applied on the next heartbeat.
+- A directed rollout is marked successful when the agent heartbeats from the
+  target version. Self-updates restart the agent before it can post
+  `/update/result`, so the result report could be lost and the rollout would
+  time out even though the update applied.
+
 ## [0.8.19] - 2026-11-17
 
 ### Added

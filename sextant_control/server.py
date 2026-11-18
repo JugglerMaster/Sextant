@@ -7378,11 +7378,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "notes_url": release["notes_url"],
                     "download_url": f"/api/agent/{agent_id}/store/releases/{release['id']}/download",
                 }
-        # If the agent is in a directed rollout state, override with the directed update
+        # If the agent is in a directed rollout state, override with the directed
+        # update. Self-updates restart the agent before it can post a result, so
+        # also treat a heartbeat from the target version as rollout success.
         rollout = database.get_active_rollout_for_profile(profile_row_for_docker["id"])
         if rollout:
             agent_state = database.get_rollout_agent_state(rollout["id"], agent_id)
-            if agent_state and agent_state["status"] == "directed":
+            if (
+                agent_state
+                and agent_state["status"] == "directed"
+                and current_version
+                and updates.parse_version(current_version)
+                >= updates.parse_version(rollout["target_version"])
+            ):
+                database.set_rollout_agent_status(
+                    rollout["id"],
+                    agent_id,
+                    "succeeded",
+                    completed_at=utcnow_iso(),
+                )
+                advance_rollout(rollout["id"], database, config)
+                rollout = database.get_active_rollout_for_profile(
+                    profile_row_for_docker["id"]
+                )
+                agent_state = (
+                    database.get_rollout_agent_state(rollout["id"], agent_id)
+                    if rollout
+                    else None
+                )
+            if rollout and agent_state and agent_state["status"] == "directed":
                 agent_update_info = _directed_update_payload(database, rollout, agent)
         return {
             "server_time": utcnow_iso(),

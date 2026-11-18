@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from sextant_control import selfupdate, updates
 from sextant_control.db import loads, utcnow_iso
 from sextant_control.server import _rollout_sweep, advance_rollout, create_app
-from tests.helpers import headers, enroll_agent, login
+from tests.helpers import headers, enroll_agent, heartbeat, login, sample_metrics
 
 
 def _feed_release(version: str) -> dict:
@@ -140,6 +140,35 @@ def test_report_success_updates_version_and_advances_rollout(settings, monkeypat
     assert detail.status_code == 200, detail.text
     assert detail.json()["status"] == "completed"
     assert detail.json()["summary"]["succeeded"] == 1
+
+
+def test_heartbeat_from_target_version_completes_directed_rollout(settings, monkeypatch):
+    client, admin = _feed_app(settings, monkeypatch)
+    agent = _enroll(client, admin, count=1)[0]
+
+    rollout = client.post(
+        "/api/agent-updates/rollout",
+        json={"profile_id": "prof_workstation", "target_version": "0.9.1"},
+        headers=headers(admin),
+    )
+    assert rollout.status_code == 200, rollout.text
+    rollout_id = rollout.json()["id"]
+
+    # The directed agent is still on the old version, so it keeps receiving
+    # the directed update payload.
+    old_beat = heartbeat(admin, agent, sample_metrics(agent_version="0.9.0"))
+    assert old_beat["agent_update"]["directed"] is True
+
+    # Self-update restarts the agent before it can post /update/result. The
+    # first heartbeat from the target version should still settle the rollout.
+    beat = heartbeat(admin, agent, sample_metrics(agent_version="0.9.1"))
+    assert beat["agent_update"]["available"] is False
+
+    detail = client.get(f"/api/agent-updates/rollouts/{rollout_id}", headers=headers(admin))
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["status"] == "completed"
+    assert detail.json()["summary"]["succeeded"] == 1
+    assert detail.json()["agents"][0]["status"] == "succeeded"
 
 
 def test_report_failure_marks_agent_failed(settings, monkeypatch):

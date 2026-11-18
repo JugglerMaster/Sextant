@@ -462,17 +462,20 @@ class AgentRunner:
             logger.warning("Agent update %s is available but allow_self_update is false.", info.get("version"))
             return
         version = str(info.get("version") or "")
+        if info.get("directed"):
+            # A rollout directive is an instruction to update now. Do not let
+            # the notice dedupe below swallow it when this version was already
+            # announced on an earlier heartbeat.
+            self._apply_directed_update(info)
+            return
         if version and version == self._update_notice:
             return
         self._update_notice = version
-        if info.get("directed"):
-            self._apply_directed_update(info)
-        else:
-            logger.warning(
-                "Agent update %s is available (current %s). Run: sextant-agent update --apply --restart",
-                info.get("version"),
-                info.get("current_version"),
-            )
+        logger.warning(
+            "Agent update %s is available (current %s). Run: sextant-agent update --apply --restart",
+            info.get("version"),
+            info.get("current_version"),
+        )
 
     def _apply_directed_update(self, info: dict[str, Any]) -> None:
         """Apply a server-directed update and report the result."""

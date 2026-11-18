@@ -244,6 +244,7 @@ The agent advertises `update_capable: 1` and its current version in the heartbea
   4. removes and recreates the `current` junction, restoring the previous target if creation fails;
   5. prunes old releases while keeping the active one;
   6. with `--restart`, ends and starts the `SextantAgent` scheduled task and reports `restart_required` if the restart fails.
+- A directed rollout is an explicit update instruction: the agent applies it even if it already logged a notice for that version. Because the restart can interrupt the result POST, the server also settles the rollout when the agent's next heartbeat reports the target version.
 - File locks on the running `.exe` are avoided because the running process lives in the old release directory; the junction only affects the next task start.
 - Keep the previous release; rollback is a junction repoint to the prior release if needed.
 

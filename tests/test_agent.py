@@ -308,6 +308,38 @@ def test_agent_runner_smoke(monkeypatch):
     assert runner.run(once=True) == 0
 
 
+def test_directed_update_bypasses_notice_dedupe(monkeypatch):
+    config = AgentConfig(server_url="https://x", agent_id="agt_1", agent_token="token")
+    runner = AgentRunner(config)
+    runner._update_notice = "9.9.9"
+    applied: list[dict] = []
+    monkeypatch.setattr(runner, "_apply_directed_update", lambda info: applied.append(info))
+
+    # A plain notice for an already-announced version is still suppressed.
+    runner._note_update(
+        {"available": True, "version": "9.9.9", "current_version": "0.8.15"}
+    )
+    assert applied == []
+
+    # A rollout directive for that same version must be applied.
+    runner._note_update(
+        {
+            "available": True,
+            "directed": True,
+            "version": "9.9.9",
+            "current_version": "0.8.15",
+        }
+    )
+    assert applied == [
+        {
+            "available": True,
+            "directed": True,
+            "version": "9.9.9",
+            "current_version": "0.8.15",
+        }
+    ]
+
+
 def test_enrollment_identity_shape():
     config = AgentConfig(server_url="https://x", agent_id="a", agent_token="b", name="named")
     identity = enrollment_identity(config)
